@@ -3,4 +3,3 @@ result-*
 **/rust-lib/target/
 **/rust-lib/generated/
 **/logos-rust-sdk-src
-tools/qml-harness/doc.json
