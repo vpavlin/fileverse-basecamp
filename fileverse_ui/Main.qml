@@ -68,6 +68,26 @@ Item {
     property int sheetIndex: 0
     property bool showDetails: false
     property bool showSettings: false
+    property var node: ({ reachable: false })
+    property bool keeping: false
+    function refreshNode() { root.core("node_status", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.node = r }) }
+    readonly property var recentEntry: {
+        if (!root.docv) return null
+        var rs = root.snap.recent || []
+        for (var i = 0; i < rs.length; i++) if (rs[i].portal === root.docv.portal && rs[i].fileId === root.docv.fileId) return rs[i]
+        return null
+    }
+    readonly property bool kept: root.recentEntry !== null && !!root.recentEntry.kept
+    function keepCopy() {
+        if (!root.docv || root.keeping) return
+        root.keeping = true
+        root.core("keep", [root.docv.portal, root.docv.fileId], function (raw) {
+            root.keeping = false
+            var r = root.j(raw)
+            if (r && r.ok) { root.say("Kept on your IPFS node: " + r.blocks + " blocks, " + r.pinned + " pinned"); root.refresh() }
+            else root.error = (r && r.error) || "Keeping a copy failed - is your IPFS node running?"
+        })
+    }
     readonly property bool loading: root.jobId !== ""
 
     function say(msg) { root.toast = msg; toastTimer.restart() }
@@ -115,6 +135,7 @@ Item {
             if (r.state === "done") {
                 root.jobId = ""
                 root.docv = r.result
+                root.refreshNode()
                 root.presenting = false
                 root.slideIndex = 0
                 root.tabIndex = 0
@@ -142,6 +163,7 @@ Item {
     Component.onCompleted: {
         if (typeof logos !== "undefined" && logos && logos.onModuleEvent) logos.onModuleEvent(root.coreName, "job_changed")
         root.refresh()
+        root.refreshNode()
     }
 
     // Off-screen editor used only to put text on the clipboard.
@@ -314,6 +336,26 @@ Item {
                         onClicked: root.core("set_gateways", ["[]"], function (raw) { var r = root.j(raw); if (r && r.ok) { gwField.text = r.gateways.join("\n"); root.refresh() } })
                     }
                 }
+                LogosText { text: "Your IPFS node (Kubo RPC API, then its gateway). When it answers it is read from first, and \"Keep a copy\" pins documents there so they outlive Fileverse's pinning."; wrapMode: Text.WordWrap; Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12 }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Field { id: nodeApiField; Layout.fillWidth: true; placeholderText: "http://127.0.0.1:5001"; text: root.snap.node ? root.snap.node.api : "" }
+                    Field { id: nodeGwField; Layout.fillWidth: true; placeholderText: "http://127.0.0.1:8080"; text: root.snap.node ? root.snap.node.gateway : "" }
+                    LogosButton {
+                        text: "Save node"
+                        onClicked: root.core("set_ipfs_node", [nodeApiField.text, nodeGwField.text], function (raw) {
+                            var r = root.j(raw)
+                            if (r && r.ok) { root.say("IPFS node saved"); root.refresh(); root.refreshNode() } else root.error = (r && r.error) || "Saving failed"
+                        })
+                    }
+                }
+                LogosText {
+                    Layout.fillWidth: true
+                    textFormat: Text.PlainText
+                    font.pixelSize: 12
+                    color: root.node.reachable ? Theme.palette.success : Theme.palette.textTertiary
+                    text: root.node.reachable ? ("Connected: " + (root.node.agent || "IPFS node") + " " + root.shortId(root.node.peerId)) : "No IPFS node answering at " + (root.node.api || "http://127.0.0.1:5001") + ". Run one (e.g. Kubo) to keep copies."
+                }
                 LogosText { text: "Gnosis RPC: " + (root.snap.rpc || "eth_rpc_module") + ". Change the endpoint (or set a proxy/Tor) in the Ethereum RPC app; this viewer adds chain 100 there only if it is missing."; wrapMode: Text.WordWrap; Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textTertiary }
             }
 
@@ -352,6 +394,12 @@ Item {
                         color: Theme.palette.textTertiary
                         text: root.docv ? ((root.docv.kind === "dsheet" ? "dSheet" : "dDoc") + " · " + root.docv.layout + " portal " + root.shortId(root.docv.portal) + " · file " + root.docv.fileId
                                            + (root.docv.updatedAt ? " · updated " + new Date(root.docv.updatedAt).toLocaleString() : "")) : ""
+                    }
+                    LogosButton {
+                        visible: root.node.reachable || root.kept
+                        enabled: root.node.reachable && !root.keeping
+                        text: root.keeping ? "Keeping…" : (root.kept ? "Kept ✓" : "Keep a copy")
+                        onClicked: root.keepCopy()
                     }
                     LogosButton { visible: root.deck.length > 0; text: "Present"; onClicked: root.present() }
                     LogosButton { visible: root.docv && root.docv.markdown !== undefined; text: "Copy Markdown"; onClicked: root.copy(root.docv.markdown) }

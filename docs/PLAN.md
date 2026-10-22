@@ -15,7 +15,7 @@ The background research (what Fileverse runs, what is open, what is on chain) is
 | IPFS | none | **Gap.** Today: HTTP gateways, every block hash-checked. `libp2p_module` has Kademlia (`kadGetProviders`) and a custom-protocol bridge: a possible base for a native IPFS (bitswap) client. |
 | Messaging / sync | `delivery_module`, `loam_core` | For live collaboration (stage 5). |
 | Hardware identity | `keycard` | For key custody (stages 2, 6). |
-| Web rendering | none (Qt WebView bundled on Linux/macOS but unused, slated for removal) | Blocks embedding Fileverse's React editors; we render natively. |
+| Web rendering | Basecamp 0.3.2's Linux bundle ships QtWebEngine + QtWebChannel QML modules (308 MB Chromium core) and QtWebView; nothing uses them and the build notes call WebView dead weight | Could host Fileverse's (AGPL) React editor in a view for stage 4. Not verified that the plugin sandbox allows `import QtWebEngine`; needs a Basecamp-team decision either way. |
 
 ## Stage 0: read share links (this repo, v0.1)
 
@@ -29,9 +29,12 @@ blocks pinned (in practice Fileverse's Pinata account); any reachable gateway.
 
 - Done: verified blocks are cached locally by CID; a cached document reopens with no
   gateway at all.
-- Next: **"Keep a copy"**: pin opened files to a node the user controls, via the
-  IPFS Pinning Service API or a local Kubo `/api/v0/pin/add`, so they survive
-  Fileverse unpinning (it does unpin old gate files and deleted files).
+- Done (0.2.0): **"Keep a copy"** copies an opened file's verified blocks into the
+  user's own Kubo node (`block/put`, then `pin/add`), and that node's gateway is read
+  from first when it answers. Tested: after keeping, with the cache wiped and every
+  public gateway dead, the document opens from the user's node alone.
+- Next: the same via the IPFS Pinning Service API (remote pinning the user pays for),
+  and an `ipfs_module` for Basecamp so users need not run Kubo themselves (see below).
 - Next: **mirror to Logos Storage**: upload the ciphertext blocks to `storage_module`
   and keep a CID -> Logos-CID sidecar (two-id rule, see the `logos-storage` skill).
   Readers who have the sidecar fetch from Logos peers when IPFS has nothing.

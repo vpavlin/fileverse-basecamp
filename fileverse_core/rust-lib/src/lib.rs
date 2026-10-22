@@ -13,6 +13,7 @@ pub mod chain;
 pub mod crypto;
 pub mod doc;
 pub mod ipfs;
+pub mod node;
 pub mod sheet;
 pub mod viewer;
 

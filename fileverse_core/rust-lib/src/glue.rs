@@ -24,6 +24,7 @@ use serde_json::{json, Value};
 
 use crate::chain::{Rpc, GNOSIS_CHAIN_ID};
 use crate::ipfs::{Gateways, DEFAULT_GATEWAYS};
+use crate::node::{self, Node};
 use crate::viewer;
 
 pub trait FileverseCoreModule: Send + Sync + 'static {
@@ -37,6 +38,12 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn set_gateways(&self, gateways_json: String) -> String;
     /// Remove a document from the recent list.
     fn forget(&self, portal: String, file_id: i64) -> String;
+    /// Your own IPFS node (Kubo RPC API and its gateway). Empty strings restore the defaults.
+    fn set_ipfs_node(&self, api_url: String, gateway_url: String) -> String;
+    /// Whether that node answers: `{ ok, reachable, peerId, agent }`.
+    fn node_status(&self) -> String;
+    /// Copy a recently opened document's blocks into your IPFS node and pin them there.
+    fn keep(&self, portal: String, file_id: i64) -> String;
 
     fn on_context_ready(&self, _ctx: &RustModuleContext) {}
 }
@@ -51,6 +58,8 @@ include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/provider_gen.rs"));
 const RPC_TIMEOUT: Duration = Duration::from_secs(25);
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RECENT: usize = 30;
+/// How long a probe of the local IPFS node may take before it is skipped for this open.
+const NODE_PROBE: Duration = Duration::from_millis(800);
 
 struct ModuleRpc;
 
@@ -89,6 +98,8 @@ struct Job {
 struct State {
     dir: Option<PathBuf>,
     gateways: Vec<String>,
+    node_api: String,
+    node_gateway: String,
     recent: Vec<Value>,
     jobs: HashMap<String, Job>,
     seq: u64,
@@ -118,9 +129,17 @@ impl State {
 
     fn save(&self) {
         if let Some(p) = self.settings_path() {
-            let v = json!({ "gateways": self.gateways, "recent": self.recent });
+            let v = json!({ "gateways": self.gateways, "recent": self.recent, "nodeApi": self.node_api, "nodeGateway": self.node_gateway });
             let _ = std::fs::write(p, v.to_string());
         }
+    }
+
+    fn node_api(&self) -> String {
+        if self.node_api.is_empty() { node::DEFAULT_API.into() } else { self.node_api.clone() }
+    }
+
+    fn node_gateway(&self) -> String {
+        if self.node_gateway.is_empty() { node::DEFAULT_GATEWAY.into() } else { self.node_gateway.clone() }
     }
 
     fn gateway_list(&self) -> Vec<String> {
@@ -165,6 +184,8 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                     .map(|a| a.iter().filter_map(|g| g.as_str().map(str::to_string)).collect())
                     .unwrap_or_default();
                 s.recent = v["recent"].as_array().cloned().unwrap_or_default();
+                s.node_api = v["nodeApi"].as_str().unwrap_or("").to_string();
+                s.node_gateway = v["nodeGateway"].as_str().unwrap_or("").to_string();
             }
         }
     }
@@ -182,6 +203,10 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             let cache = s.dir.as_ref().map(|d| d.join("blocks"));
             (id, s.gateway_list(), cache, !s.chain_seeded)
         };
+        let (node_api, node_gw) = {
+            let s = self.state.lock().unwrap();
+            (s.node_api(), s.node_gateway())
+        };
         let state = self.state.clone();
         let job_id = id.clone();
         std::thread::spawn(move || {
@@ -191,25 +216,43 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                     Err(e) => eprintln!("fileverse_core: {e}"),
                 }
             }
+            // Your own node first, when it answers: nobody else then sees what you read.
+            let mut gateways = gateways;
+            if Node::new(&node_api, NODE_PROBE).id().is_ok() && !gateways.contains(&node_gw) {
+                gateways.insert(0, node_gw);
+            }
             let gw = Gateways::new(gateways, cache);
             let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| viewer::open_link(&ModuleRpc, &gw, &url)))
                 .unwrap_or_else(|_| Err("the viewer crashed while opening this file".into()));
             let mut s = state.lock().unwrap();
-            let job = s.jobs.get_mut(&job_id).unwrap();
             match r {
                 Ok(v) => {
-                    job.state = "done";
+                    let blobs = v["provenance"]["blobs"].as_array().cloned().unwrap_or_default();
+                    let roots: Vec<Value> = blobs.iter().map(|b| b["cid"].clone()).collect();
+                    let blocks: Vec<Value> = blobs.iter().flat_map(|b| b["blocks"].as_array().cloned().unwrap_or_default()).collect();
+                    // A kept copy stays "kept" only while the file still has the same CIDs.
+                    let kept = s
+                        .recent
+                        .iter()
+                        .find(|r| r["portal"] == json!(link.portal) && r["fileId"] == json!(link.file_id))
+                        .map(|r| r["kept"].clone())
+                        .filter(|k| *k == json!(roots))
+                        .unwrap_or(Value::Null);
                     let entry = json!({
                         "url": url, "portal": link.portal, "fileId": link.file_id,
                         "title": v["title"], "kind": v["kind"], "openedAt": now_ms(),
+                        "roots": roots, "blocks": blocks, "kept": kept,
                     });
-                    job.result = v;
                     s.recent.retain(|r| !(r["portal"] == entry["portal"] && r["fileId"] == entry["fileId"]));
                     s.recent.insert(0, entry);
                     s.recent.truncate(MAX_RECENT);
                     s.save();
+                    let job = s.jobs.get_mut(&job_id).unwrap();
+                    job.state = "done";
+                    job.result = v;
                 }
                 Err(e) => {
+                    let job = s.jobs.get_mut(&job_id).unwrap();
                     job.state = "failed";
                     job.error = e;
                 }
@@ -242,6 +285,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             "gateways": s.gateway_list(),
             "customGateways": !s.gateways.is_empty(),
             "rpc": "eth_rpc_module (chain 100)",
+            "node": { "api": s.node_api(), "gateway": s.node_gateway() },
             "recent": s.recent,
             "pending": s.jobs.values().filter(|j| j.state == "pending").count(),
         })
@@ -268,6 +312,61 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         s.recent.retain(|r| !(r["portal"].as_str() == Some(portal.as_str()) && r["fileId"].as_i64() == Some(file_id)));
         s.save();
         json!({ "ok": true, "removed": before - s.recent.len() }).to_string()
+    }
+
+    fn set_ipfs_node(&self, api_url: String, gateway_url: String) -> String {
+        let (api, gw) = (api_url.trim().trim_end_matches('/').to_string(), gateway_url.trim().trim_end_matches('/').to_string());
+        for u in [&api, &gw] {
+            if !u.is_empty() && !(u.starts_with("http://") || u.starts_with("https://")) {
+                return err(format!("not an http(s) URL: {u}"));
+            }
+        }
+        let mut s = self.state.lock().unwrap();
+        s.node_api = api;
+        s.node_gateway = gw;
+        s.save();
+        json!({ "ok": true, "api": s.node_api(), "gateway": s.node_gateway() }).to_string()
+    }
+
+    fn node_status(&self) -> String {
+        let (api, gw) = {
+            let s = self.state.lock().unwrap();
+            (s.node_api(), s.node_gateway())
+        };
+        match Node::new(&api, Duration::from_secs(2)).id() {
+            Ok(id) => json!({ "ok": true, "reachable": true, "api": api, "gateway": gw, "peerId": id["peerId"], "agent": id["agent"] }),
+            Err(e) => json!({ "ok": true, "reachable": false, "api": api, "gateway": gw, "error": e }),
+        }
+        .to_string()
+    }
+
+    fn keep(&self, portal: String, file_id: i64) -> String {
+        let (entry, api, gateways, cache) = {
+            let s = self.state.lock().unwrap();
+            let entry = s.recent.iter().find(|r| r["portal"].as_str() == Some(portal.as_str()) && r["fileId"].as_i64() == Some(file_id)).cloned();
+            (entry, s.node_api(), s.gateway_list(), s.dir.as_ref().map(|d| d.join("blocks")))
+        };
+        let Some(entry) = entry else { return err("open the document first") };
+        let strs = |k: &str| -> Vec<String> {
+            entry[k].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect()).unwrap_or_default()
+        };
+        let (roots, blocks) = (strs("roots"), strs("blocks"));
+        if blocks.is_empty() {
+            return err("reopen the document once with this version, then keep it");
+        }
+        let gw = Gateways::new(gateways, cache);
+        match Node::new(&api, Duration::from_secs(60)).keep(&gw, &roots, &blocks) {
+            Ok(n) => {
+                let mut s = self.state.lock().unwrap();
+                if let Some(r) = s.recent.iter_mut().find(|r| r["portal"].as_str() == Some(portal.as_str()) && r["fileId"].as_i64() == Some(file_id)) {
+                    r["kept"] = json!(roots);
+                    r["keptAt"] = json!(now_ms());
+                }
+                s.save();
+                json!({ "ok": true, "blocks": n, "pinned": roots.len(), "node": api }).to_string()
+            }
+            Err(e) => err(e),
+        }
     }
 }
 

@@ -221,6 +221,9 @@ pub struct Provenance {
     pub gateway: String,
     pub verified: bool,
     pub bytes: usize,
+    /// Every block the file is made of (CIDv1), for pinning a copy elsewhere.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<String>,
 }
 
 pub struct Gateways {
@@ -282,6 +285,15 @@ impl Gateways {
         None
     }
 
+    /// One verified block, from the cache or a gateway.
+    pub fn block_bytes(&self, cid_str: &str) -> Result<Vec<u8>, String> {
+        let cid = Cid::parse(cid_str)?;
+        let mut errors = vec![];
+        self.block(&cid, &mut errors)
+            .map(|(b, _)| b)
+            .ok_or_else(|| format!("could not fetch block {cid_str}: {}", errors.join("; ")))
+    }
+
     /// The bytes of the file `cid` names, checked against it block by block.
     pub fn get(&self, cid_str: &str) -> Result<(Vec<u8>, Provenance), String> {
         let root = Cid::parse(cid_str)?;
@@ -289,11 +301,11 @@ impl Gateways {
         let mut used = String::new();
         let mut out = vec![];
         let mut stack = vec![root.clone()];
-        let mut blocks = 0;
+        let mut names = vec![];
         let mut ok = true;
         while let Some(cid) = stack.pop() {
-            blocks += 1;
-            if blocks > MAX_BLOCKS || out.len() > MAX_BYTES {
+            names.push(cid.to_v1());
+            if names.len() > MAX_BLOCKS || out.len() > MAX_BYTES {
                 return Err(format!("{cid_str} is larger than the viewer accepts"));
             }
             let Some((b, g)) = self.block(&cid, &mut errors) else {
@@ -315,7 +327,7 @@ impl Gateways {
         }
         if ok {
             let bytes = out.len();
-            return Ok((out, Provenance { cid: cid_str.into(), gateway: used, verified: true, bytes }));
+            return Ok((out, Provenance { cid: cid_str.into(), gateway: used, verified: true, bytes, blocks: names }));
         }
         if self.allow_unverified {
             for g in &self.urls {
@@ -323,7 +335,7 @@ impl Gateways {
                 if let Ok(b) = self.client.get(&url).send().and_then(|r| r.error_for_status()).and_then(|r| r.bytes()) {
                     let verified = root.codec == RAW && Sha256::digest(&b).as_slice() == root.digest;
                     let bytes = b.len();
-                    return Ok((b.to_vec(), Provenance { cid: cid_str.into(), gateway: g.clone(), verified, bytes }));
+                    return Ok((b.to_vec(), Provenance { cid: cid_str.into(), gateway: g.clone(), verified, bytes, blocks: vec![] }));
                 }
             }
         }

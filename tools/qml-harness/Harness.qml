@@ -30,6 +30,8 @@ Window {
         if (method === "snapshot") return { ok: true, version: "0.1.0", rpc: "eth_rpc_module (chain 100)", gateways: ["https://gateway.pinata.cloud", "https://ipfs.fileverse.io"],
             recent: [ { url: "x", portal: "0x81fb962e2088De6925AffA4E068dd3FAF3EFE163", fileId: 57, title: "Fileverse Agents SDK - Docs 💛", kind: "ddoc" },
                       { url: "y", portal: "0x1111111111111111111111111111111111111111", fileId: 7, title: "Budget <b>2026</b>", kind: "dsheet" } ] }
+        if (method === "node_status") return { ok: true, reachable: true, api: "http://127.0.0.1:5001", gateway: "http://127.0.0.1:8080", agent: "kubo/0.43.1", peerId: "12D3KooWFQFPzq7P7yM3SF2RhHCKsY9Ag8k1ZP8pnzU6QTS1Fjpz" }
+        if (method === "keep") return { ok: true, blocks: 2, pinned: 2 }
         if (method === "open") return mode === "error" ? { ok: true, jobId: "j1" } : { ok: true, jobId: "j1" }
         if (method === "job") {
             if (mode === "error") return { ok: true, state: "failed", error: "the link key does not open this file (wrong or truncated link?)" }
@@ -51,7 +53,7 @@ Window {
         anchors.fill: parent
         source: Qt.resolvedUrl("../../fileverse_ui/Main.qml")
         onStatusChanged: if (status === Loader.Error) { console.log("LOAD ERROR"); Qt.exit(2) }
-        onLoaded: Qt.callLater(function () { item.showDetails = (win.mode === "doc"); item.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc") })
+        onLoaded: Qt.callLater(function () { item.showDetails = (win.mode === "doc"); item.showSettings = (win.mode === "settings"); item.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc") })
     }
 
     Component.onCompleted: {

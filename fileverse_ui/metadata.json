@@ -1,7 +1,7 @@
 {
   "name": "fileverse_ui",
   "display_name": "Fileverse",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "ui_qml",
   "category": "productivity",
   "description": "Read Fileverse dDocs and dSheets share links without any Fileverse server: Gnosis via eth_rpc_module, hash-checked IPFS blocks, local decryption.",
@@ -9,7 +9,7 @@
   "icon": "icon.png",
   "view": "Main.qml",
   "dependencies": [
-    { "name": "fileverse_core", "version": "~0.1.0" }
+    { "name": "fileverse_core", "version": "~0.2.0" }
   ],
   "nix": {
     "packages": { "build": [], "runtime": [] },

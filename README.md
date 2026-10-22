@@ -24,7 +24,17 @@ What it reads today:
   secretbox and PBKDF2/AES-CBC link locks, `gz1:` compressed sheets, document tabs.
 - Rendered as headings, paragraphs, lists, tasks, quotes, callouts, code, tables and
   links; images and embeds are shown as placeholders and **never fetched**.
+- **Present**: any dDoc as a slide deck, cut the way dDocs' presentation mode cuts it
+  (H1 title slides, H2 and page breaks start slides, long content split), with
+  arrow keys, click-to-advance and Esc.
 - "Copy Markdown" for documents.
+- **Keep a copy** on your own IPFS node (Kubo RPC): the document's verified blocks are
+  copied there and pinned, so it outlives Fileverse's pinning. When that node answers,
+  it is also read from first.
+
+Tested: see [docs/TESTING.md](docs/TESTING.md) (cargo tests incl. v3 fixtures from
+Fileverse's own JS libraries, headless `logosctl`, offscreen QML renders, and a walk
+through the real Basecamp 0.3.2 GUI).
 
 Not yet: comments, version history, files shared privately (the Fileverse gate),
 workspace files on Fileverse's private IPFS lane, opening your own files from a

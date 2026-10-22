@@ -1,7 +1,7 @@
 {
   "name": "fileverse_core",
   "display_name": "Fileverse Viewer Core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Read-only viewer for Fileverse dDocs and dSheets share links. Resolves the file on Gnosis via eth_rpc_module, fetches hash-verified blocks from any IPFS gateway, decrypts locally. No Fileverse server involved.",
   "author": "vpavlin",
   "type": "core",
