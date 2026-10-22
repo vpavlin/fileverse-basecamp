@@ -125,3 +125,26 @@ program could hold registries that should not be public.
 2. A short spec of the share-link and lock formats (we reverse-engineered them).
 3. Serving v3 content trustlessly from their gateway (`ipfs.fileverse.io` 403s on v3 CIDs).
 4. Waku as a collaboration transport, since they already use it for discovery.
+
+## Should IPFS be a Basecamp module? Yes.
+
+Today "keep a copy" needs the user to run Kubo next to Basecamp. A shared `ipfs_module`
+would make every Logos app an IPFS citizen without that step:
+
+1. **First cut: wrap Kubo.** A core module that runs a bundled Kubo binary per platform
+   (repo in the module's data dir, API and gateway on loopback with a random port), and
+   exposes `status`, `get(cid)`, `put_block`, `pin`, `unpin`, `provide` and the gateway
+   URL. `fileverse_core` already speaks the Kubo RPC, so it would only need the module's
+   address. Cost: a ~90 MB Go binary per platform, and a second libp2p stack beside
+   Logos' own.
+2. **Then: native, on Logos' stack.** `libp2p_module` already has Kademlia
+   (`kadGetProviders`, `kadStartProviding`) and a custom-protocol bridge. A bitswap client
+   on top of it, pointed at the IPFS Amino DHT, would fetch and provide blocks with no
+   Kubo and no gateway. That is the self-sovereign end state for reads, and lets Basecamp
+   users re-provide each other's Fileverse content.
+3. **Relationship to Logos Storage.** Storage stays the Logos-native store (its own CIDs,
+   protocol and incentives). IPFS is for interop with the content that already lives there
+   (Fileverse and everything else); a mirror in Storage is the long-term copy.
+
+Order: ship (1) behind the same interface `fileverse_core` already uses, and replace its
+inside with (2) when the bitswap client is ready. Apps do not change.
