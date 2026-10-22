@@ -1,0 +1,25 @@
+{
+  "name": "fileverse_core",
+  "display_name": "Fileverse Viewer Core",
+  "version": "0.1.0",
+  "description": "Read-only viewer for Fileverse dDocs and dSheets share links. Resolves the file on Gnosis via eth_rpc_module, fetches hash-verified blocks from any IPFS gateway, decrypts locally. No Fileverse server involved.",
+  "author": "vpavlin",
+  "type": "core",
+  "interface": "cdylib",
+  "concurrency": "multi",
+  "category": "productivity",
+  "main": "fileverse_core_plugin",
+  "dependencies": [
+    { "name": "eth_rpc_module", "version": "~0.1.0" }
+  ],
+  "include": [],
+  "capabilities": [],
+  "codegen": {
+    "rust": { "crate": "rust-lib", "trait": "FileverseCoreModule", "source": "src/glue.rs" }
+  },
+  "nix": {
+    "external_libraries": [],
+    "packages": { "build": [], "runtime": [] },
+    "cmake": { "find_packages": [], "extra_include_dirs": [] }
+  }
+}
