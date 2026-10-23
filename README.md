@@ -13,32 +13,36 @@ share link  ->  files(id) on the portal contract (Gnosis, via eth_rpc_module)
 
 | Package | Type | What it does |
 |---|---|---|
-| `fileverse_core` | core, Rust (`cdylib`) | The engine: chain read, trustless IPFS fetch, decryption, Yjs rendering. Depends on the official `eth_rpc_module`. |
-| `fileverse_ui` | ui_qml, pure QML | Paste a link, read the document or sheet, recent list, gateway settings, provenance ("Sources"). |
+| `fileverse_core` | core, Rust (`cdylib`) | The engine: chain reads, trustless IPFS fetch, decryption, Yjs rendering, backup keys, Markdown drafts and publishing, copies on IPFS and Logos Storage. Depends on the official `eth_rpc_module`; uses `ipfs_module` and `storage_module` when present. |
+| `fileverse_ui` | ui_qml, pure QML | Recent / My files / Drafts, document and sheet views, slide decks, the editor with live preview, settings. |
+| `ipfs_module` | core, Rust (`cdylib`) | An IPFS node for every Logos app: a bundled static Kubo run on loopback ports, started on first use, stopped with its host. |
 
-What it reads today:
+What it does (0.3.0):
 
-- dDocs and dSheets **share links** (`…/<portal>/<fileId>#key=…`), from the legacy
-  portal (`docs.fileverse.io`) and the v3 App contract (`ddocs.new`, `dsheets.new`):
-  raw link secrets and Argon2id-wrapped ones (both memory settings in use),
-  secretbox and PBKDF2/AES-CBC link locks, `gz1:` compressed sheets, document tabs.
-- Rendered as headings, paragraphs, lists, tasks, quotes, callouts, code, tables and
-  links; images and embeds are shown as placeholders and **never fetched**.
-- **Present**: any dDoc as a slide deck, cut the way dDocs' presentation mode cuts it
-  (H1 title slides, H2 and page breaks start slides, long content split), with
-  arrow keys, click-to-advance and Esc.
-- "Copy Markdown" for documents.
-- **Keep a copy** on your own IPFS node (Kubo RPC): the document's verified blocks are
-  copied there and pinned, so it outlives Fileverse's pinning. When that node answers,
-  it is also read from first.
+- **Read share links** (`…/<portal>/<fileId>#key=…`) from the legacy portal (`docs.fileverse.io`)
+  and the v3 App contract (`ddocs.new`, `dsheets.new`): raw and Argon2id-wrapped link keys,
+  secretbox and PBKDF2/AES-CBC link locks, `gz1:` sheets, document tabs.
+- **Your own files**: import a dDocs/dSheets backup-key file; the portal is listed from Gnosis
+  (titles decrypted locally) and every file opens with its owner/app lock (ECIES, or RSA-OAEP
+  on legacy portals). Post-quantum (`FVPQ1`) locks are reported, not opened: that library is
+  not public. Keys stay in the module's data directory (mode 600).
+- **Present** any dDoc (or draft) as a slide deck, cut the way dDocs' presentation mode cuts it.
+- **Edit**: "Edit a copy" of any document, or a new one. Markdown on the left, the document as
+  it will look on the right, saved on the device as you type. **Publish** encrypts it in the
+  Fileverse v3 format (Yjs content, GCM, secretbox link lock), pins it on your IPFS node and
+  copies it into Logos Storage, and gives a `fvbc://ipfs/<manifest>#key=…` link that any
+  Basecamp with this app opens. There is no chain record; ddocs.new cannot open these links.
+- **Keep on my IPFS** pins a document's blocks on your node (`ipfs_module`, or a Kubo you set).
+- **Copy to Logos Storage** uploads each block to `storage_module`; when IPFS has nothing,
+  blocks are read back from Storage and hash-checked like any other source.
+- Rendering: headings, paragraphs, lists, tasks, quotes, callouts, code, tables, links;
+  images and embeds are placeholders and **never fetched**.
 
-Tested: see [docs/TESTING.md](docs/TESTING.md) (cargo tests incl. v3 fixtures from
-Fileverse's own JS libraries, headless `logosctl`, offscreen QML renders, and a walk
-through the real Basecamp 0.3.2 GUI).
+Tested: see [docs/TESTING.md](docs/TESTING.md).
 
-Not yet: comments, version history, files shared privately (the Fileverse gate),
-workspace files on Fileverse's private IPFS lane, opening your own files from a
-backup key. See [docs/PLAN.md](docs/PLAN.md).
+Not yet: comments, version history, private (gate) shares, workspace files on Fileverse's
+private IPFS lane, writing back to Fileverse's chain records, live collaboration. See
+[docs/PLAN.md](docs/PLAN.md).
 
 ## Trust model
 
@@ -48,8 +52,8 @@ backup key. See [docs/PLAN.md](docs/PLAN.md).
   there is no light client for Gnosis in Basecamp yet.
 - **IPFS:** not trusted. Blocks are requested as trustless raw blocks
   (`?format=raw`), hashed and compared to the CID; UnixFS files are reassembled from
-  verified leaves. A gateway can refuse or watch, not alter. A local node
-  (`http://127.0.0.1:8080`) can be put first in Settings.
+  verified leaves. Order: your own node (ipfs_module), then gateways, then Logos Storage.
+  A source can refuse or watch, never alter.
 - **Keys:** the `#key=` stays on this device. Recent links (with their keys) are kept
   in the module's own data directory so documents reopen; decrypted text is not
   written to disk. Verified ciphertext blocks are cached by CID.
@@ -60,9 +64,13 @@ backup key. See [docs/PLAN.md](docs/PLAN.md).
 ## Build
 
 ```sh
-cd fileverse_core && nix build .#lgx-portable    # needs the Logos module builder
+cd ipfs_module    && nix build .#lgx-portable    # bundles a static Kubo (pkgsStatic.kubo)
+cd fileverse_core && nix build .#lgx-portable
 cd fileverse_ui   && nix build .#lgx-portable
 ```
+
+Note: never put a `;` in a `metadata.json` string. CMake reads the file as a list and
+the build fails with "value, object or array expected".
 
 Engine tests and the CLI need only cargo (stage the SDK first, see `rust-lib/Cargo.toml`):
 

@@ -102,6 +102,11 @@ fn multihash(b: &[u8], i: &mut usize) -> Result<[u8; 32], String> {
     Ok(d.try_into().unwrap())
 }
 
+/// The raw-codec CIDv1 of some bytes: how Fileverse v3 and our drafts name files.
+pub fn raw_cid(bytes: &[u8]) -> Cid {
+    Cid { codec: RAW, digest: Sha256::digest(bytes).into() }
+}
+
 impl Cid {
     pub fn parse(s: &str) -> Result<Cid, String> {
         let s = s.trim();
@@ -226,8 +231,17 @@ pub struct Provenance {
     pub blocks: Vec<String>,
 }
 
+/// Somewhere else blocks may be found (Logos Storage). Answers are hash-checked
+/// against the CID exactly like gateway answers, so a source needs no trust.
+pub trait BlockSource: Send + Sync {
+    fn name(&self) -> String;
+    fn block(&self, cid: &Cid) -> Option<Vec<u8>>;
+}
+
 pub struct Gateways {
     pub urls: Vec<String>,
+    /// Tried, in order, after every gateway has failed.
+    pub extra: Vec<Box<dyn BlockSource>>,
     /// Verified blocks are cached by CID: they are immutable, so a cache is always valid.
     pub cache_dir: Option<PathBuf>,
     /// Accept whole-file answers we cannot hash-check (dag-pb files from a gateway
@@ -243,7 +257,7 @@ impl Gateways {
             .user_agent("fileverse-basecamp-viewer")
             .build()
             .expect("http client");
-        Gateways { urls, cache_dir, allow_unverified: false, client }
+        Gateways { urls, extra: vec![], cache_dir, allow_unverified: false, client }
     }
 
     fn cached(&self, cid: &Cid) -> Option<Vec<u8>> {
@@ -282,7 +296,22 @@ impl Gateways {
                 Err(e) => errors.push(format!("{g}: {}", short(&e))),
             }
         }
+        for src in &self.extra {
+            match src.block(cid) {
+                Some(b) if Sha256::digest(&b).as_slice() == cid.digest => {
+                    self.store(cid, &b);
+                    return Some((b, src.name()));
+                }
+                Some(_) => errors.push(format!("{}: block does not match its CID", src.name())),
+                None => errors.push(format!("{}: not found", src.name())),
+            }
+        }
         None
+    }
+
+    /// Put a block we produced ourselves into the cache (publishing).
+    pub fn cache_block(&self, cid: &Cid, b: &[u8]) {
+        self.store(cid, b);
     }
 
     /// One verified block, from the cache or a gateway.

@@ -1,8 +1,9 @@
-// Fileverse viewer: a pure-QML view over the fileverse_core module.
+// Fileverse for Logos Basecamp: a pure-QML view over the fileverse_core module.
 //
-// Paste a dDocs/dSheets share link; the core reads the file record on Gnosis
-// (through eth_rpc_module), fetches hash-checked blocks from IPFS gateways and
-// decrypts them locally. This view only draws the JSON the core returns.
+// Read dDocs/dSheets (share links, or your own files with a backup key), present
+// docs as slides, keep copies on your IPFS node and in Logos Storage, and write
+// Markdown drafts that are published as Fileverse-format documents. No Fileverse
+// server is involved; this view only draws the JSON the core returns.
 //
 // Text from documents is drawn two ways:
 //  - block bodies use Text.StyledText over `html` that the CORE built: it escapes
@@ -13,14 +14,15 @@
 import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
+import QtQuick.Dialogs
 
 import Logos.Theme
 import Logos.Controls
 
 Item {
     id: root
-    width: 1000
-    height: 700
+    width: 1100
+    height: 760
 
     // ── core bridge (never blocking: logos.callModuleAsync, else a deferred callModule) ──
     readonly property string coreName: "fileverse_core"
@@ -54,14 +56,23 @@ Item {
         }
         return (v && typeof v === "object") ? v : null
     }
+    // A core action: toast on success, the core's sentence on failure.
+    function act(method, args, okMsg, onOk) {
+        root.core(method, args, function (raw) {
+            var r = root.j(raw)
+            if (r && r.ok) { if (okMsg) root.say(okMsg); if (onOk) onOk(r); root.refresh() }
+            else root.fail(r ? r.error : ("No answer from fileverse_core (" + method + ")."))
+        })
+    }
 
     // ── state ──
-    property var snap: ({ recent: [], gateways: [] })
+    property var snap: ({ recent: [], gateways: [], portals: [], drafts: [] })
     property bool coreReachable: true
     property int missedPolls: 0
-    property string jobId: ""
-    property int jobElapsed: 0
-    property var docv: null          // the opened document (core JSON)
+    property string section: "recent"     // recent | files | drafts
+    property string mode: "home"          // home | doc | edit | portal | import
+    property var docv: null               // the opened document (core JSON)
+    property string docUrl: ""
     property string error: ""
     property string toast: ""
     property int tabIndex: 0
@@ -69,28 +80,128 @@ Item {
     property bool showDetails: false
     property bool showSettings: false
     property var node: ({ reachable: false })
-    property bool keeping: false
-    function refreshNode() { root.core("node_status", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.node = r }) }
-    readonly property var recentEntry: {
-        if (!root.docv) return null
-        var rs = root.snap.recent || []
-        for (var i = 0; i < rs.length; i++) if (rs[i].portal === root.docv.portal && rs[i].fileId === root.docv.fileId) return rs[i]
-        return null
-    }
-    readonly property bool kept: root.recentEntry !== null && !!root.recentEntry.kept
-    function keepCopy() {
-        if (!root.docv || root.keeping) return
-        root.keeping = true
-        root.core("keep", [root.docv.portal, root.docv.fileId], function (raw) {
-            root.keeping = false
-            var r = root.j(raw)
-            if (r && r.ok) { root.say("Kept on your IPFS node: " + r.blocks + " blocks, " + r.pinned + " pinned"); root.refresh() }
-            else root.error = (r && r.error) || "Keeping a copy failed - is your IPFS node running?"
-        })
-    }
-    readonly property bool loading: root.jobId !== ""
+    property var storage: ({ available: false })
+    property string portal: ""
+    property var portalFiles: []
+    property string portalError: ""
+    property var draft: null              // { id, title, markdown, preview, published }
+    property bool draftDirty: false
 
     function say(msg) { root.toast = msg; toastTimer.restart() }
+    function fail(msg) { var m = String(msg || "Something went wrong."); root.error = m.charAt(0).toUpperCase() + m.slice(1) }
+
+    // ── jobs: every network action runs in the core; we poll until it settles ──
+    property var jobs: ({})               // id -> { label }
+    property var jobCallbacks: ({})
+    property int jobTick: 0
+    readonly property bool busy: Object.keys(root.jobs).length > 0
+    function busyWith(label) { for (var k in root.jobs) if (root.jobs[k].label === label) return true; return false }
+    function startJob(method, args, label, onDone, onFail) {
+        if (root.busyWith(label)) return
+        root.error = ""
+        root.core(method, args, function (raw) {
+            var r = root.j(raw)
+            if (!r) { root.fail("No answer from fileverse_core. Is it installed and loaded?"); return }
+            if (!r.ok) { root.fail(r.error); return }
+            var js = root.jobs; js[r.jobId] = { label: label, started: Date.now() }; root.jobs = js
+            var cbs = root.jobCallbacks; cbs[r.jobId] = { done: onDone, fail: onFail }; root.jobCallbacks = cbs
+            root.pollJobs()
+        })
+    }
+    property bool pollBusy: false
+    function pollJobs() {
+        if (root.pollBusy) return
+        var ids = Object.keys(root.jobs)
+        if (ids.length === 0) return
+        root.pollBusy = true
+        var left = ids.length
+        ids.forEach(function (id) {
+            root.core("job", [id], function (raw) {
+                var r = root.j(raw)
+                if (r && (r.state === "done" || r.state === "failed" || !r.ok)) {
+                    var cb = root.jobCallbacks[id]
+                    var js = root.jobs; delete js[id]; root.jobs = js
+                    var cbs = root.jobCallbacks; delete cbs[id]; root.jobCallbacks = cbs
+                    if (r.ok && r.state === "done") { if (cb && cb.done) cb.done(r.result) }
+                    else {
+                        var why = (r && r.error) || "The job was lost (was the core restarted?)."
+                        root.fail(why)
+                        if (cb && cb.fail) cb.fail(why)
+                    }
+                    root.refresh()
+                }
+                if (--left === 0) { root.pollBusy = false; root.jobTick++ }
+            })
+        })
+    }
+    function elapsed(label) {
+        for (var k in root.jobs) if (root.jobs[k].label === label) return Math.round((Date.now() - root.jobs[k].started) / 1000)
+        return 0
+    }
+
+    // ── actions ──
+    function open(url) {
+        var u = String(url || "").trim()
+        if (u === "") return
+        root.startJob("open", [u], "open", function (doc) {
+            root.docv = doc; root.docUrl = u; root.mode = "doc"
+            root.presenting = false; root.slideIndex = 0; root.tabIndex = 0; root.sheetIndex = 0
+            root.refreshNode(); root.refreshStorage()
+        })
+    }
+    readonly property var recentEntry: {
+        var rs = root.snap.recent || []
+        for (var i = 0; i < rs.length; i++) if (rs[i].url === root.docUrl) return rs[i]
+        return null
+    }
+    // Pinned on the node in use now (a copy on some other node does not count).
+    readonly property bool kept: root.recentEntry !== null && !!root.recentEntry.kept && !!root.node.peerId && root.recentEntry.keptOn === root.node.peerId
+    readonly property bool inStorage: root.recentEntry !== null && !!root.recentEntry.inStorage
+    function keepCopy() {
+        root.startJob("keep", [root.docUrl], "keep", function (r) { root.say("Pinned on your IPFS node (" + r.node + "): " + r.blocks + " blocks") })
+    }
+    function copyToStorage() {
+        root.startJob("copy_to_storage", [root.docUrl], "storage", function (r) { root.say("In Logos Storage: " + r.copied + " copied, " + r.alreadyThere + " already there") })
+    }
+    function refreshNode() { root.core("node_status", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.node = r }) }
+    function refreshStorage() { root.core("storage_status", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.storage = r }) }
+    function showPortal(p) {
+        root.portal = p; root.portalFiles = []; root.portalError = ""; root.mode = "portal"
+        root.startJob("list_portal", [p], "list", function (r) { root.portalFiles = r.files }, function (e) { root.portalError = e })
+    }
+    function newDraft(title, markdown, source) {
+        root.act("draft_create", [title, markdown, source || ""], "Draft created", function (r) { root.editDraft(r.draft) })
+    }
+    function editDraft(d) {
+        root.draft = d; root.draftDirty = false; root.mode = "edit"; root.tabIndex = 0
+        titleField.text = d.title; mdArea.text = d.markdown
+    }
+    function openDraft(id) { root.act("draft_get", [id], "", function (r) { root.editDraft(r.draft) }) }
+    function saveDraft(then) {
+        if (!root.draft) return
+        root.core("draft_save", [root.draft.id, titleField.text, mdArea.text], function (raw) {
+            var r = root.j(raw)
+            if (r && r.ok) { root.draft = r.draft; root.draftDirty = false; root.refresh(); if (then) then() }
+            else root.fail(r ? r.error : "Saving failed.")
+        })
+    }
+    function publishDraft() {
+        root.saveDraft(function () {
+            root.startJob("publish", [root.draft.id], "publish", function (r) {
+                var where = []
+                if (r.ipfs) where.push("IPFS (" + r.ipfs + ")")
+                if (r.storage) where.push("Logos Storage")
+                root.say("Published to " + where.join(" and ") + (r.notes && r.notes.length ? " - " + r.notes.join("; ") : ""))
+                root.openDraft(root.draft.id)
+            })
+        })
+    }
+
+    Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
+    Timer { interval: 700; running: root.busy; repeat: true; onTriggered: root.pollJobs() }
+    Timer { id: toastTimer; interval: 3500; onTriggered: root.toast = "" }
+    // Live preview + autosave while typing (local-first: a draft is saved on this device as you go).
+    Timer { id: previewTimer; interval: 700; onTriggered: root.saveDraft() }
 
     property bool snapBusy: false
     property bool snapAgain: false
@@ -106,69 +217,28 @@ Item {
         })
     }
 
-    function open(url) {
-        var u = String(url || "").trim()
-        if (u === "" || root.loading) return
-        root.error = ""
-        root.core("open", [u], function (raw) {
-            var r = root.j(raw)
-            if (!r) { root.error = "No answer from fileverse_core. Is it installed and loaded?"; return }
-            if (!r.ok) { root.error = r.error || "Could not open the link."; return }
-            root.jobId = r.jobId
-            root.jobElapsed = 0
-            pollJob()
-        })
-    }
-
-    property bool jobBusy: false
-    function pollJob() {
-        if (root.jobId === "" || root.jobBusy) return
-        root.jobBusy = true
-        var id = root.jobId
-        root.core("job", [id], function (raw) {
-            root.jobBusy = false
-            var r = root.j(raw)
-            if (id !== root.jobId) return
-            if (!r) return
-            if (!r.ok) { root.jobId = ""; root.error = r.error || "The open job was lost."; return }
-            root.jobElapsed = Math.round((r.elapsedMs || 0) / 1000)
-            if (r.state === "done") {
-                root.jobId = ""
-                root.docv = r.result
-                root.refreshNode()
-                root.presenting = false
-                root.slideIndex = 0
-                root.tabIndex = 0
-                root.sheetIndex = 0
-                root.error = ""
-                root.refresh()
-            } else if (r.state === "failed") {
-                root.jobId = ""
-                root.error = r.error || "Opening failed."
-            }
-        })
-    }
-
-    Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
-    Timer { interval: 600; running: root.loading; repeat: true; onTriggered: root.pollJob() }
-    Timer { id: toastTimer; interval: 2500; onTriggered: root.toast = "" }
-
     Connections {
         target: typeof logos !== "undefined" ? logos : null
         ignoreUnknownSignals: true
         function onModuleEventReceived(moduleName, eventName, data) {
-            if (moduleName === root.coreName && eventName === "job_changed") root.pollJob()
+            if (moduleName === root.coreName && eventName === "job_changed") root.pollJobs()
         }
     }
     Component.onCompleted: {
         if (typeof logos !== "undefined" && logos && logos.onModuleEvent) logos.onModuleEvent(root.coreName, "job_changed")
-        root.refresh()
-        root.refreshNode()
+        root.refresh(); root.refreshNode(); root.refreshStorage()
     }
 
     // Off-screen editor used only to put text on the clipboard.
     TextEdit { id: clip; visible: false; textFormat: TextEdit.PlainText }
-    function copy(text) { clip.text = text; clip.selectAll(); clip.copy(); root.say("Copied") }
+    function copy(text, what) { clip.text = text; clip.selectAll(); clip.copy(); root.say((what || "Text") + " copied") }
+
+    FileDialog {
+        id: backupDialog
+        title: "Choose a dDocs/dSheets backup-key file"
+        nameFilters: ["Backup keys (*.json)", "All files (*)"]
+        onAccepted: root.act("import_backup", [String(selectedFile)], "Backup key imported", function (r) { if (r.portals.length) root.showPortal(r.portals[0].portal) })
+    }
 
     component Field: TextField {
         color: Theme.palette.text
@@ -183,14 +253,50 @@ Item {
             border.color: parent.activeFocus ? Theme.palette.primary : Theme.palette.border
         }
     }
+    component Hint: LogosText {
+        Layout.fillWidth: true
+        wrapMode: Text.WordWrap
+        textFormat: Text.PlainText
+        font.pixelSize: 12
+        color: Theme.palette.textTertiary
+    }
+    component SideItem: Rectangle {
+        id: si
+        property string label: ""
+        property string sub: ""
+        property bool active: false
+        property bool removable: false
+        signal clicked()
+        signal removed()
+        Layout.fillWidth: true
+        implicitHeight: sub === "" ? 30 : 44
+        radius: Theme.spacing.radiusSmall
+        color: active ? Theme.palette.surfaceRaised : (siMouse.containsMouse ? Theme.palette.surface : "transparent")
+        MouseArea { id: siMouse; anchors.fill: parent; hoverEnabled: true; onClicked: si.clicked() }
+        ColumnLayout {
+            anchors.fill: parent; anchors.margins: 6; anchors.rightMargin: si.removable ? 24 : 6; spacing: 0
+            LogosText { Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText; font.pixelSize: 13; text: si.label }
+            LogosText { visible: si.sub !== ""; Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText; font.pixelSize: 11; color: Theme.palette.textTertiary; text: si.sub }
+        }
+        LogosText {
+            visible: si.removable
+            anchors.right: parent.right; anchors.rightMargin: 8; anchors.verticalCenter: parent.verticalCenter
+            text: "×"; textFormat: Text.PlainText; font.pixelSize: 16; color: Theme.palette.textTertiary
+            MouseArea { anchors.fill: parent; anchors.margins: -6; onClicked: si.removed() }
+        }
+    }
 
     readonly property var tabs: root.docv && root.docv.tabs ? root.docv.tabs : []
-    readonly property var sheets: root.docv && root.docv.sheets ? root.docv.sheets : []
-    readonly property var blocks: root.tabs.length > 0 ? root.tabs[Math.min(root.tabIndex, root.tabs.length - 1)].blocks : []
+    readonly property var draftTabs: root.draft && root.draft.preview && root.draft.preview.length !== undefined ? root.draft.preview : []
+    readonly property var activeTabs: root.mode === "edit" ? root.draftTabs : root.tabs
+    readonly property var sheets: root.mode === "doc" && root.docv && root.docv.sheets ? root.docv.sheets : []
+    readonly property var blocks: root.activeTabs.length > 0 ? root.activeTabs[Math.min(root.tabIndex, root.activeTabs.length - 1)].blocks : []
     readonly property var sheet: root.sheets.length > 0 ? root.sheets[Math.min(root.sheetIndex, root.sheets.length - 1)] : null
 
     function shortId(s) { s = String(s || ""); return s.length > 14 ? s.slice(0, 8) + "…" + s.slice(-4) : s }
     function colName(i) { var s = ""; i += 1; while (i > 0) { var m = (i - 1) % 26; s = String.fromCharCode(65 + m) + s; i = Math.floor((i - 1) / 26) } return s }
+    function when(ms) { return ms ? new Date(ms).toLocaleString() : "" }
+    function kindIcon(k, layout) { return k === "dsheet" ? "▦ " : (layout === "logos" ? "✎ " : "¶ ") }
 
     Rectangle { anchors.fill: parent; color: Theme.palette.background }
 
@@ -199,89 +305,104 @@ Item {
         anchors.margins: Theme.spacing.large
         spacing: Theme.spacing.large
 
-        // ── recent documents ──
+        // ── sidebar ──
         ColumnLayout {
-            Layout.preferredWidth: 240
-            Layout.maximumWidth: 240
+            Layout.preferredWidth: 250
+            Layout.minimumWidth: 250
+            Layout.maximumWidth: 250
             Layout.fillHeight: true
             spacing: Theme.spacing.small
 
             LogosText { text: "Fileverse"; font.pixelSize: 22; font.bold: true; textFormat: Text.PlainText }
-            LogosText {
+            Hint { text: "No Fileverse server: Gnosis via eth_rpc_module, hash-checked IPFS blocks, your own node and Logos Storage." }
+            RowLayout {
                 Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                textFormat: Text.PlainText
-                font.pixelSize: 12
-                color: Theme.palette.textTertiary
-                text: "Read-only viewer. No Fileverse server: Gnosis via eth_rpc_module, IPFS blocks checked against their hashes, decrypted here."
+                spacing: 4
+                Repeater {
+                    model: [["recent", "Recent"], ["files", "My files"], ["drafts", "Drafts"]]
+                    Rectangle {
+                        Layout.fillWidth: true
+                        implicitHeight: 30
+                        radius: Theme.spacing.radiusSmall
+                        color: root.section === modelData[0] ? Theme.palette.surfaceRaised : "transparent"
+                        border.color: root.section === modelData[0] ? Theme.palette.primary : Theme.palette.border
+                        LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 13; text: modelData[1] }
+                        MouseArea { anchors.fill: parent; onClicked: root.section = modelData[0] }
+                    }
+                }
             }
-            Item { height: Theme.spacing.small }
-            LogosText { text: "Recent"; font.pixelSize: 14; font.bold: true; textFormat: Text.PlainText }
-            ListView {
-                Layout.fillWidth: true
-                Layout.fillHeight: true
-                clip: true
-                spacing: 2
-                model: root.snap.recent || []
-                delegate: Rectangle {
-                    width: ListView.view.width
-                    height: 46
-                    radius: Theme.spacing.radiusSmall
-                    color: rowMouse.containsMouse ? Theme.palette.surfaceRaised : "transparent"
-                    MouseArea { id: rowMouse; anchors.fill: parent; hoverEnabled: true; onClicked: root.open(modelData.url) }
-                    ColumnLayout {
-                        anchors.fill: parent
-                        anchors.margins: 6
-                        anchors.rightMargin: 28
-                        spacing: 0
-                        LogosText {
-                            Layout.fillWidth: true
-                            elide: Text.ElideRight
-                            textFormat: Text.PlainText
-                            font.pixelSize: 13
-                            text: (modelData.kind === "dsheet" ? "▦ " : "¶ ") + (modelData.title || "Untitled")
-                        }
-                        LogosText {
-                            Layout.fillWidth: true
-                            elide: Text.ElideRight
-                            textFormat: Text.PlainText
-                            font.pixelSize: 11
-                            color: Theme.palette.textTertiary
-                            text: root.shortId(modelData.portal) + " #" + modelData.fileId
+
+            // Recent
+            ScrollView {
+                visible: root.section === "recent"
+                Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+                ColumnLayout {
+                    width: 250; spacing: 2
+                    Repeater {
+                        model: root.snap.recent || []
+                        SideItem {
+                            label: root.kindIcon(modelData.kind, modelData.layout) + (modelData.title || "Untitled")
+                            sub: (modelData.layout === "logos" ? "published here" : (modelData.url.indexOf("fvown://") === 0 ? "own file #" : root.shortId(modelData.portal) + " #") + (modelData.layout === "logos" ? "" : modelData.fileId))
+                                 + (modelData.kept && modelData.keptOn === root.node.peerId ? " · IPFS" : "") + (modelData.inStorage ? " · Storage" : "")
+                            active: root.mode === "doc" && root.docUrl === modelData.url
+                            removable: true
+                            onClicked: root.open(modelData.url)
+                            onRemoved: root.act("forget", [modelData.url], "")
                         }
                     }
-                    LogosText {
-                        anchors.right: parent.right
-                        anchors.rightMargin: 8
-                        anchors.verticalCenter: parent.verticalCenter
-                        text: "×"
-                        textFormat: Text.PlainText
-                        font.pixelSize: 16
-                        color: Theme.palette.textTertiary
-                        MouseArea {
-                            anchors.fill: parent
-                            anchors.margins: -6
-                            onClicked: root.core("forget", [modelData.portal, modelData.fileId], function () { root.refresh() })
+                    Hint { visible: (root.snap.recent || []).length === 0; text: "Documents you open appear here." }
+                }
+            }
+
+            // My files (backup keys)
+            ScrollView {
+                visible: root.section === "files"
+                Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+                ColumnLayout {
+                    width: 250; spacing: 2
+                    Repeater {
+                        model: root.snap.portals || []
+                        SideItem {
+                            label: "Portal " + root.shortId(modelData.portal)
+                            sub: (modelData.kind === "legacy" ? "legacy (RSA)" : (modelData.kind === "pq" ? "post-quantum only" : "current")) + (modelData.source ? " · " + modelData.source : "")
+                            active: root.mode === "portal" && root.portal === modelData.portal
+                            removable: true
+                            onClicked: root.showPortal(modelData.portal)
+                            onRemoved: root.act("forget_portal", [modelData.portal], "Keys removed from this device")
+                        }
+                    }
+                    LogosButton { Layout.fillWidth: true; text: "Import backup key…"; onClicked: root.mode = "import" }
+                }
+            }
+
+            // Drafts
+            ScrollView {
+                visible: root.section === "drafts"
+                Layout.fillWidth: true; Layout.fillHeight: true; clip: true
+                ColumnLayout {
+                    width: 250; spacing: 2
+                    LogosButton { Layout.fillWidth: true; text: "New document"; onClicked: root.newDraft("Untitled", "# Untitled\n\n", "") }
+                    Repeater {
+                        model: root.snap.drafts || []
+                        SideItem {
+                            label: "✎ " + (modelData.title || "Untitled")
+                            sub: (modelData.link ? "published " + root.when(modelData.publishedAt) : "draft · " + root.when(modelData.updatedAt))
+                            active: root.mode === "edit" && root.draft && root.draft.id === modelData.id
+                            removable: true
+                            onClicked: root.openDraft(modelData.id)
+                            onRemoved: root.act("draft_delete", [modelData.id], "Draft deleted", function () { if (root.draft && root.draft.id === modelData.id) { root.draft = null; root.mode = "home" } })
                         }
                     }
                 }
-                LogosText {
-                    visible: (root.snap.recent || []).length === 0
-                    width: parent.width
-                    wrapMode: Text.WordWrap
-                    textFormat: Text.PlainText
-                    font.pixelSize: 12
-                    color: Theme.palette.textTertiary
-                    text: "Documents you open appear here. They are re-read from IPFS (or the local block cache) each time."
-                }
             }
-            LogosButton { text: root.showSettings ? "Close settings" : "Settings"; onClicked: { root.showSettings = !root.showSettings; gwField.text = (root.snap.gateways || []).join("\n") } }
+
+            LogosButton { text: root.showSettings ? "Close settings" : "Settings"; onClicked: { root.showSettings = !root.showSettings; gwField.text = (root.snap.gateways || []).join("\n"); root.refreshNode(); root.refreshStorage() } }
             LogosText {
                 Layout.fillWidth: true
                 textFormat: Text.PlainText
                 font.pixelSize: 11
                 color: root.coreReachable ? Theme.palette.textTertiary : Theme.palette.warning
-                text: root.coreReachable ? ("fileverse_core " + (root.snap.version || "?")) : "fileverse_core is not answering"
+                text: root.coreReachable ? ("fileverse_core " + (root.snap.version || "?") + (root.node.reachable ? " · IPFS: " + root.node.source : "") + (root.storage.available ? " · Storage" : "")) : "fileverse_core is not answering"
             }
         }
 
@@ -293,14 +414,15 @@ Item {
 
             RowLayout {
                 Layout.fillWidth: true
+                visible: root.mode !== "edit"
                 spacing: Theme.spacing.small
                 Field {
                     id: linkField
                     Layout.fillWidth: true
-                    placeholderText: "Paste a dDocs or dSheets share link (…/0x…/<n>#key=…)"
+                    placeholderText: "Paste a dDocs/dSheets share link, or a fvbc:// link published from Basecamp"
                     onAccepted: root.open(text)
                 }
-                LogosButton { text: root.loading ? ("Opening… " + root.jobElapsed + "s") : "Open"; enabled: !root.loading; onClicked: root.open(linkField.text) }
+                LogosButton { text: root.busyWith("open") ? ("Opening… " + root.elapsed("open") + "s") : "Open"; enabled: !root.busyWith("open"); onClicked: root.open(linkField.text) }
             }
 
             // settings
@@ -308,10 +430,10 @@ Item {
                 visible: root.showSettings
                 Layout.fillWidth: true
                 spacing: Theme.spacing.small
-                LogosText { text: "IPFS gateways, tried in order (one per line). Every block is checked against its hash, so a gateway cannot change content; it can only fail or see which CIDs you ask for. A local node (http://127.0.0.1:8080) keeps even that private."; wrapMode: Text.WordWrap; Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12 }
+                LogosText { text: "IPFS gateways, tried after your own node (one per line). Every block is checked against its hash, so a gateway can fail but cannot change content."; wrapMode: Text.WordWrap; Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12 }
                 ScrollView {
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 90
+                    Layout.preferredHeight: 80
                     TextArea {
                         id: gwField
                         color: Theme.palette.text
@@ -325,38 +447,30 @@ Item {
                         text: "Save gateways"
                         onClicked: {
                             var list = gwField.text.split("\n").map(function (s) { return s.trim() }).filter(function (s) { return s !== "" })
-                            root.core("set_gateways", [JSON.stringify(list)], function (raw) {
-                                var r = root.j(raw)
-                                if (r && r.ok) { root.say("Gateways saved"); root.refresh() } else root.error = (r && r.error) || "Saving failed"
-                            })
+                            root.act("set_gateways", [JSON.stringify(list)], "Gateways saved")
                         }
                     }
-                    LogosButton {
-                        text: "Restore defaults"
-                        onClicked: root.core("set_gateways", ["[]"], function (raw) { var r = root.j(raw); if (r && r.ok) { gwField.text = r.gateways.join("\n"); root.refresh() } })
-                    }
-                }
-                LogosText { text: "Your IPFS node (Kubo RPC API, then its gateway). When it answers it is read from first, and \"Keep a copy\" pins documents there so they outlive Fileverse's pinning."; wrapMode: Text.WordWrap; Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12 }
-                RowLayout {
-                    Layout.fillWidth: true
-                    Field { id: nodeApiField; Layout.fillWidth: true; placeholderText: "http://127.0.0.1:5001"; text: root.snap.node ? root.snap.node.api : "" }
-                    Field { id: nodeGwField; Layout.fillWidth: true; placeholderText: "http://127.0.0.1:8080"; text: root.snap.node ? root.snap.node.gateway : "" }
-                    LogosButton {
-                        text: "Save node"
-                        onClicked: root.core("set_ipfs_node", [nodeApiField.text, nodeGwField.text], function (raw) {
-                            var r = root.j(raw)
-                            if (r && r.ok) { root.say("IPFS node saved"); root.refresh(); root.refreshNode() } else root.error = (r && r.error) || "Saving failed"
-                        })
-                    }
+                    LogosButton { text: "Restore defaults"; onClicked: root.act("set_gateways", ["[]"], "Defaults restored", function (r) { gwField.text = r.gateways.join("\n") }) }
                 }
                 LogosText {
-                    Layout.fillWidth: true
-                    textFormat: Text.PlainText
-                    font.pixelSize: 12
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 12
                     color: root.node.reachable ? Theme.palette.success : Theme.palette.textTertiary
-                    text: root.node.reachable ? ("Connected: " + (root.node.agent || "IPFS node") + " " + root.shortId(root.node.peerId)) : "No IPFS node answering at " + (root.node.api || "http://127.0.0.1:5001") + ". Run one (e.g. Kubo) to keep copies."
+                    text: root.node.reachable
+                          ? ("Your IPFS node: " + (root.node.source === "ipfs_module" ? "the IPFS Node module" : "configured below") + " · " + root.shortId(root.node.peerId) + ". Read from first; Keep and Publish pin there.")
+                          : "No IPFS node. Install the IPFS Node module (recommended), or run Kubo and enter its API and gateway below."
                 }
-                LogosText { text: "Gnosis RPC: " + (root.snap.rpc || "eth_rpc_module") + ". Change the endpoint (or set a proxy/Tor) in the Ethereum RPC app; this viewer adds chain 100 there only if it is missing."; wrapMode: Text.WordWrap; Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textTertiary }
+                RowLayout {
+                    Layout.fillWidth: true
+                    Field { id: nodeApiField; Layout.fillWidth: true; placeholderText: "Kubo API, e.g. http://127.0.0.1:5001"; text: root.snap.node ? root.snap.node.api : "" }
+                    Field { id: nodeGwField; Layout.fillWidth: true; placeholderText: "Kubo gateway, e.g. http://127.0.0.1:8080"; text: root.snap.node ? root.snap.node.gateway : "" }
+                    LogosButton { text: "Save node"; onClicked: root.act("set_ipfs_node", [nodeApiField.text, nodeGwField.text], "IPFS node saved", function () { root.refreshNode() }) }
+                }
+                LogosText {
+                    Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 12
+                    color: root.storage.available ? Theme.palette.success : Theme.palette.textTertiary
+                    text: root.storage.available ? ("Logos Storage: available (" + (root.snap.storedBlocks || 0) + " blocks copied there). Read from when IPFS has nothing.") : "Logos Storage is not available in this Basecamp."
+                }
+                Hint { text: "Gnosis RPC: " + (root.snap.rpc || "eth_rpc_module") + ". Change the endpoint (or a proxy/Tor) in the Ethereum RPC app." }
             }
 
             LogosText {
@@ -365,51 +479,114 @@ Item {
                 wrapMode: Text.WordWrap
                 textFormat: Text.PlainText
                 color: Theme.palette.warning
-                text: root.error.charAt(0).toUpperCase() + root.error.slice(1)
+                text: root.error
+                MouseArea { anchors.fill: parent; onClicked: root.error = "" }
             }
 
-            LogosText {
-                visible: !root.docv && !root.loading && root.error === ""
+            // home
+            ColumnLayout {
+                visible: root.mode === "home"
                 Layout.fillWidth: true
-                wrapMode: Text.WordWrap
-                textFormat: Text.PlainText
-                color: Theme.palette.textTertiary
-                text: "Open a share link to read a document. The key after #key= never leaves this device."
+                spacing: Theme.spacing.small
+                Hint { font.pixelSize: 14; text: "Open a share link above, open your own files with a backup key (My files), or write a document (Drafts). Keys never leave this device." }
             }
 
-            Item { visible: !root.docv; Layout.fillHeight: true }
+            // import a backup key
+            ColumnLayout {
+                visible: root.mode === "import"
+                Layout.fillWidth: true
+                spacing: Theme.spacing.small
+                LogosText { text: "Your own files"; font.pixelSize: 20; font.bold: true; textFormat: Text.PlainText }
+                Hint { font.pixelSize: 13; text: "dDocs and dSheets let you download backup keys (Settings → Backup). With that file, this app lists and opens every file of your portal straight from Gnosis and IPFS, with no share links and no Fileverse service. The keys are stored only on this device (file mode 600). Files locked with Fileverse's post-quantum scheme cannot be opened yet: its library is not public." }
+                RowLayout {
+                    LogosButton { text: "Choose backup file…"; onClicked: backupDialog.open() }
+                    Hint { text: "or paste its contents:" }
+                }
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 140
+                    TextArea {
+                        id: backupText
+                        color: Theme.palette.text
+                        font.pixelSize: 12
+                        font.family: Theme.typography.mono
+                        wrapMode: TextEdit.WrapAnywhere
+                        placeholderText: "{ \"portalAddress\": \"0x…\", … }"
+                        background: Rectangle { color: Theme.palette.surface; radius: Theme.spacing.radiusSmall; border.color: Theme.palette.border }
+                    }
+                }
+                LogosButton {
+                    text: "Import"
+                    onClicked: root.act("import_backup", [backupText.text], "Backup key imported", function (r) { backupText.text = ""; root.section = "files"; if (r.portals.length) root.showPortal(r.portals[0].portal) })
+                }
+            }
+
+            // a portal's files
+            ColumnLayout {
+                visible: root.mode === "portal"
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: Theme.spacing.small
+                LogosText { text: "Portal " + root.portal; font.pixelSize: 16; font.bold: true; textFormat: Text.PlainText; elide: Text.ElideMiddle; Layout.fillWidth: true }
+                Hint { text: root.busyWith("list") ? ("Reading the portal on Gnosis and the files' metadata from IPFS… " + root.elapsed("list") + "s") : (root.portalError !== "" ? "Could not read this portal." : (root.portalFiles.length + " files, newest first.")) }
+                ListView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    clip: true
+                    spacing: 2
+                    model: root.portalFiles
+                    ScrollBar.vertical: ScrollBar {}
+                    delegate: SideItem {
+                        width: ListView.view.width
+                        label: root.kindIcon(modelData.kind, "") + (modelData.title || (modelData.error ? "(cannot open)" : "Untitled"))
+                        sub: "#" + modelData.fileId + (modelData.updatedAt ? " · " + root.when(modelData.updatedAt) : "") + (modelData.error ? " · " + modelData.error : "")
+                        onClicked: if (!modelData.error) root.open(modelData.url)
+                    }
+                }
+            }
 
             // document header
             ColumnLayout {
-                visible: root.docv !== null
+                visible: root.mode === "doc" && root.docv !== null
                 Layout.fillWidth: true
                 spacing: 2
                 LogosText { Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 24; font.bold: true; text: root.docv ? (root.docv.title || "Untitled") : "" }
-                RowLayout {
+                LogosText {
                     Layout.fillWidth: true
-                    LogosText {
-                        Layout.fillWidth: true
-                        textFormat: Text.PlainText
-                        font.pixelSize: 12
-                        color: Theme.palette.textTertiary
-                        text: root.docv ? ((root.docv.kind === "dsheet" ? "dSheet" : "dDoc") + " · " + root.docv.layout + " portal " + root.shortId(root.docv.portal) + " · file " + root.docv.fileId
-                                           + (root.docv.updatedAt ? " · updated " + new Date(root.docv.updatedAt).toLocaleString() : "")) : ""
-                    }
+                    textFormat: Text.PlainText
+                    font.pixelSize: 12
+                    color: Theme.palette.textTertiary
+                    elide: Text.ElideRight
+                    text: !root.docv ? "" : ((root.docv.kind === "dsheet" ? "dSheet" : "dDoc") + " · "
+                          + (root.docv.layout === "logos" ? "published from Basecamp (no chain record)" : (root.docv.layout + " portal " + root.shortId(root.docv.portal) + " · file " + root.docv.fileId))
+                          + (root.docv.updatedAt ? " · updated " + root.when(root.docv.updatedAt) : ""))
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacing.small
+                    LogosButton { visible: root.deck.length > 0; text: "Present"; onClicked: root.present() }
+                    LogosButton { visible: root.docv && root.docv.markdown !== undefined; text: "Edit a copy"; onClicked: root.newDraft(root.docv.title || "Untitled", root.docv.markdownBody !== undefined ? root.docv.markdownBody : root.docv.markdown, root.docUrl) }
                     LogosButton {
                         visible: root.node.reachable || root.kept
-                        enabled: root.node.reachable && !root.keeping
-                        text: root.keeping ? "Keeping…" : (root.kept ? "Kept ✓" : "Keep a copy")
+                        enabled: root.node.reachable && !root.busyWith("keep")
+                        text: root.busyWith("keep") ? "Pinning…" : (root.kept ? "On my IPFS ✓" : "Keep on my IPFS")
                         onClicked: root.keepCopy()
                     }
-                    LogosButton { visible: root.deck.length > 0; text: "Present"; onClicked: root.present() }
-                    LogosButton { visible: root.docv && root.docv.markdown !== undefined; text: "Copy Markdown"; onClicked: root.copy(root.docv.markdown) }
+                    LogosButton {
+                        visible: root.storage.available || root.inStorage
+                        enabled: root.storage.available && !root.busyWith("storage")
+                        text: root.busyWith("storage") ? ("Copying… " + root.elapsed("storage") + "s") : (root.inStorage ? "In Logos Storage ✓" : "Copy to Logos Storage")
+                        onClicked: root.copyToStorage()
+                    }
+                    LogosButton { visible: root.docv && root.docv.markdown !== undefined; text: "Copy Markdown"; onClicked: root.copy(root.docv.markdown, "Markdown") }
+                    LogosButton { visible: root.docUrl.indexOf("fvbc://") === 0; text: "Copy link"; onClicked: root.copy(root.docUrl, "Link") }
                     LogosButton { text: root.showDetails ? "Hide sources" : "Sources"; onClicked: root.showDetails = !root.showDetails }
                 }
             }
 
             // provenance
             ColumnLayout {
-                visible: root.showDetails && root.docv !== null
+                visible: root.mode === "doc" && root.showDetails && root.docv !== null
                 Layout.fillWidth: true
                 spacing: 2
                 Repeater {
@@ -429,11 +606,83 @@ Item {
                 }
             }
 
+            // editor
+            ColumnLayout {
+                visible: root.mode === "edit" && root.draft !== null
+                Layout.fillWidth: true
+                Layout.fillHeight: true
+                spacing: Theme.spacing.small
+                RowLayout {
+                    Layout.fillWidth: true
+                    Field {
+                        id: titleField
+                        Layout.fillWidth: true
+                        font.pixelSize: 18
+                        placeholderText: "Title"
+                        onTextEdited: { root.draftDirty = true; previewTimer.restart() }
+                    }
+                    LogosText { textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textTertiary; text: root.draftDirty ? "editing…" : "saved on this device" }
+                }
+                Flow {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacing.small
+                    LogosButton {
+                        enabled: !root.busyWith("publish")
+                        text: root.busyWith("publish") ? ("Publishing… " + root.elapsed("publish") + "s") : (root.draft && root.draft.published ? "Publish again" : "Publish")
+                        onClicked: root.publishDraft()
+                    }
+                    LogosButton { visible: root.deck.length > 0; text: "Present"; onClicked: root.present() }
+                    LogosButton { visible: !!(root.draft && root.draft.published); text: "Copy link"; onClicked: root.copy(root.draft.published.link, "Link") }
+                    LogosButton { visible: !!(root.draft && root.draft.published); text: "Open published"; onClicked: root.open(root.draft.published.link) }
+                    LogosButton { visible: !!(root.draft && root.draft.sourceUrl); text: "Open original"; onClicked: root.open(root.draft.sourceUrl) }
+                }
+                Hint {
+                    text: root.draft && root.draft.published
+                          ? ("Published " + root.when(root.draft.published.at) + ". Anyone with the link can read it in Basecamp; each publish makes a new link (content-addressed).")
+                          : "Markdown on the left, the document as it will look on the right. Publishing encrypts it in the Fileverse format and puts it on your IPFS node and in Logos Storage."
+                }
+                SplitView {
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    orientation: Qt.Horizontal
+                    ScrollView {
+                        SplitView.preferredWidth: parent.width / 2
+                        SplitView.minimumWidth: 200
+                        TextArea {
+                            id: mdArea
+                            color: Theme.palette.text
+                            font.pixelSize: 14
+                            font.family: Theme.typography.mono
+                            wrapMode: TextEdit.Wrap
+                            selectByMouse: true
+                            textFormat: TextEdit.PlainText
+                            background: Rectangle { color: Theme.palette.surface; radius: Theme.spacing.radiusSmall; border.color: Theme.palette.border }
+                            onTextChanged: if (activeFocus) { root.draftDirty = true; previewTimer.restart() }
+                        }
+                    }
+                    ListView {
+                        id: previewList
+                        SplitView.fillWidth: true
+                        clip: true
+                        spacing: 6
+                        leftMargin: 12
+                        model: root.mode === "edit" ? root.blocks : []
+                        ScrollBar.vertical: ScrollBar {}
+                        delegate: Loader {
+                            width: previewList.width - 28
+                            property var b: modelData
+                            property real fs: 1
+                            sourceComponent: root.blockComponent(b)
+                        }
+                    }
+                }
+            }
+
             // tabs (docs) / sheet tabs
             Flow {
                 Layout.fillWidth: true
                 spacing: Theme.spacing.small
-                visible: root.tabs.length > 1 || root.sheets.length > 1
+                visible: root.mode === "doc" && (root.tabs.length > 1 || root.sheets.length > 1)
                 Repeater {
                     model: root.tabs.length > 1 ? root.tabs : root.sheets
                     LogosButton {
@@ -446,12 +695,12 @@ Item {
             // document body
             ListView {
                 id: docList
-                visible: root.tabs.length > 0
+                visible: root.mode === "doc" && root.tabs.length > 0
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 clip: true
                 spacing: 6
-                model: root.blocks
+                model: root.mode === "doc" ? root.blocks : []
                 ScrollBar.vertical: ScrollBar {}
                 delegate: Loader {
                     width: docList.width - 16
@@ -460,10 +709,9 @@ Item {
                     sourceComponent: root.blockComponent(b)
                 }
             }
-
             // sheet body
             ColumnLayout {
-                visible: root.sheet !== null
+                visible: root.mode === "doc" && root.sheet !== null
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 LogosText {
@@ -523,6 +771,7 @@ Item {
                     }
                 }
             }
+            Item { visible: root.mode === "home" || root.mode === "import"; Layout.fillHeight: true; Layout.fillWidth: true }
         }
     }
 
@@ -649,7 +898,7 @@ Item {
     // ── presentation: the current tab as dDocs would present it ──
     property bool presenting: false
     property int slideIndex: 0
-    readonly property var deck: root.tabs.length > 0 ? (root.tabs[Math.min(root.tabIndex, root.tabs.length - 1)].slides || []) : []
+    readonly property var deck: root.activeTabs.length > 0 ? (root.activeTabs[Math.min(root.tabIndex, root.activeTabs.length - 1)].slides || []) : []
     readonly property var slide: root.deck.length > 0 ? root.deck[Math.min(root.slideIndex, root.deck.length - 1)] : null
     function present() { root.slideIndex = 0; root.presenting = true; deckPane.forceActiveFocus() }
     function nextSlide() { if (root.slideIndex < root.deck.length - 1) root.slideIndex++ }
@@ -716,15 +965,17 @@ Item {
     }
 
     // toast
+
+    // toast
     Rectangle {
         visible: root.toast !== ""
         anchors.bottom: parent.bottom
         anchors.horizontalCenter: parent.horizontalCenter
         anchors.bottomMargin: 24
-        width: toastText.implicitWidth + 32
-        height: 36
+        width: Math.min(parent.width - 80, toastText.implicitWidth + 32)
+        height: toastText.implicitHeight + 16
         radius: 18
         color: Theme.palette.surfaceRaised
-        LogosText { id: toastText; anchors.centerIn: parent; textFormat: Text.PlainText; text: root.toast }
+        LogosText { id: toastText; anchors.centerIn: parent; width: Math.min(implicitWidth, root.width - 112); wrapMode: Text.WordWrap; textFormat: Text.PlainText; text: root.toast }
     }
 }

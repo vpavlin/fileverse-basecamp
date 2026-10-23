@@ -1,8 +1,8 @@
 {
   "name": "fileverse_core",
   "display_name": "Fileverse Viewer Core",
-  "version": "0.2.0",
-  "description": "Read-only viewer for Fileverse dDocs and dSheets share links. Resolves the file on Gnosis via eth_rpc_module, fetches hash-verified blocks from any IPFS gateway, decrypts locally. No Fileverse server involved.",
+  "version": "0.3.0",
+  "description": "Fileverse dDocs/dSheets in Logos Basecamp without Fileverse servers: share links and your own files (backup key) read from Gnosis via eth_rpc_module and hash-checked IPFS blocks, copies kept on your IPFS node (ipfs_module) and Logos Storage, Markdown drafts published to both.",
   "author": "vpavlin",
   "type": "core",
   "interface": "cdylib",
@@ -10,16 +10,39 @@
   "category": "productivity",
   "main": "fileverse_core_plugin",
   "dependencies": [
-    { "name": "eth_rpc_module", "version": "~0.1.0" }
+    {
+      "name": "eth_rpc_module",
+      "version": "~0.1.0"
+    }
   ],
   "include": [],
   "capabilities": [],
   "codegen": {
-    "rust": { "crate": "rust-lib", "trait": "FileverseCoreModule", "source": "src/glue.rs" }
+    "rust": {
+      "crate": "rust-lib",
+      "trait": "FileverseCoreModule",
+      "source": "src/glue.rs"
+    }
   },
   "nix": {
     "external_libraries": [],
-    "packages": { "build": [], "runtime": [] },
-    "cmake": { "find_packages": [], "extra_include_dirs": [] }
-  }
+    "packages": {
+      "build": [],
+      "runtime": []
+    },
+    "cmake": {
+      "find_packages": [],
+      "extra_include_dirs": []
+    }
+  },
+  "optional_dependencies": [
+    {
+      "name": "ipfs_module",
+      "version": "~0.1.0"
+    },
+    {
+      "name": "storage_module",
+      "version": "~3.0.0"
+    }
+  ]
 }

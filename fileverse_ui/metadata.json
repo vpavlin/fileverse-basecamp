@@ -1,15 +1,15 @@
 {
   "name": "fileverse_ui",
   "display_name": "Fileverse",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "ui_qml",
   "category": "productivity",
-  "description": "Read Fileverse dDocs and dSheets share links without any Fileverse server: Gnosis via eth_rpc_module, hash-checked IPFS blocks, local decryption.",
+  "description": "Fileverse dDocs and dSheets in Basecamp without Fileverse servers: read share links and your own files, present docs as slides, keep copies on IPFS and Logos Storage, write and publish documents.",
   "author": "vpavlin",
   "icon": "icon.png",
   "view": "Main.qml",
   "dependencies": [
-    { "name": "fileverse_core", "version": "~0.2.0" }
+    { "name": "fileverse_core", "version": "~0.3.0" }
   ],
   "nix": {
     "packages": { "build": [], "runtime": [] },

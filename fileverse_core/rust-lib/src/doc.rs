@@ -231,7 +231,15 @@ impl Inline {
             }
             None => {
                 self.html.push_str(&format!("{open}{body}{close}"));
-                self.md.push_str(&format!("{md_open}{s}{md_close}"));
+                // Markdown delimiters must hug the text: `**bold **` is not bold.
+                let core = s.trim();
+                if core.is_empty() || md_open.is_empty() {
+                    self.md.push_str(s);
+                } else {
+                    let lead = &s[..s.len() - s.trim_start().len()];
+                    let trail = &s[s.trim_end().len()..];
+                    self.md.push_str(&format!("{lead}{md_open}{core}{md_close}{trail}"));
+                }
             }
         }
         self.text.push_str(s);
@@ -570,9 +578,14 @@ pub fn markdown(title: &str, tabs: &[Tab]) -> String {
                 "table" => b.md.trim_end().to_string(),
                 _ => b.md.clone(),
             };
+            let is_item = |t: &str| matches!(t, "li" | "oli" | "task");
+            // A list must end with a blank line, or the next block joins its last item.
+            if !is_item(&b.t) && md.ends_with('\n') && !md.ends_with("\n\n") && !md.is_empty() {
+                md.push('\n');
+            }
             md.push_str(q);
             md.push_str(&line);
-            md.push_str(if matches!(b.t.as_str(), "li" | "oli" | "task") { "\n" } else { "\n\n" });
+            md.push_str(if is_item(&b.t) { "\n" } else { "\n\n" });
         }
     }
     md
@@ -642,6 +655,22 @@ mod tests {
         let s = slides(&blocks);
         assert_eq!(s[0].blocks, (0..7).collect::<Vec<_>>());
         assert_eq!(s[1].blocks, vec![7, 8]);
+    }
+
+    #[test]
+    fn markdown_marks_hug_text_and_lists_end() {
+        let mut bold = Attrs::new();
+        bold.insert("bold".into(), Any::Bool(true));
+        let mut i = Inline::default();
+        i.span("Read data ", Some(&bold));
+        i.span("- rest", None);
+        assert_eq!(i.md, "**Read data** - rest");
+        let blocks = vec![
+            Block { t: "li".into(), md: "one".into(), text: "one".into(), ..Default::default() },
+            Block { t: "h3".into(), md: "Next".into(), text: "Next".into(), ..Default::default() },
+        ];
+        let tabs = vec![Tab { id: "default".into(), name: "T".into(), depth: 0, slides: vec![], blocks }];
+        assert_eq!(markdown("", &tabs), "- one\n\n### Next\n\n");
     }
 
     #[test]

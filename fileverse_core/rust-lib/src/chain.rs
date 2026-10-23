@@ -23,11 +23,14 @@ pub enum Layout {
     Legacy,
     /// The App contract minted by the v3 AppRegistry (ddocs.new / dsheets.new).
     V3,
+    /// Published from Basecamp: no chain record, a manifest on IPFS / Logos Storage.
+    Logos,
 }
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FileRecord {
+    pub portal: String,
     pub layout: Layout,
     pub file_id: u64,
     pub app_file_id: String,
@@ -44,8 +47,15 @@ pub fn valid_address(a: &str) -> bool {
 }
 
 pub fn file_count(rpc: &dyn Rpc, portal: &str) -> Result<u64, String> {
+    if !valid_address(portal) {
+        return Err(format!("not a contract address: {portal}"));
+    }
     let raw = rpc.eth_call(portal, &abi::calldata("getFileCount()", None))?;
-    let v = abi::decode(&abi::hex_bytes(&raw)?, &[Kind::Uint])?;
+    let data = abi::hex_bytes(&raw)?;
+    if data.is_empty() {
+        return Err(format!("{portal} is not a Fileverse portal on Gnosis (no contract answers there)"));
+    }
+    let v = abi::decode(&data, &[Kind::Uint])?;
     Ok(v[0].as_u128() as u64)
 }
 
@@ -64,6 +74,7 @@ pub fn read_file(rpc: &dyn Rpc, portal: &str, id: u64) -> Result<FileRecord, Str
     if let Ok(v) = abi::decode(&data, &[Str, Uint, Str, Str, Str, Uint, Address]) {
         if looks_like_cid(v[2].as_str()) {
             return Ok(FileRecord {
+                portal: portal.to_string(),
                 layout: Layout::V3,
                 file_id: id,
                 app_file_id: v[0].as_str().into(),
@@ -81,6 +92,7 @@ pub fn read_file(rpc: &dyn Rpc, portal: &str, id: u64) -> Result<FileRecord, Str
         return Err(format!("file {id} does not exist in {portal}"));
     }
     Ok(FileRecord {
+        portal: portal.to_string(),
         layout: Layout::Legacy,
         file_id: id,
         app_file_id: String::new(),

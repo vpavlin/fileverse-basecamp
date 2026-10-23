@@ -24,6 +24,10 @@ pub fn decode(s: &str) -> Result<Vec<u8>, String> {
     STD.decode(t.as_bytes()).map_err(|e| format!("bad base64: {e}"))
 }
 
+pub fn encode_url(b: &[u8]) -> String {
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(b)
+}
+
 pub fn encode(b: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(b)
 }

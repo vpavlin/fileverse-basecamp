@@ -175,6 +175,22 @@
         "type": "github"
       }
     },
+    "ipfs_module": {
+      "inputs": {
+        "logos-module-builder": [
+          "logos-module-builder"
+        ]
+      },
+      "locked": {
+        "path": "../ipfs_module",
+        "type": "path"
+      },
+      "original": {
+        "path": "../ipfs_module",
+        "type": "path"
+      },
+      "parent": []
+    },
     "logos-capability-module": {
       "inputs": {
         "logos-module-builder": "logos-module-builder_2"
@@ -10953,6 +10969,28 @@
         "type": "github"
       }
     },
+    "logos-storage": {
+      "inputs": {
+        "nixpkgs": "nixpkgs_161",
+        "nixpkgs-windows": "nixpkgs-windows_146"
+      },
+      "locked": {
+        "lastModified": 1791033757,
+        "narHash": "sha256-Vj89qnnSFvPaROHJ44VBSg9vF+amjPfaNLg82yuisMw=",
+        "ref": "refs/tags/v0.5.3",
+        "rev": "56854f4ebce0cfe68e3557d1be21b758ac62ae0c",
+        "revCount": 996,
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/logos-storage/logos-storage-nim"
+      },
+      "original": {
+        "ref": "refs/tags/v0.5.3",
+        "submodules": true,
+        "type": "git",
+        "url": "https://github.com/logos-storage/logos-storage-nim"
+      }
+    },
     "logos-test-framework": {
       "inputs": {
         "logos-cpp-sdk": [
@@ -13916,6 +13954,22 @@
         "type": "github"
       }
     },
+    "nixpkgs-windows_146": {
+      "locked": {
+        "lastModified": 1789027773,
+        "narHash": "sha256-peDPNhDs5kAX4b7jP71fsyEI6vM5DTFNXhnjd+7Ug6A=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "4b576876945404fa58704ebe13e4e72c50a4ccdc",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "release-26.05",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "nixpkgs-windows_15": {
       "locked": {
         "lastModified": 1782723713,
@@ -16492,6 +16546,22 @@
         "type": "github"
       }
     },
+    "nixpkgs_161": {
+      "locked": {
+        "lastModified": 1783375776,
+        "narHash": "sha256-pg6hLjDeAWaUOzh2JM2Cw0BwYpGtOyNr6A4FBwP9Ymo=",
+        "owner": "NixOS",
+        "repo": "nixpkgs",
+        "rev": "cd648d6ea62bc0ffba91e61fcfe5e33c1e2004b1",
+        "type": "github"
+      },
+      "original": {
+        "owner": "NixOS",
+        "ref": "release-25.11",
+        "repo": "nixpkgs",
+        "type": "github"
+      }
+    },
     "nixpkgs_17": {
       "locked": {
         "lastModified": 1759036355,
@@ -18007,7 +18077,9 @@
     "root": {
       "inputs": {
         "eth_rpc_module": "eth_rpc_module",
-        "logos-module-builder": "logos-module-builder"
+        "ipfs_module": "ipfs_module",
+        "logos-module-builder": "logos-module-builder",
+        "storage_module": "storage_module"
       }
     },
     "rust-overlay": {
@@ -18107,6 +18179,28 @@
       "original": {
         "owner": "oxalica",
         "repo": "rust-overlay",
+        "type": "github"
+      }
+    },
+    "storage_module": {
+      "inputs": {
+        "logos-module-builder": [
+          "logos-module-builder"
+        ],
+        "logos-storage": "logos-storage"
+      },
+      "locked": {
+        "lastModified": 1791039176,
+        "narHash": "sha256-NSJrn8aR9fYKcNJjujXhIPTQNkJx+K4QGfZOfIH8qNs=",
+        "owner": "logos-co",
+        "repo": "logos-storage-module",
+        "rev": "7548f41ae189917d58c37f0fb6d3a2700b99f59b",
+        "type": "github"
+      },
+      "original": {
+        "owner": "logos-co",
+        "ref": "v3.0.2",
+        "repo": "logos-storage-module",
         "type": "github"
       }
     },

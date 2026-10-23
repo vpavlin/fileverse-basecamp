@@ -17,6 +17,18 @@ The background research (what Fileverse runs, what is open, what is on chain) is
 | Hardware identity | `keycard` | For key custody (stages 2, 6). |
 | Web rendering | Basecamp 0.3.2's Linux bundle ships QtWebEngine + QtWebChannel QML modules (308 MB Chromium core) and QtWebView; nothing uses them and the build notes call WebView dead weight | Could host Fileverse's (AGPL) React editor in a view for stage 4. Not verified that the plugin sandbox allows `import QtWebEngine`; needs a Basecamp-team decision either way. |
 
+## Status (2026-10-23, 0.3.0)
+
+| Stage | State |
+|---|---|
+| 0 Read share links | done |
+| 1 Keep what you can read | done: `ipfs_module` (bundled Kubo), Keep on my IPFS, Copy to Logos Storage with Storage as a hash-checked fallback source |
+| 2 Your own files | done for ECIES and RSA portals; post-quantum locks blocked on Fileverse publishing the library; version history and comments not yet |
+| 3 Trust-minimised chain reads | not started |
+| 4 Write | Basecamp-native: Markdown drafts published as Fileverse-format documents to IPFS + Storage (`fvbc://` links). Writing to Fileverse's chain records not started |
+| 5 Live collaboration over Logos | not started |
+| 6 Sharing without the gate | partly: a published draft's link key is the whole access; per-recipient keys not started |
+
 ## Stage 0: read share links (this repo, v0.1)
 
 Done. Share link -> Gnosis (eth_rpc_module) -> hash-checked IPFS blocks -> local

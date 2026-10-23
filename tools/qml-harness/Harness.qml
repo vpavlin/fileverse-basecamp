@@ -1,21 +1,21 @@
 // Offscreen render check for fileverse_ui/Main.qml.
 // A mock `logos` (an id in this context, which the loaded view's context inherits)
-// answers the core calls from fixtures; MODE picks what the view shows; the window
-// is grabbed to $OUT after it settles.
+// answers the core calls from fixtures. Arguments after "--": MODE [N] OUT.png with
+// MODE one of doc | slides | sheet | error | settings | portal | import | edit | editslides.
 import QtQuick
 import QtQuick.Window
 
 Window {
     id: win
-    width: 1100
-    height: 760
+    width: 1200
+    height: 800
     visible: true
 
-    // Arguments after "--": MODE [SLIDE] OUT.png, MODE one of doc | slides | sheet | error.
     readonly property var args: Qt.application.arguments.slice(Qt.application.arguments.indexOf("--") + 1)
     property string mode: args[0]
-    property int slideAt: mode === "slides" && args.length > 2 ? parseInt(args[1]) : 0
+    property int slideAt: args.length > 2 ? parseInt(args[1]) : 0
     property var docJson: null
+    property var lastJob: ""
 
     QtObject {
         id: logos
@@ -26,17 +26,50 @@ Window {
         }
     }
 
+    function draft() {
+        var md = "# Logos plan\n\nWe go **self-sovereign**: [Logos](https://logos.co).\n\n## Steps\n\n- IPFS node module\n- Logos Storage\n  - copy blocks\n\n1. edit\n2. publish\n\n> no servers\n\n```\nfvbc://ipfs/bafk…\n```\n\n| what | where |\n|---|---|\n| blocks | IPFS + Storage |\n"
+        return { id: "abc123", title: "Logos plan", markdown: md, sourceUrl: "", preview: win.previewOf(), published: mode === "edit" ? { link: "fvbc://ipfs/bafkreiexample#key=k", at: 1792700000000 } : null }
+    }
+    function previewOf() {
+        var b = [
+            { t: "h1", html: "Logos plan", text: "Logos plan" },
+            { t: "p", html: "We go <b>self-sovereign</b>: <a href=\"https://logos.co\">Logos</a>.", text: "We go self-sovereign: Logos." },
+            { t: "h2", html: "Steps", text: "Steps" },
+            { t: "li", html: "IPFS node module", text: "IPFS node module" },
+            { t: "li", html: "Logos Storage", text: "Logos Storage" },
+            { t: "li", depth: 1, html: "copy blocks", text: "copy blocks" },
+            { t: "oli", num: 1, html: "edit", text: "edit" },
+            { t: "oli", num: 2, html: "publish", text: "publish" },
+            { t: "p", quote: true, html: "no servers", text: "no servers" },
+            { t: "code", html: "", text: "fvbc://ipfs/bafk…" },
+            { t: "table", html: "", text: "", rows: [["what", "where"], ["blocks", "IPFS + Storage"]] }
+        ]
+        return [{ id: "default", name: "Tab 1", depth: 0, blocks: b, slides: [{ kind: "title", blocks: [0] }, { kind: "content", blocks: [1] }, { kind: "content", blocks: [2, 3, 4, 5, 6, 7, 8] }, { kind: "content", blocks: [9, 10] }] }]
+    }
+
     function answer(method, args) {
-        if (method === "snapshot") return { ok: true, version: "0.1.0", rpc: "eth_rpc_module (chain 100)", gateways: ["https://gateway.pinata.cloud", "https://ipfs.fileverse.io"],
-            recent: [ { url: "x", portal: "0x81fb962e2088De6925AffA4E068dd3FAF3EFE163", fileId: 57, title: "Fileverse Agents SDK - Docs 💛", kind: "ddoc" },
-                      { url: "y", portal: "0x1111111111111111111111111111111111111111", fileId: 7, title: "Budget <b>2026</b>", kind: "dsheet" } ] }
-        if (method === "node_status") return { ok: true, reachable: true, api: "http://127.0.0.1:5001", gateway: "http://127.0.0.1:8080", agent: "kubo/0.43.1", peerId: "12D3KooWFQFPzq7P7yM3SF2RhHCKsY9Ag8k1ZP8pnzU6QTS1Fjpz" }
-        if (method === "keep") return { ok: true, blocks: 2, pinned: 2 }
-        if (method === "open") return mode === "error" ? { ok: true, jobId: "j1" } : { ok: true, jobId: "j1" }
+        if (method === "snapshot") return { ok: true, version: "0.3.0", rpc: "eth_rpc_module (chain 100)", gateways: ["https://gateway.pinata.cloud"], storedBlocks: 6,
+            node: { api: "", gateway: "" },
+            recent: [ { url: "x", portal: "0x81fb962e2088De6925AffA4E068dd3FAF3EFE163", fileId: 57, title: "Fileverse Agents SDK - Docs 💛", kind: "ddoc", kept: ["a"], inStorage: ["a"] },
+                      { url: "fvbc://ipfs/b#key=k", layout: "logos", title: "Logos plan", kind: "ddoc" },
+                      { url: "fvown://0x2222222222222222222222222222222222222222/1", portal: "0x2222222222222222222222222222222222222222", fileId: 1, title: "Budget <b>2026</b>", kind: "dsheet" } ],
+            portals: [ { portal: "0x2222222222222222222222222222222222222222", kind: "ec", source: "docs.fileverse.io", hasPq: false }, { portal: "0x3333333333333333333333333333333333333333", kind: "legacy", source: "docs.fileverse.io" } ],
+            drafts: [ { id: "abc123", title: "Logos plan", updatedAt: 1792700000000, link: "fvbc://x", publishedAt: 1792700000000 }, { id: "d2", title: "Notes", updatedAt: 1792690000000 } ] }
+        if (method === "node_status") return { ok: true, reachable: true, source: "ipfs_module", api: "http://127.0.0.1:40263", gateway: "http://127.0.0.1:34231", peerId: "12D3KooWHeYVZC3hgJsXByFqD2tnVPdbhEfHt8rzJbXh5" }
+        if (method === "storage_status") return { ok: true, available: true, peerId: "16Uiu2…" }
+        if (method === "draft_get" || method === "draft_save" || method === "draft_create") return { ok: true, draft: win.draft() }
         if (method === "job") {
+            var id = args[0]
             if (mode === "error") return { ok: true, state: "failed", error: "the link key does not open this file (wrong or truncated link?)" }
+            if (id === "jlist") return { ok: true, state: "done", result: { ok: true, portal: "0x2222222222222222222222222222222222222222", files: [
+                { fileId: 3, title: "Meeting notes", kind: "ddoc", updatedAt: 1792700000000, url: "fvown://0x2222222222222222222222222222222222222222/3" },
+                { fileId: 2, kind: "ddoc", error: "locked with Fileverse's post-quantum scheme, whose library is not public; open it with a share link instead", url: "u" },
+                { fileId: 1, title: "Budget 2026", kind: "dsheet", updatedAt: 1792600000000, url: "u1" },
+                { fileId: 0, title: "First doc", kind: "ddoc", url: "u0" } ] } }
             return { ok: true, state: "done", elapsedMs: 900, result: mode === "sheet" ? win.sheetDoc() : win.docJson }
         }
+        if (method === "list_portal") return { ok: true, jobId: "jlist" }
+        if (method === "open") return { ok: true, jobId: "j1" }
         return { ok: true }
     }
 
@@ -53,7 +86,15 @@ Window {
         anchors.fill: parent
         source: Qt.resolvedUrl("../../fileverse_ui/Main.qml")
         onStatusChanged: if (status === Loader.Error) { console.log("LOAD ERROR"); Qt.exit(2) }
-        onLoaded: Qt.callLater(function () { item.showDetails = (win.mode === "doc"); item.showSettings = (win.mode === "settings"); item.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc") })
+        onLoaded: Qt.callLater(function () {
+            var it = item
+            it.showDetails = (win.mode === "doc")
+            it.showSettings = (win.mode === "settings")
+            if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
+            else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
+            else if (win.mode === "edit" || win.mode === "editslides") { it.section = "drafts"; it.openDraft("abc123") }
+            else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
+        })
     }
 
     Component.onCompleted: {
@@ -64,14 +105,15 @@ Window {
     }
 
     Timer {
-        interval: 1800; running: win.mode === "slides"
+        interval: 1800; running: win.mode === "slides" || win.mode === "editslides"
         onTriggered: { view.item.present(); for (var i = 0; i < win.slideAt; i++) view.item.nextSlide() }
     }
     Timer {
         interval: 3500; running: true
         onTriggered: {
-            if (win.mode === "slides") console.log("deck", view.item.deck.length, "slides; showing", win.slideAt + 1, "kind", view.item.slide ? view.item.slide.kind : "-")
+            if (win.mode === "slides" || win.mode === "editslides") console.log("deck", view.item.deck.length, "slides; showing", win.slideAt + 1, "kind", view.item.slide ? view.item.slide.kind : "-")
             if (win.mode === "error") console.log("error shown:", view.item.error)
+            if (win.mode === "edit") console.log("editor md chars:", view.item.draft ? view.item.draft.markdown.length : -1, "preview blocks:", view.item.blocks.length)
             view.grabToImage(function (r) { r.saveToFile(win.args[win.args.length - 1]); console.log("SAVED"); Qt.exit(0) })
         }
     }

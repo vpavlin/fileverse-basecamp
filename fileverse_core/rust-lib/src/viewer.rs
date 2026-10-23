@@ -52,14 +52,14 @@ pub fn parse_link(url: &str) -> Result<Link, String> {
     Err("could not find <portal address>/<file number> in the link".into())
 }
 
-enum FileKey {
+pub(crate) enum FileKey {
     /// Legacy portals: AES key + IV + tag, the tag kept apart from the content.
     Legacy { key: Vec<u8>, iv: Vec<u8>, tag: Vec<u8> },
     /// v3: a bare AES-256 key; IV and tag ride at the end of the content.
     Raw(Vec<u8>),
 }
 
-fn str_field<'a>(v: &'a Value, k: &str) -> &'a str {
+pub(crate) fn str_field<'a>(v: &'a Value, k: &str) -> &'a str {
     v.get(k).and_then(Value::as_str).unwrap_or("")
 }
 
@@ -83,7 +83,7 @@ fn link_secret(link_key: &[u8], meta: &Value, steps: &mut Vec<String>) -> Result
     Err("the link key does not open this file (wrong or truncated link?)".into())
 }
 
-fn file_key_of(plain: &[u8]) -> Result<FileKey, String> {
+pub(crate) fn file_key_of(plain: &[u8]) -> Result<FileKey, String> {
     if plain.first() == Some(&b'{') {
         let v: Value = serde_json::from_slice(plain).map_err(|e| format!("file key: {e}"))?;
         return Ok(FileKey::Legacy {
@@ -131,6 +131,11 @@ fn open_link_lock(lock: &Value, secret: &[u8], steps: &mut Vec<String>) -> Resul
 
 /// Legacy portals seal the title with the link secret and the metadata nonce;
 /// v3 files with the file key (nonce-prefixed GCM). Unreadable titles stay empty.
+/// The title with only the file key (backup-key opens have no link secret).
+pub(crate) fn title_with(meta: &Value, fk: &FileKey) -> String {
+    decrypt_title(meta, fk, &[])
+}
+
 fn decrypt_title(meta: &Value, fk: &FileKey, secret: &[u8]) -> String {
     let t = str_field(meta, "title");
     let Ok(ct) = b64::decode(t) else { return String::new() };
@@ -170,13 +175,46 @@ fn yjs_bytes(file: &Value) -> Result<Vec<u8>, String> {
     b64::decode(s)
 }
 
-fn fetch_json(gw: &Gateways, cid: &str, prov: &mut Vec<Provenance>) -> Result<Value, String> {
+pub(crate) fn fetch_json(gw: &Gateways, cid: &str, prov: &mut Vec<Provenance>) -> Result<Value, String> {
     let (b, p) = gw.get(cid)?;
     prov.push(p);
     serde_json::from_slice(&b).map_err(|e| format!("{cid} is not JSON: {e}"))
 }
 
+/// A document published from Basecamp: manifest -> metadata, gate, content.
+pub fn open_published(gw: &Gateways, url: &str) -> Result<Value, String> {
+    let (cid, key) = crate::publish::parse_link(url).ok_or("not a fvbc:// link")?;
+    let mut prov = vec![];
+    let manifest = fetch_json(gw, &cid, &mut prov)?;
+    if !crate::publish::manifest_ok(&manifest) {
+        return Err("this CID is not a published Basecamp document".into());
+    }
+    let mut steps = vec![format!("read the manifest {cid} (no chain record)")];
+    let meta = fetch_json(gw, str_field(&manifest, "metadata"), &mut prov)?;
+    let lock = fetch_json(gw, str_field(&manifest, "gate"), &mut prov)?;
+    let secret = link_secret(&b64::decode(&key)?, &meta, &mut steps)?;
+    let fk = open_link_lock(&lock, &secret, &mut steps)?;
+    let rec = FileRecord {
+        portal: String::new(),
+        layout: chain::Layout::Logos,
+        file_id: 0,
+        app_file_id: str_field(&meta, "ddocId").to_string(),
+        file_type: 2,
+        metadata_cid: str_field(&manifest, "metadata").to_string(),
+        content_cid: str_field(&manifest, "content").to_string(),
+        gate_cid: str_field(&manifest, "gate").to_string(),
+        version: 0,
+        owner: String::new(),
+    };
+    let mut out = finish(gw, &rec, &meta, &fk, &secret, prov, steps, "IPFS / Logos Storage".into())?;
+    out["manifest"] = Value::String(cid);
+    Ok(out)
+}
+
 pub fn open_link(rpc: &dyn Rpc, gw: &Gateways, url: &str) -> Result<Value, String> {
+    if url.trim().starts_with(crate::publish::LINK_PREFIX) {
+        return open_published(gw, url);
+    }
     let link = parse_link(url)?;
     let mut steps = vec![];
     let rec: FileRecord = chain::read_file(rpc, &link.portal, link.file_id)?;
@@ -193,14 +231,29 @@ pub fn open_link(rpc: &dyn Rpc, gw: &Gateways, url: &str) -> Result<Value, Strin
     };
     let secret = link_secret(&b64::decode(&link.key)?, &meta, &mut steps)?;
     let fk = open_link_lock(&lock, &secret, &mut steps)?;
+    finish(gw, &rec, &meta, &fk, &secret, prov, steps, rpc.describe())
+}
+
+/// Fetch and decrypt the content, then render it. Shared by every way of getting
+/// a file key: a share link, a backup key, or a published draft.
+pub(crate) fn finish(
+    gw: &Gateways,
+    rec: &FileRecord,
+    meta: &Value,
+    fk: &FileKey,
+    title_secret: &[u8],
+    mut prov: Vec<Provenance>,
+    mut steps: Vec<String>,
+    source: String,
+) -> Result<Value, String> {
     let (blob, p) = gw.get(&rec.content_cid)?;
     prov.push(p);
-    let plain = decrypt_content(&blob, &fk)?;
+    let plain = decrypt_content(&blob, fk)?;
     steps.push("content decrypted (AES-256-GCM)".into());
     let content: Value = serde_json::from_slice(&plain).map_err(|e| format!("decrypted content is not JSON: {e}"))?;
-    let title = decrypt_title(&meta, &fk, &secret);
+    let title = decrypt_title(meta, fk, title_secret);
     let kind = {
-        let k = str_field(&meta, "kind");
+        let k = str_field(meta, "kind");
         let s = str_field(&content, "source");
         if k == "dsheet" || s == "dsheet" || meta.get("dsheetId").is_some() { "dsheet" } else { "ddoc" }
     };
@@ -209,22 +262,24 @@ pub fn open_link(rpc: &dyn Rpc, gw: &Gateways, url: &str) -> Result<Value, Strin
         "ok": true,
         "kind": kind,
         "title": title,
-        "portal": link.portal,
-        "fileId": link.file_id,
+        "portal": rec.portal,
+        "fileId": rec.file_id,
         "layout": rec.layout,
         "chainId": chain::GNOSIS_CHAIN_ID,
         "record": rec,
-        "permissionType": str_field(&meta, "permissionType"),
+        "permissionType": str_field(meta, "permissionType"),
         "createdAt": meta.get("createdAt").cloned().unwrap_or(Value::Null),
         "updatedAt": meta.get("contentUpdatedAt").or_else(|| meta.get("last_updated")).cloned().unwrap_or(Value::Null),
-        "provenance": { "rpc": rpc.describe(), "blobs": prov, "steps": steps },
+        "provenance": { "rpc": source, "blobs": prov, "steps": steps },
     });
     if kind == "dsheet" {
-        let sheets = sheet::sheets(&ydoc, str_field(&meta, "dsheetId"))?;
+        let sheets = sheet::sheets(&ydoc, str_field(meta, "dsheetId"))?;
         out["sheets"] = serde_json::to_value(sheets).unwrap();
     } else {
         let tabs = doc::tabs(&ydoc);
         out["markdown"] = Value::String(doc::markdown(&title, &tabs));
+        // The body alone, for "Edit a copy" (the title is edited separately).
+        out["markdownBody"] = Value::String(doc::markdown("", &tabs));
         out["tabs"] = serde_json::to_value(tabs).unwrap();
     }
     Ok(out)

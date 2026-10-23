@@ -75,6 +75,25 @@ pub fn gcm_open_tag_iv_suffixed(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Stri
     gcm_open(key, iv, body)
 }
 
+pub fn random<const N: usize>() -> [u8; N] {
+    use rand::RngCore;
+    let mut b = [0u8; N];
+    rand::rngs::OsRng.fill_bytes(&mut b);
+    b
+}
+
+pub fn gcm_seal(key: &[u8], iv: &[u8], plain: &[u8]) -> Result<Vec<u8>, String> {
+    Aes256Gcm::new_from_slice(key)
+        .map_err(|e| e.to_string())?
+        .encrypt(Nonce::from_slice(iv), plain)
+        .map_err(|_| "AES-GCM encryption failed".to_string())
+}
+
+pub fn secretbox_seal(key: &[u8], nonce: &[u8], plain: &[u8]) -> Result<Vec<u8>, String> {
+    let c = XSalsa20Poly1305::new_from_slice(key).map_err(|e| e.to_string())?;
+    c.encrypt(crypto_secretbox::Nonce::from_slice(nonce), plain).map_err(|_| "secretbox failed".to_string())
+}
+
 pub fn pbkdf2_32(ikm: &[u8], salt: &[u8]) -> [u8; 32] {
     let mut out = [0u8; 32];
     pbkdf2::pbkdf2_hmac::<Sha256>(ikm, salt, 32, &mut out);
