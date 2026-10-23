@@ -32,7 +32,8 @@ pub fn parse_link(url: &str) -> Result<Link, String> {
     let (path, frag) = url.split_once('#').ok_or("the link has no #key= part; it is needed to decrypt")?;
     let key = frag
         .split(['&', '#'])
-        .find_map(|p| p.strip_prefix("key="))
+        // `#key=` (older links) or `#k=` (current ddocs.new links)
+        .find_map(|p| p.strip_prefix("key=").or_else(|| p.strip_prefix("k=")))
         .ok_or("the link has no key= in its fragment")?
         .to_string();
     let host = path
@@ -296,5 +297,7 @@ mod tests {
         assert!(parse_link("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57").is_err());
         let l = parse_link("https://ddocs.new/d/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/3?x=1#foo=1&key=k2").unwrap();
         assert_eq!((l.file_id, l.key.as_str()), (3, "k2"));
+        let l = parse_link("https://docs.fileverse.io/0x2d133a10443a13957278e7dfeefbfee826c82fd8/115#k=raw32").unwrap();
+        assert_eq!((l.file_id, l.key.as_str()), (115, "raw32"));
     }
 }

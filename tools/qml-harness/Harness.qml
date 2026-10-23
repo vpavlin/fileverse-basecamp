@@ -55,7 +55,7 @@ Window {
                       { url: "fvown://0x2222222222222222222222222222222222222222/1", portal: "0x2222222222222222222222222222222222222222", fileId: 1, title: "Budget <b>2026</b>", kind: "dsheet" } ],
             portals: [ { portal: "0x2222222222222222222222222222222222222222", kind: "ec", source: "docs.fileverse.io", hasPq: false }, { portal: "0x3333333333333333333333333333333333333333", kind: "legacy", source: "docs.fileverse.io" } ],
             drafts: [ { id: "abc123", title: "Logos plan", updatedAt: 1792700000000, link: "fvbc://x", publishedAt: 1792700000000 }, { id: "d2", title: "Notes", updatedAt: 1792690000000 } ] }
-        if (method === "node_status") return { ok: true, reachable: true, source: "ipfs_module", api: "http://127.0.0.1:40263", gateway: "http://127.0.0.1:34231", peerId: "12D3KooWHeYVZC3hgJsXByFqD2tnVPdbhEfHt8rzJbXh5" }
+        if (method === "node_status") return { ok: true, reachable: true, source: "ipfs_module", peers: 43, pins: 12, repoSize: 52428800, api: "http://127.0.0.1:40263", gateway: "http://127.0.0.1:34231", peerId: "12D3KooWHeYVZC3hgJsXByFqD2tnVPdbhEfHt8rzJbXh5" }
         if (method === "storage_status") return { ok: true, available: true, peerId: "16Uiu2…" }
         if (method === "draft_get" || method === "draft_save" || method === "draft_create") return { ok: true, draft: win.draft() }
         if (method === "job") {
@@ -69,6 +69,9 @@ Window {
             return { ok: true, state: "done", elapsedMs: 900, result: mode === "sheet" ? win.sheetDoc() : win.docJson }
         }
         if (method === "list_portal") return { ok: true, jobId: "jlist" }
+        if (method === "portal_files") return { ok: true, portal: "0x2222222222222222222222222222222222222222", listedAt: Date.now(), backup: { "3": { local: true, ipfs: true, storage: true }, "1": { local: true, ipfs: true, storage: false } },
+            files: [ { fileId: 3, title: "Meeting notes", kind: "ddoc", updatedAt: 1792700000000, url: "u3", cids: ["a","b",""] }, { fileId: 2, kind: "ddoc", error: "locked with Fileverse's post-quantum scheme, whose library is not public; open it with a share link instead", url: "u" },
+                     { fileId: 1, title: "Budget 2026", kind: "dsheet", updatedAt: 1792600000000, url: "u1" }, { fileId: 0, title: "First doc", kind: "ddoc", url: "u0" } ] }
         if (method === "open") return { ok: true, jobId: "j1" }
         return { ok: true }
     }

@@ -63,6 +63,11 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn forget_portal(&self, portal: String) -> String;
     /// List a portal's files (titles decrypted with its backup key). Returns a job.
     fn list_portal(&self, portal: String) -> String;
+    /// The last listing of a portal, kept on this device, with each file's backup state.
+    fn portal_files(&self, portal: String) -> String;
+    /// Back up every file of a portal: fetch all blocks to this device, pin them on your
+    /// IPFS node and copy them into Logos Storage, where available. Returns a job.
+    fn backup_portal(&self, portal: String) -> String;
     /// Render Markdown the way the document view and the slide view will show it.
     fn preview(&self, markdown: String) -> String;
     /// Create a draft. `source_url` names the document it was copied from (may be empty).
@@ -86,7 +91,9 @@ pub trait FileverseCoreModuleEvents {
 
 include!(concat!(env!("CARGO_MANIFEST_DIR"), "/generated/provider_gen.rs"));
 
-const RPC_TIMEOUT: Duration = Duration::from_secs(25);
+const RPC_TIMEOUT: Duration = Duration::from_secs(15);
+/// Tried in order when the endpoint configured for chain 100 keeps failing.
+const FALLBACK_RPCS: &[&str] = &["https://gnosis-rpc.publicnode.com", "https://gnosis.drpc.org", "https://1rpc.io/gnosis", "https://rpc.gnosischain.com"];
 const CONFIG_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_RECENT: usize = 30;
 const NODE_PROBE: Duration = Duration::from_millis(800);
@@ -100,13 +107,98 @@ const MAX_PORTAL_FILES: u64 = 200;
 
 struct ModuleRpc;
 
+const RPC_IN_FLIGHT: usize = 2;
+static RPC_SLOTS: std::sync::Mutex<usize> = std::sync::Mutex::new(0);
+static RPC_FREED: std::sync::Condvar = std::sync::Condvar::new();
+
+/// One of `RPC_IN_FLIGHT` chain-call slots, released on drop.
+struct RpcSlot;
+
+impl RpcSlot {
+    fn take() -> RpcSlot {
+        let mut n = RPC_SLOTS.lock().unwrap();
+        while *n >= RPC_IN_FLIGHT {
+            n = RPC_FREED.wait(n).unwrap();
+        }
+        *n += 1;
+        RpcSlot
+    }
+}
+
+impl Drop for RpcSlot {
+    fn drop(&mut self) {
+        *RPC_SLOTS.lock().unwrap() -= 1;
+        RPC_FREED.notify_one();
+    }
+}
+
 impl Rpc for ModuleRpc {
+    /// Public RPCs drop or time out requests under load (a portal listing makes
+    /// hundreds); retry transport failures with backoff before giving up.
     fn eth_call(&self, to: &str, data: &str) -> Result<String, String> {
+        use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+        // Which endpoint answered last (0 = the configured one, i = FALLBACK_RPCS[i-1]),
+        // and until when to stay on a fallback before trying the configured one again.
+        static PREFERRED: AtomicUsize = AtomicUsize::new(0);
+        static STICKY_UNTIL: AtomicU64 = AtomicU64::new(0);
+        let transient = |e: &str| {
+            let l = e.to_ascii_lowercase();
+            ["timed out", "error sending", "429", "did not answer", "rate limit", "-32005", "too many"].iter().any(|t| l.contains(t))
+        };
+        // Public RPCs rate-limit bursts: at most two chain calls in flight, however many
+        // files are being read at once (IPFS fetches stay parallel).
+        let _slot = RpcSlot::take();
+        let mut order: Vec<usize> = (0..=FALLBACK_RPCS.len()).collect();
+        if now_ms() < STICKY_UNTIL.load(Ordering::Relaxed) {
+            let p = PREFERRED.load(Ordering::Relaxed);
+            order.retain(|i| *i != p);
+            order.insert(0, p);
+        }
+        let mut last = String::new();
+        for (n, i) in order.iter().enumerate() {
+            let url = if *i == 0 { None } else { Some(FALLBACK_RPCS[*i - 1]) };
+            // the first choice gets one quick retry; the rest one try each
+            for attempt in 0..(if n == 0 { 2 } else { 1 }) {
+                if attempt > 0 {
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+                match self.eth_call_once(to, data, url) {
+                    Ok(v) => {
+                        if *i != 0 {
+                            PREFERRED.store(*i, Ordering::Relaxed);
+                            STICKY_UNTIL.store(now_ms() + 10 * 60 * 1000, Ordering::Relaxed);
+                        } else {
+                            STICKY_UNTIL.store(0, Ordering::Relaxed);
+                        }
+                        return Ok(v);
+                    }
+                    Err(e) if transient(&e) => {
+                        if e.to_ascii_lowercase().contains("rate") || e.contains("-32005") || e.contains("429") {
+                            std::thread::sleep(Duration::from_millis(1500));
+                        }
+                        last = format!("{}: {e}", url.unwrap_or("configured endpoint"))
+                    }
+                    Err(e) => return Err(e),
+                }
+            }
+        }
+        Err(last)
+    }
+
+    fn describe(&self) -> String {
+        "eth_rpc_module (chain 100)".into()
+    }
+}
+
+impl ModuleRpc {
+    fn eth_call_once(&self, to: &str, data: &str, url: Option<&str>) -> Result<String, String> {
         let params = json!([{ "to": to, "data": data }, "latest"]).to_string();
-        let raw = modules()
-            .eth_rpc_module
-            .raw_rpc_with_timeout(GNOSIS_CHAIN_ID as i64, "eth_call", &params, RPC_TIMEOUT)
-            .map_err(|e| format!("eth_rpc_module did not answer: {e}"))?;
+        let rpc = modules().eth_rpc_module;
+        let raw = match url {
+            None => rpc.raw_rpc_with_timeout(GNOSIS_CHAIN_ID as i64, "eth_call", &params, RPC_TIMEOUT),
+            Some(u) => rpc.raw_rpc_url_with_timeout(GNOSIS_CHAIN_ID as i64, u, "eth_call", &params, RPC_TIMEOUT),
+        }
+        .map_err(|e| format!("eth_rpc_module did not answer: {e}"))?;
         let v: Value = serde_json::from_str(&raw).map_err(|e| format!("eth_rpc_module: {e}"))?;
         if v.get("ok").and_then(Value::as_bool) != Some(true) {
             let why = v.get("error").and_then(Value::as_str).unwrap_or("eth_call failed");
@@ -116,10 +208,6 @@ impl Rpc for ModuleRpc {
             .and_then(Value::as_str)
             .map(str::to_string)
             .ok_or_else(|| "Gnosis RPC returned no result".into())
-    }
-
-    fn describe(&self) -> String {
-        "eth_rpc_module (chain 100)".into()
     }
 }
 
@@ -217,6 +305,7 @@ struct Job {
     state: &'static str,
     result: Value,
     error: String,
+    progress: String,
     started: u64,
 }
 
@@ -229,6 +318,8 @@ struct State {
     recent: Vec<Value>,
     storage: StorageMap,
     keys: Vec<PortalKeys>,
+    /// portal -> { files, listedAt, backup: { fileId: { roots, local, ipfs, storage, at } } }
+    portal_lists: HashMap<String, Value>,
     jobs: HashMap<String, Job>,
     seq: u64,
     chain_seeded: bool,
@@ -288,7 +379,24 @@ impl State {
         }
     }
 
+    fn save_portals(&self) {
+        if let Some(p) = self.path("portals.json") {
+            write_private(&p, &json!(self.portal_lists).to_string());
+        }
+    }
+
+    fn portal_entry(&mut self, portal: &str) -> &mut Value {
+        self.portal_lists
+            .entry(portal.to_ascii_lowercase())
+            .or_insert_with(|| json!({ "files": [], "listedAt": null, "backup": {} }))
+    }
+
     fn load(&mut self, dir: &Path) {
+        if let Ok(b) = std::fs::read(dir.join("portals.json")) {
+            if let Ok(Value::Object(m)) = serde_json::from_slice::<Value>(&b) {
+                self.portal_lists = m.into_iter().collect();
+            }
+        }
         if let Ok(b) = std::fs::read(dir.join("settings.json")) {
             if let Ok(v) = serde_json::from_slice::<Value>(&b) {
                 self.gateways = v["gateways"].as_array().map(|a| a.iter().filter_map(|g| g.as_str().map(str::to_string)).collect()).unwrap_or_default();
@@ -338,7 +446,7 @@ impl State {
 /// writes only absent fields, so a user's own endpoint is never replaced.
 fn seed_gnosis() -> Result<(), String> {
     let cfg = json!({
-        "endpoint": "https://rpc.gnosischain.com",
+        "endpoint": "https://gnosis-rpc.publicnode.com",
         "name": "Gnosis",
         "nativeSymbol": "xDAI",
         "nativeDecimals": 18,
@@ -404,13 +512,13 @@ impl FileverseCoreModuleImpl {
     /// Readers for this request: your node first, then gateways, then Logos Storage.
     fn gateways(&self, node: Option<&NodeInfo>) -> Gateways {
         let s = self.state.lock().unwrap();
-        let mut list = s.gateway_list();
+        let list = s.gateway_list();
+        let mut gw = Gateways::new(list, s.path("blocks"));
         if let Some(n) = node {
-            if !n.gateway.is_empty() && !list.contains(&n.gateway) {
-                list.insert(0, n.gateway.clone());
+            if !n.gateway.is_empty() {
+                gw.node = Some((n.gateway.clone(), n.api.clone()));
             }
         }
-        let mut gw = Gateways::new(list, s.path("blocks"));
         if !s.storage.is_empty() {
             gw.extra.push(Box::new(StorageSource { map: s.storage.clone(), tmp: s.path("tmp").unwrap_or_else(std::env::temp_dir) }));
         }
@@ -421,21 +529,21 @@ impl FileverseCoreModuleImpl {
         let mut s = self.state.lock().unwrap();
         s.seq += 1;
         let id = format!("j{}", s.seq);
-        s.jobs.insert(id.clone(), Job { state: "pending", result: Value::Null, error: String::new(), started: now_ms() });
+        s.jobs.insert(id.clone(), Job { state: "pending", result: Value::Null, error: String::new(), progress: String::new(), started: now_ms() });
         id
     }
 
     /// Run `work` on its own thread; `done` updates state with the result.
     fn run_job<W, D>(&self, work: W, done: D) -> String
     where
-        W: FnOnce(&FileverseCoreModuleImpl) -> Result<Value, String> + Send + 'static,
+        W: FnOnce(&FileverseCoreModuleImpl, &str) -> Result<Value, String> + Send + 'static,
         D: FnOnce(&mut State, &Value) + Send + 'static,
     {
         let id = self.new_job();
         let me = FileverseCoreModuleImpl { state: self.state.clone() };
         let job_id = id.clone();
         std::thread::spawn(move || {
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&me)))
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| work(&me, &job_id)))
                 .unwrap_or_else(|_| Err("internal error while running this job".into()));
             let mut s = me.state.lock().unwrap();
             if let Ok(v) = &r {
@@ -456,6 +564,15 @@ impl FileverseCoreModuleImpl {
             emit_job_changed(&job_id);
         });
         json!({ "ok": true, "jobId": id }).to_string()
+    }
+
+    fn set_progress(&self, job: &str, text: String) {
+        let mut s = self.state.lock().unwrap();
+        if let Some(j) = s.jobs.get_mut(job) {
+            j.progress = text;
+        }
+        drop(s);
+        emit_job_changed(job);
     }
 
     fn seed_chain_once(&self) {
@@ -557,7 +674,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         }
         let u2 = url.clone();
         self.run_job(
-            move |me| {
+            move |me, _job| {
                 me.seed_chain_once();
                 let node = me.node(NODE_PROBE);
                 let gw = me.gateways(node.as_ref());
@@ -584,7 +701,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         match s.jobs.get(&job_id) {
             None => err("no such job (the core was restarted?)"),
             Some(j) => json!({
-                "ok": true, "jobId": job_id, "state": j.state, "error": j.error,
+                "ok": true, "jobId": job_id, "state": j.state, "error": j.error, "progress": j.progress,
                 "elapsedMs": now_ms().saturating_sub(j.started), "result": j.result,
             })
             .to_string(),
@@ -664,7 +781,19 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
 
     fn node_status(&self) -> String {
         match self.node(Duration::from_secs(2)) {
-            Some(n) => json!({ "ok": true, "reachable": true, "source": n.source, "api": n.api, "gateway": n.gateway, "peerId": n.peer_id }),
+            Some(n) => {
+                let mut v = json!({ "ok": true, "reachable": true, "source": n.source, "api": n.api, "gateway": n.gateway, "peerId": n.peer_id });
+                if n.source == "ipfs_module" {
+                    if let Ok(raw) = ipfs_module::IpfsModuleClient::new().status_with_timeout(Duration::from_secs(5)) {
+                        if let Ok(st) = serde_json::from_str::<Value>(&raw) {
+                            for k in ["peers", "pins", "repoSize", "offline", "running"] {
+                                v[k] = st[k].clone();
+                            }
+                        }
+                    }
+                }
+                v
+            }
             None => json!({ "ok": true, "reachable": false, "error": "no IPFS node: install the IPFS Node module, or run Kubo and set it in Settings" }),
         }
         .to_string()
@@ -677,7 +806,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         };
         let u2 = url.clone();
         self.run_job(
-            move |me| {
+            move |me, _job| {
                 let n = me.node(Duration::from_secs(2)).ok_or("no IPFS node is available")?;
                 let gw = me.gateways(Some(&n));
                 let count = Node::new(&n.api, Duration::from_secs(60)).keep(&gw, &roots, &blocks)?;
@@ -710,7 +839,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         };
         let u2 = url.clone();
         self.run_job(
-            move |me| {
+            move |me, _job| {
                 let (known, tmp) = {
                     let s = me.state.lock().unwrap();
                     (s.storage.clone(), s.path("tmp").unwrap_or_else(std::env::temp_dir))
@@ -775,11 +904,14 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         };
         let Some(keys) = keys else { return err("no backup key stored for this portal") };
         self.run_job(
-            move |me| {
+            move |me, job| {
                 me.seed_chain_once();
                 let node = me.node(NODE_PROBE);
                 let gw = me.gateways(node.as_ref());
-                let files = backup::list(&ModuleRpc, &gw, &keys, MAX_PORTAL_FILES)?;
+                me.set_progress(job, "reading the portal on Gnosis".into());
+                let files = backup::list_with_progress(&ModuleRpc, &gw, &keys, MAX_PORTAL_FILES, &|done, all| {
+                    me.set_progress(job, format!("reading files {done}/{all}"));
+                })?;
                 let files: Vec<Value> = files
                     .into_iter()
                     .map(|mut f| {
@@ -789,7 +921,101 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                     .collect();
                 Ok(json!({ "ok": true, "portal": keys.portal, "files": files }))
             },
-            |_, _| {},
+            |s, v| {
+                let portal = v["portal"].as_str().unwrap_or("").to_string();
+                let e = s.portal_entry(&portal);
+                e["files"] = v["files"].clone();
+                e["listedAt"] = json!(now_ms());
+                s.save_portals();
+            },
+        )
+    }
+
+    fn portal_files(&self, portal: String) -> String {
+        let mut s = self.state.lock().unwrap();
+        let e = s.portal_entry(&portal).clone();
+        json!({ "ok": true, "portal": portal, "files": e["files"], "listedAt": e["listedAt"], "backup": e["backup"] }).to_string()
+    }
+
+    fn backup_portal(&self, portal: String) -> String {
+        let files = {
+            let mut s = self.state.lock().unwrap();
+            s.portal_entry(&portal)["files"].as_array().cloned().unwrap_or_default()
+        };
+        // Encrypted blocks need no key to be kept: files we cannot open yet (post-quantum
+        // locks) are backed up too, for the day they can be.
+        let files: Vec<Value> = files.into_iter().filter(|f| f.get("cids").is_some()).collect();
+        if files.is_empty() {
+            return err("list the portal first (with this version), then back it up");
+        }
+        let portal2 = portal.clone();
+        self.run_job(
+            move |me, job| {
+                let node = me.node(Duration::from_secs(2));
+                let gw = me.gateways(node.as_ref());
+                // 1. every block onto this device (the verified block cache)
+                let fetched = backup::fetch_files(&gw, &files, &|done, all| me.set_progress(job, format!("fetching files {done}/{all}")));
+                let ok: Vec<&Value> = fetched.iter().filter(|f| f.get("error").is_none()).collect();
+                let failed: Vec<Value> = fetched.iter().filter(|f| f.get("error").is_some()).cloned().collect();
+                let roots: Vec<String> = ok.iter().flat_map(|f| f["roots"].as_array().cloned().unwrap_or_default()).filter_map(|c| c.as_str().map(str::to_string)).collect();
+                let blocks: Vec<String> = ok.iter().flat_map(|f| f["blocks"].as_array().cloned().unwrap_or_default()).filter_map(|c| c.as_str().map(str::to_string)).collect();
+                let mut out = json!({ "ok": true, "portal": portal2, "files": fetched.len(), "fetched": ok.len(), "failed": failed, "blocks": blocks.len() });
+                let mut notes = vec![];
+                // 2. pinned on your IPFS node
+                match &node {
+                    Some(n) => {
+                        me.set_progress(job, format!("pinning {} blocks on your IPFS node", blocks.len()));
+                        match Node::new(&n.api, Duration::from_secs(120)).keep(&gw, &roots, &blocks) {
+                            Ok(_) => {
+                                out["ipfs"] = json!(n.source);
+                                out["peerId"] = json!(n.peer_id);
+                            }
+                            Err(e) => notes.push(format!("IPFS: {e}")),
+                        }
+                    }
+                    None => notes.push("IPFS: no node available".into()),
+                }
+                // 3. copied into Logos Storage
+                let (known, tmp) = {
+                    let s = me.state.lock().unwrap();
+                    (s.storage.clone(), s.path("tmp").unwrap_or_else(std::env::temp_dir))
+                };
+                let todo = blocks.iter().filter(|b| !known.contains_key(*b)).count();
+                me.set_progress(job, format!("copying {todo} blocks to Logos Storage"));
+                match copy_blocks_to_storage(&gw, &blocks, &known, &tmp) {
+                    Ok(added) => {
+                        let map: HashMap<&String, Value> = added.iter().map(|(k, (c, n))| (k, json!([c, n]))).collect();
+                        out["storage"] = json!(map);
+                    }
+                    Err(e) => notes.push(format!("Logos Storage: {e}")),
+                }
+                out["notes"] = json!(notes);
+                out["perFile"] = json!(fetched);
+                Ok(out)
+            },
+            move |s, v| {
+                if let Some(m) = v["storage"].as_object() {
+                    for (k, e) in m {
+                        if let (Some(c), Some(n)) = (e[0].as_str(), e[1].as_u64()) {
+                            s.storage.insert(k.clone(), (c.to_string(), n));
+                        }
+                    }
+                }
+                let ipfs = v.get("ipfs").is_some();
+                let storage = v.get("storage").is_some();
+                let peer = v["peerId"].clone();
+                let at = now_ms();
+                let e = s.portal_entry(&portal);
+                for f in v["perFile"].as_array().cloned().unwrap_or_default() {
+                    if f.get("error").is_some() {
+                        continue;
+                    }
+                    let id = f["fileId"].to_string();
+                    e["backup"][id] = json!({ "roots": f["roots"], "local": true, "ipfs": ipfs, "keptOn": peer, "storage": storage, "at": at });
+                }
+                s.save();
+                s.save_portals();
+            },
         )
     }
 
@@ -867,7 +1093,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         let link = built.link.clone();
         let link2 = link.clone();
         self.run_job(
-            move |me| {
+            move |me, _job| {
                 let node = me.node(Duration::from_secs(2));
                 let gw = me.gateways(node.as_ref());
                 for (cid, bytes) in &built.blocks {

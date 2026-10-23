@@ -1,5 +1,25 @@
 # What was tested, and how to repeat it
 
+## 0.4.0 / ipfs_module 0.1.1 (2026-10-23)
+
+- First real-data test by the user: a real dDocs backup key listed and opened their portal.
+- Portal list cached on disk (`portals.json`): shown at once on return, refreshed in the
+  background when older than 15 min. GUI: open a file, go back, the 77-file list is still there.
+- Listing reads 6 files in parallel with progress; chain calls capped at 2 in flight, retried,
+  and switched to other public Gnosis RPCs when the configured one fails (rpc.gnosischain.com
+  timed out from the test host); a file that cannot be read is listed with the reason.
+  81-slot portal: 175 s on a degraded link, 77/77 read (was 443-521 s with 27-31 lost).
+- Back up everything: 77 files, 658 blocks to disk, 155 roots pinned on ipfs_module, 658 blocks
+  into Logos Storage in 133 s (headless), and the same from the Basecamp GUI ("77 backed up").
+- Reads: your node first for 3 s, then gateways/Storage; blocks found elsewhere are added to the
+  node (`tests/node_cache.rs`: a node that never answers costs 3 s and then gets the block).
+- ipfs_module 0.1.1: Kubo's defaults flooded the test host's NAT (every request timed out until
+  the node stopped). Measured: UDP transports were the cause; TCP-only kept ~220 ms with 130+
+  peers. Now: lowpower profile (DHT client), TCP only, 10-20 connections, announce pinned only.
+  Some latency spikes remain during heavy backup/pinning; the host's baseline also spikes.
+- `#k=` share links in the `/<portal>/<file>` form.
+
+
 State on 2026-10-23: fileverse_core / fileverse_ui 0.3.0, ipfs_module 0.1.0.
 
 ## 1. Engines (cargo, no Logos runtime)

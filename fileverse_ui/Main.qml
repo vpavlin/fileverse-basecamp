@@ -84,6 +84,8 @@ Item {
     property string portal: ""
     property var portalFiles: []
     property string portalError: ""
+    property var portalBackup: ({})
+    property var portalListedAt: null
     property var draft: null              // { id, title, markdown, preview, published }
     property bool draftDirty: false
 
@@ -118,6 +120,9 @@ Item {
         ids.forEach(function (id) {
             root.core("job", [id], function (raw) {
                 var r = root.j(raw)
+                if (r && r.ok && r.state === "pending" && root.jobs[id] && root.jobs[id].progress !== r.progress) {
+                    var jp = root.jobs; jp[id].progress = r.progress || ""; root.jobs = jp
+                }
                 if (r && (r.state === "done" || r.state === "failed" || !r.ok)) {
                     var cb = root.jobCallbacks[id]
                     var js = root.jobs; delete js[id]; root.jobs = js
@@ -133,6 +138,10 @@ Item {
                 if (--left === 0) { root.pollBusy = false; root.jobTick++ }
             })
         })
+    }
+    function progressOf(label) {
+        for (var k in root.jobs) if (root.jobs[k].label === label) return root.jobs[k].progress || ""
+        return ""
     }
     function elapsed(label) {
         for (var k in root.jobs) if (root.jobs[k].label === label) return Math.round((Date.now() - root.jobs[k].started) / 1000)
@@ -166,8 +175,35 @@ Item {
     function refreshNode() { root.core("node_status", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.node = r }) }
     function refreshStorage() { root.core("storage_status", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.storage = r }) }
     function showPortal(p) {
-        root.portal = p; root.portalFiles = []; root.portalError = ""; root.mode = "portal"
-        root.startJob("list_portal", [p], "list", function (r) { root.portalFiles = r.files }, function (e) { root.portalError = e })
+        var changed = root.portal !== p
+        root.portal = p; root.portalError = ""; root.mode = "portal"
+        if (changed) { root.portalFiles = []; root.portalBackup = ({}); root.portalListedAt = null }
+        // The last listing is kept on this device: show it at once, refresh only when old.
+        root.core("portal_files", [p], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok || r.portal !== root.portal) return
+            root.portalFiles = r.files || []
+            root.portalBackup = r.backup || ({})
+            root.portalListedAt = r.listedAt
+            if (!r.listedAt || Date.now() - r.listedAt > 15 * 60 * 1000) root.refreshPortal()
+        })
+    }
+    function refreshPortal() {
+        var p = root.portal
+        root.startJob("list_portal", [p], "list", function (r) {
+            if (root.portal === p) { root.portalFiles = r.files; root.portalListedAt = Date.now() }
+        }, function (e) { if (root.portal === p) root.portalError = e })
+    }
+    function backupPortal() {
+        var p = root.portal
+        root.startJob("backup_portal", [p], "backup", function (r) {
+            var where = ["this device"]
+            if (r.ipfs) where.push("your IPFS node")
+            if (r.storage) where.push("Logos Storage")
+            root.say("Backed up " + r.fetched + " of " + r.files + " files (" + r.blocks + " blocks) to " + where.join(", ")
+                     + (r.failed && r.failed.length ? " - " + r.failed.length + " failed" : "") + (r.notes && r.notes.length ? " - " + r.notes.join("; ") : ""))
+            root.core("portal_files", [p], function (raw) { var x = root.j(raw); if (x && x.ok && root.portal === p) root.portalBackup = x.backup || ({}) })
+        })
     }
     function newDraft(title, markdown, source) {
         root.act("draft_create", [title, markdown, source || ""], "Draft created", function (r) { root.editDraft(r.draft) })
@@ -456,7 +492,9 @@ Item {
                     Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 12
                     color: root.node.reachable ? Theme.palette.success : Theme.palette.textTertiary
                     text: root.node.reachable
-                          ? ("Your IPFS node: " + (root.node.source === "ipfs_module" ? "the IPFS Node module" : "configured below") + " · " + root.shortId(root.node.peerId) + ". Read from first; Keep and Publish pin there.")
+                          ? ("Your IPFS node: " + (root.node.source === "ipfs_module" ? "the IPFS Node module" : "configured below") + " · " + root.shortId(root.node.peerId)
+                             + (root.node.peers !== undefined ? " · " + root.node.peers + " peers · " + root.node.pins + " pinned · " + Math.round((root.node.repoSize || 0) / 1048576) + " MB" : "")
+                             + ". Read from first; Keep, Back up and Publish pin there.")
                           : "No IPFS node. Install the IPFS Node module (recommended), or run Kubo and enter its API and gateway below."
                 }
                 RowLayout {
@@ -528,7 +566,26 @@ Item {
                 Layout.fillHeight: true
                 spacing: Theme.spacing.small
                 LogosText { text: "Portal " + root.portal; font.pixelSize: 16; font.bold: true; textFormat: Text.PlainText; elide: Text.ElideMiddle; Layout.fillWidth: true }
-                Hint { text: root.busyWith("list") ? ("Reading the portal on Gnosis and the files' metadata from IPFS… " + root.elapsed("list") + "s") : (root.portalError !== "" ? "Could not read this portal." : (root.portalFiles.length + " files, newest first.")) }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacing.small
+                    LogosButton {
+                        enabled: !root.busyWith("list")
+                        text: root.busyWith("list") ? ("Refreshing… " + (root.progressOf("list") || root.elapsed("list") + "s")) : "Refresh"
+                        onClicked: root.refreshPortal()
+                    }
+                    LogosButton {
+                        enabled: !root.busyWith("backup") && root.portalFiles.length > 0
+                        text: root.busyWith("backup") ? ("Backing up… " + (root.progressOf("backup") || root.elapsed("backup") + "s")) : "Back up everything"
+                        onClicked: root.backupPortal()
+                    }
+                    Hint {
+                        text: root.portalError !== "" && root.portalFiles.length === 0 ? "Could not read this portal."
+                              : (root.portalFiles.length + " files, newest first" + (root.portalListedAt ? " · listed " + root.when(root.portalListedAt) : "")
+                                 + " · " + Object.keys(root.portalBackup).length + " backed up")
+                    }
+                }
+                Hint { text: "Back up everything keeps every file's encrypted blocks on this device, pins them on your IPFS node and copies them into Logos Storage, so they stay readable without Fileverse." }
                 ListView {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
@@ -539,7 +596,9 @@ Item {
                     delegate: SideItem {
                         width: ListView.view.width
                         label: root.kindIcon(modelData.kind, "") + (modelData.title || (modelData.error ? "(cannot open)" : "Untitled"))
+                        readonly property var bk: root.portalBackup[String(modelData.fileId)]
                         sub: "#" + modelData.fileId + (modelData.updatedAt ? " · " + root.when(modelData.updatedAt) : "") + (modelData.error ? " · " + modelData.error : "")
+                             + (bk ? " · backed up" + (bk.ipfs ? " · IPFS" : "") + (bk.storage ? " · Storage" : "") : "")
                         onClicked: if (!modelData.error) root.open(modelData.url)
                     }
                 }

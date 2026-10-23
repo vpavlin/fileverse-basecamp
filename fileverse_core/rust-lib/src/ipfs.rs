@@ -238,7 +238,14 @@ pub trait BlockSource: Send + Sync {
     fn block(&self, cid: &Cid) -> Option<Vec<u8>>;
 }
 
+/// How long your own node may take for a block before we look elsewhere: a node
+/// still searching the network must not hold up reading.
+pub const NODE_FIRST_TRY: Duration = Duration::from_secs(3);
+
 pub struct Gateways {
+    /// Your own node, `(gateway, rpc api)`: asked first (briefly), and every block found
+    /// elsewhere is added to it, so it becomes the cache for everything you read.
+    pub node: Option<(String, String)>,
     pub urls: Vec<String>,
     /// Tried, in order, after every gateway has failed.
     pub extra: Vec<Box<dyn BlockSource>>,
@@ -248,6 +255,7 @@ pub struct Gateways {
     /// that does not serve raw blocks). Off by default.
     pub allow_unverified: bool,
     client: reqwest::blocking::Client,
+    quick: reqwest::blocking::Client,
 }
 
 impl Gateways {
@@ -257,7 +265,12 @@ impl Gateways {
             .user_agent("fileverse-basecamp-viewer")
             .build()
             .expect("http client");
-        Gateways { urls, extra: vec![], cache_dir, allow_unverified: false, client }
+        let quick = reqwest::blocking::Client::builder()
+            .timeout(NODE_FIRST_TRY)
+            .user_agent("fileverse-basecamp-viewer")
+            .build()
+            .expect("http client");
+        Gateways { node: None, urls, extra: vec![], cache_dir, allow_unverified: false, client, quick }
     }
 
     fn cached(&self, cid: &Cid) -> Option<Vec<u8>> {
@@ -273,11 +286,58 @@ impl Gateways {
         }
     }
 
+    fn fetch_raw(&self, client: &reqwest::blocking::Client, g: &str, name: &str) -> Result<Vec<u8>, String> {
+        let url = format!("{}/ipfs/{}?format=raw", g.trim_end_matches('/'), name);
+        client
+            .get(&url)
+            .header("Accept", "application/vnd.ipld.raw")
+            .send()
+            .and_then(|r| r.error_for_status())
+            .and_then(|r| r.bytes())
+            .map(|b| b.to_vec())
+            .map_err(|e| short(&e))
+    }
+
+    /// Add a verified block to your node (not pinned: a cache it may collect later).
+    fn feed_node(&self, cid: &Cid, b: &[u8]) {
+        let Some((_, api)) = &self.node else { return };
+        let codec = match cid.codec {
+            RAW => "raw",
+            DAG_PB => "dag-pb",
+            _ => return,
+        };
+        let form = reqwest::blocking::multipart::Form::new()
+            .part("file", reqwest::blocking::multipart::Part::bytes(b.to_vec()).file_name("block"));
+        let _ = self
+            .client
+            .post(format!("{}/api/v0/block/put?cid-codec={codec}&mhtype=sha2-256", api.trim_end_matches('/')))
+            .multipart(form)
+            .send();
+    }
+
     fn block(&self, cid: &Cid, errors: &mut Vec<String>) -> Option<(Vec<u8>, String)> {
         if let Some(b) = self.cached(cid) {
             return Some((b, "cache".into()));
         }
         let name = cid.to_v1();
+        if let Some((g, _)) = &self.node {
+            match self.fetch_raw(&self.quick, g, &name) {
+                Ok(b) if Sha256::digest(&b).as_slice() == cid.digest => {
+                    self.store(cid, &b);
+                    return Some((b, format!("{g} (your node)")));
+                }
+                Ok(_) => errors.push(format!("{g}: block does not match its CID")),
+                Err(e) => errors.push(format!("your node: {e}")),
+            }
+        }
+        if let Some((b, src)) = self.block_elsewhere(cid, &name, errors) {
+            self.feed_node(cid, &b);
+            return Some((b, src));
+        }
+        None
+    }
+
+    fn block_elsewhere(&self, cid: &Cid, name: &str, errors: &mut Vec<String>) -> Option<(Vec<u8>, String)> {
         for g in &self.urls {
             let url = format!("{}/ipfs/{}?format=raw", g.trim_end_matches('/'), name);
             let r = self

@@ -142,3 +142,25 @@ fn a_wrong_key_says_so() {
     assert!(e.contains("authentication failed"), "{e}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn every_listed_file_can_be_fetched_for_backup() {
+    let (fx, rpc, gw, dir) = setup();
+    let keys = backup::parse(&fx["backup"]["current"].to_string()).unwrap().remove(0);
+    let seen = std::sync::atomic::AtomicUsize::new(0);
+    let list = backup::list_with_progress(&rpc, &gw, &keys, 50, &|_, _| {
+        seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    })
+    .unwrap();
+    // progress was reported for every slot read (4 on chain, the deleted one included)
+    assert_eq!(seen.load(std::sync::atomic::Ordering::SeqCst), 4);
+    assert_eq!(list[2]["cids"].as_array().unwrap().len(), 3);
+    let got = backup::fetch_files(&gw, &list, &|_, _| {});
+    assert_eq!(got.len(), 3);
+    for g in &got {
+        assert!(g.get("error").is_none(), "{g}");
+        // metadata + content (no gate on these fixtures): two raw blocks
+        assert_eq!(g["blocks"].as_array().unwrap().len(), 2, "{g}");
+    }
+    let _ = std::fs::remove_dir_all(dir);
+}

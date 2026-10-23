@@ -133,39 +133,110 @@ pub(crate) fn unwrap(keys: &PortalKeys, meta: &Value) -> Result<FileKey, String>
     Err(last)
 }
 
+/// How many files are read at once: each costs a chain read and an IPFS fetch,
+/// so a portal of a hundred files is minutes serially and seconds this way.
+pub const PARALLEL: usize = 6;
+
+/// Run `f` over `ids` on `PARALLEL` threads, keeping the input order.
+fn par_map<T: Send>(ids: &[u64], f: impl Fn(u64) -> T + Sync, progress: &(dyn Fn(usize, usize) + Sync)) -> Vec<T> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+    let next = AtomicUsize::new(0);
+    let done = AtomicUsize::new(0);
+    let out: Mutex<Vec<Option<T>>> = Mutex::new((0..ids.len()).map(|_| None).collect());
+    std::thread::scope(|sc| {
+        for _ in 0..PARALLEL.min(ids.len().max(1)) {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, Ordering::SeqCst);
+                if i >= ids.len() {
+                    break;
+                }
+                let v = f(ids[i]);
+                out.lock().unwrap()[i] = Some(v);
+                progress(done.fetch_add(1, Ordering::SeqCst) + 1, ids.len());
+            });
+        }
+    });
+    out.into_inner().unwrap().into_iter().map(|v| v.unwrap()).collect()
+}
+
+fn list_one(rpc: &(dyn Rpc + Sync), gw: &Gateways, keys: &PortalKeys, id: u64) -> Option<Value> {
+    let mut entry = json!({ "portal": keys.portal, "fileId": id });
+    let rec = match chain::read_file(rpc, &keys.portal, id) {
+        Ok(r) => r,
+        // deleted slots read back empty
+        Err(e) if e.contains("does not exist") => return None,
+        Err(e) => {
+            entry["error"] = json!(format!("could not read it on Gnosis: {e}"));
+            return Some(entry);
+        }
+    };
+    if rec.metadata_cid.is_empty() {
+        return None;
+    }
+    entry["layout"] = json!(rec.layout);
+    entry["cids"] = json!([rec.metadata_cid, rec.content_cid, rec.gate_cid]);
+    let mut prov = vec![];
+    match fetch_json(gw, &rec.metadata_cid, &mut prov) {
+        Ok(meta) => {
+            if meta.get("isDeleted").and_then(Value::as_bool) == Some(true) {
+                return None;
+            }
+            let kind = if s(&meta, "kind") == "dsheet" || meta.get("dsheetId").is_some() { "dsheet" } else { "ddoc" };
+            entry["kind"] = json!(kind);
+            entry["updatedAt"] = meta.get("contentUpdatedAt").or_else(|| meta.get("last_updated")).cloned().unwrap_or(Value::Null);
+            match unwrap(keys, &meta) {
+                Ok(fk) => entry["title"] = json!(viewer::title_with(&meta, &fk)),
+                Err(e) => entry["error"] = json!(e),
+            }
+        }
+        Err(e) => entry["error"] = json!(e),
+    }
+    Some(entry)
+}
+
 /// The portal's files with their titles, newest first. Unreadable entries are
 /// listed with the reason instead of being dropped.
-pub fn list(rpc: &dyn Rpc, gw: &Gateways, keys: &PortalKeys, max: u64) -> Result<Vec<Value>, String> {
+pub fn list(rpc: &(dyn Rpc + Sync), gw: &Gateways, keys: &PortalKeys, max: u64) -> Result<Vec<Value>, String> {
+    list_with_progress(rpc, gw, keys, max, &|_, _| {})
+}
+
+pub fn list_with_progress(
+    rpc: &(dyn Rpc + Sync),
+    gw: &Gateways,
+    keys: &PortalKeys,
+    max: u64,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> Result<Vec<Value>, String> {
     let n = chain::file_count(rpc, &keys.portal)?;
-    let mut out = vec![];
-    for id in (0..n).rev().take(max as usize) {
-        let mut entry = json!({ "portal": keys.portal, "fileId": id });
-        let rec = match chain::read_file(rpc, &keys.portal, id) {
-            Ok(r) => r,
-            Err(_) => continue, // deleted slots read back empty
-        };
-        if rec.metadata_cid.is_empty() {
-            continue;
-        }
-        let mut prov = vec![];
-        match fetch_json(gw, &rec.metadata_cid, &mut prov) {
-            Ok(meta) => {
-                if meta.get("isDeleted").and_then(Value::as_bool) == Some(true) {
-                    continue;
-                }
-                let kind = if s(&meta, "kind") == "dsheet" || meta.get("dsheetId").is_some() { "dsheet" } else { "ddoc" };
-                entry["kind"] = json!(kind);
-                entry["updatedAt"] = meta.get("contentUpdatedAt").or_else(|| meta.get("last_updated")).cloned().unwrap_or(Value::Null);
-                match unwrap(keys, &meta) {
-                    Ok(fk) => entry["title"] = json!(viewer::title_with(&meta, &fk)),
-                    Err(e) => entry["error"] = json!(e),
+    let ids: Vec<u64> = (0..n).rev().take(max as usize).collect();
+    Ok(par_map(&ids, |id| list_one(rpc, gw, keys, id), progress).into_iter().flatten().collect())
+}
+
+/// Fetch every block of the given files (metadata, content, gate) through `gw`,
+/// which keeps each verified block in its cache. Returns, per file, its root
+/// CIDs and every block CID, or why it could not be fetched.
+pub fn fetch_files(gw: &Gateways, files: &[Value], progress: &(dyn Fn(usize, usize) + Sync)) -> Vec<Value> {
+    let idx: Vec<u64> = (0..files.len() as u64).collect();
+    par_map(
+        &idx,
+        |i| {
+            let f = &files[i as usize];
+            let roots: Vec<String> = f["cids"]
+                .as_array()
+                .map(|a| a.iter().filter_map(|c| c.as_str()).filter(|c| !c.is_empty()).map(str::to_string).collect())
+                .unwrap_or_default();
+            let mut blocks = vec![];
+            for r in &roots {
+                match gw.get(r) {
+                    Ok((_, p)) => blocks.extend(p.blocks),
+                    Err(e) => return json!({ "fileId": f["fileId"], "error": e }),
                 }
             }
-            Err(e) => entry["error"] = json!(e),
-        }
-        out.push(entry);
-    }
-    Ok(out)
+            json!({ "fileId": f["fileId"], "roots": roots, "blocks": blocks })
+        },
+        progress,
+    )
 }
 
 /// Open one of the portal's files with the backup key.
