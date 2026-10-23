@@ -6,7 +6,9 @@ import { gcm } from "@noble/ciphers/aes.js";
 import { secp256k1 } from "@noble/curves/secp256k1.js";
 import { hkdf } from "@noble/hashes/hkdf.js";
 import { sha256 } from "@noble/hashes/sha2.js";
+import { argon2id } from "@noble/hashes/argon2.js";
 import { randomBytes } from "@noble/hashes/utils.js";
+import nacl from "tweetnacl";
 import { fromUint8Array as b64 } from "js-base64";
 import * as Y from "yjs";
 
@@ -68,6 +70,26 @@ const legacyFiles = [];
   const locked = b64(new Uint8Array(await wc.subtle.encrypt({ name: "RSA-OAEP" }, kp.publicKey, enc.encode(JSON.stringify(fileKey)))));
   const title = b64(gcm(key, iv).encrypt(enc.encode("Old doc")));
   const meta = { title, version: "3", archVersion: "v3", ownerLock: { lockedFileKey: locked } };
+  legacyFiles.push({ legacy: true, metadata: putJson(meta), content: put(ct.slice(0, -16)), gate: "" });
+}
+// Older (version "2") docs.fileverse.io files seal the title with the share-link
+// secret (secretbox, metadata nonce), not the file key. Newer writes also put the
+// link key (URL text) in ownerLock.lockedLinkKey; older ones do not.
+for (const [i, withLinkKey] of [[1, false], [2, true]]) {
+  const key = randomBytes(32), iv = randomBytes(12);
+  const d = new Y.Doc(); const h = new Y.XmlElement("heading"); h.setAttribute("level", 1); const t = new Y.XmlText(); t.insert(0, "Heading of doc " + i); h.insert(0, [t]);
+  const p = new Y.XmlElement("paragraph"); const pt = new Y.XmlText(); pt.insert(0, "Body " + i); p.insert(0, [pt]);
+  d.getXmlFragment("default").insert(0, [h, p]);
+  const ct = gcm(key, iv).encrypt(enc.encode(JSON.stringify({ file: b64(Y.encodeStateAsUpdate(d)), source: "fileverse_document" })));
+  const fileKey = { key: b64(key), iv: b64(iv), authTag: b64(ct.slice(-16)) };
+  const rsa = async (bytes) => b64(new Uint8Array(await wc.subtle.encrypt({ name: "RSA-OAEP" }, kp.publicKey, bytes)));
+  const secret = randomBytes(32), nonce = randomBytes(24), ddocId = "legacyDoc" + i;
+  const wrap = hkdf(sha256, argon2id(ddocId, nonce, { t: 2, m: 16384, p: 8, dkLen: 32 }), undefined, enc.encode("encryptionKey"), 32);
+  const linkKey = b64(nacl.secretbox(secret, nonce, wrap), true);
+  const ownerLock = { lockedFileKey: await rsa(enc.encode(JSON.stringify(fileKey))) };
+  if (withLinkKey) ownerLock.lockedLinkKey = await rsa(enc.encode(linkKey));
+  const title = b64(nacl.secretbox(enc.encode("Sealed title " + i), nonce, secret));
+  const meta = { title, version: "2", ddocId, nonce: b64(nonce), ownerLock };
   legacyFiles.push({ legacy: true, metadata: putJson(meta), content: put(ct.slice(0, -16)), gate: "" });
 }
 

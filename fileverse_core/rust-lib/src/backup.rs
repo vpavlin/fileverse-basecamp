@@ -16,7 +16,7 @@ use serde_json::{json, Value};
 
 use crate::chain::{self, Rpc};
 use crate::ipfs::Gateways;
-use crate::viewer::{self, fetch_json, file_key_of, str_field, FileKey};
+use crate::viewer::{self, fetch_json, file_key_of, FileKey};
 use crate::{b64, crypto};
 
 #[derive(Clone, Debug, Serialize)]
@@ -133,6 +133,38 @@ pub(crate) fn unwrap(keys: &PortalKeys, meta: &Value) -> Result<FileKey, String>
     Err(last)
 }
 
+/// The share-link secret, when the owner lock carries the link key
+/// (`ownerLock.lockedLinkKey`, written by newer dDocs). Older files do not have it.
+pub(crate) fn owner_link_secret(keys: &PortalKeys, meta: &Value) -> Option<Vec<u8>> {
+    let locked = s(meta.get("ownerLock")?, "lockedLinkKey");
+    if locked.is_empty() || locked.starts_with("FVPQ1") {
+        return None;
+    }
+    let plain = match (&keys.rsa_owner, &keys.ec_private) {
+        (Some(der), _) => rsa_open(der, locked).ok()?,
+        (None, Some(ec)) => crypto::ecies_open(&b64::decode(ec).ok()?, locked).ok()?,
+        _ => return None,
+    };
+    // Legacy files lock the link key's text (as in the URL); current ones its bytes.
+    let link_key = std::str::from_utf8(&plain).ok().and_then(|t| b64::decode(t.trim()).ok()).unwrap_or(plain);
+    viewer::link_secret_of(&link_key, meta).ok()
+}
+
+/// The title of a file opened with the backup key: decrypted when the metadata
+/// allows it, else taken from the document's text (`titleFromText`).
+fn title_of(gw: &Gateways, keys: &PortalKeys, meta: &Value, fk: &FileKey, content_cid: &str, kind: &str, entry: &mut Value) {
+    let secret = owner_link_secret(keys, meta).unwrap_or_default();
+    let t = viewer::title_with(meta, fk, &secret);
+    if !t.is_empty() || kind != "ddoc" {
+        entry["title"] = json!(t);
+        return;
+    }
+    if let Ok(t) = viewer::title_from_content(gw, content_cid, fk) {
+        entry["title"] = json!(t);
+        entry["titleFromText"] = json!(true);
+    }
+}
+
 /// How many files are read at once: each costs a chain read and an IPFS fetch,
 /// so a portal of a hundred files is minutes serially and seconds this way.
 pub const PARALLEL: usize = 6;
@@ -186,7 +218,7 @@ fn list_one(rpc: &(dyn Rpc + Sync), gw: &Gateways, keys: &PortalKeys, id: u64) -
             entry["kind"] = json!(kind);
             entry["updatedAt"] = meta.get("contentUpdatedAt").or_else(|| meta.get("last_updated")).cloned().unwrap_or(Value::Null);
             match unwrap(keys, &meta) {
-                Ok(fk) => entry["title"] = json!(viewer::title_with(&meta, &fk)),
+                Ok(fk) => title_of(gw, keys, &meta, &fk, &rec.content_cid, kind, &mut entry),
                 Err(e) => entry["error"] = json!(e),
             }
         }
@@ -250,6 +282,6 @@ pub fn open(rpc: &dyn Rpc, gw: &Gateways, keys: &PortalKeys, file_id: u64) -> Re
     }
     let fk = unwrap(keys, &meta)?;
     steps.push(format!("file key unwrapped with the backup key ({})", if keys.rsa_owner.is_some() { "RSA-OAEP" } else { "ECIES" }));
-    let _ = str_field(&meta, "title");
-    viewer::finish(gw, &rec, &meta, &fk, &[], prov, steps, rpc.describe())
+    let secret = owner_link_secret(keys, &meta).unwrap_or_default();
+    viewer::finish(gw, &rec, &meta, &fk, &secret, prov, steps, rpc.describe())
 }

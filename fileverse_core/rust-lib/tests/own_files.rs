@@ -125,10 +125,32 @@ fn opens_a_legacy_rsa_portal() {
     let (fx, rpc, gw, dir) = setup();
     let keys = backup::parse(&fx["backup"]["legacy"].to_string()).unwrap().remove(0);
     let list = backup::list(&rpc, &gw, &keys, 50).unwrap();
-    assert_eq!(list[0]["title"], "Old doc");
+    assert_eq!(list[2]["title"], "Old doc");
     let doc = backup::open(&rpc, &gw, &keys, 0).unwrap();
     assert_eq!(doc["layout"], "legacy");
     assert_eq!(doc["tabs"][0]["blocks"][0]["text"], "Legacy body");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Older docs seal the title with the share-link secret: it is opened from
+/// `ownerLock.lockedLinkKey` when present, else taken from the document's text.
+#[test]
+fn titles_sealed_with_the_link_secret() {
+    let (fx, rpc, gw, dir) = setup();
+    let keys = backup::parse(&fx["backup"]["legacy"].to_string()).unwrap().remove(0);
+    let list = backup::list(&rpc, &gw, &keys, 50).unwrap();
+    assert_eq!(list[0]["title"], "Sealed title 2", "{}", list[0]);
+    assert!(list[0].get("titleFromText").is_none());
+    assert_eq!(list[1]["title"], "Heading of doc 1", "{}", list[1]);
+    assert_eq!(list[1]["titleFromText"], true);
+    assert!(list[2].get("titleFromText").is_none());
+
+    let doc = backup::open(&rpc, &gw, &keys, 2).unwrap();
+    assert_eq!(doc["title"], "Sealed title 2");
+    let doc = backup::open(&rpc, &gw, &keys, 1).unwrap();
+    assert_eq!(doc["title"], "Heading of doc 1");
+    assert_eq!(doc["titleFromText"], true);
+    assert_eq!(doc["tabs"][0]["blocks"][1]["text"], "Body 1");
     let _ = std::fs::remove_dir_all(dir);
 }
 

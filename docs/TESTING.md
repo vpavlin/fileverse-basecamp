@@ -1,5 +1,16 @@
 # What was tested, and how to repeat it
 
+## fileverse_core 0.4.1 (2026-10-23)
+
+- Titles of older dDocs (metadata `version: "2"`) are sealed with the share-link secret, not
+  the file key, so a backup key alone cannot open them (checked on the real public legacy doc:
+  the link secret opens its title, the file key does not). Fileverse's own app then shows
+  "Untitled" unless the browser remembers the title. Now: the title is opened with
+  `ownerLock.lockedLinkKey` when the file has one, else the first heading (or first line) of the
+  document is used and marked `titleFromText`. `tests/own_files.rs::titles_sealed_with_the_link_secret`
+  covers both; fixtures regenerated with `tools/make-own-fixtures.mjs`.
+- Not tested against the user's real portal (this host has no copy of their key).
+
 ## 0.4.0 / ipfs_module 0.1.1 (2026-10-23)
 
 - First real-data test by the user: a real dDocs backup key listed and opened their portal.

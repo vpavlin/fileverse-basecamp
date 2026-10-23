@@ -132,9 +132,38 @@ fn open_link_lock(lock: &Value, secret: &[u8], steps: &mut Vec<String>) -> Resul
 
 /// Legacy portals seal the title with the link secret and the metadata nonce;
 /// v3 files with the file key (nonce-prefixed GCM). Unreadable titles stay empty.
-/// The title with only the file key (backup-key opens have no link secret).
-pub(crate) fn title_with(meta: &Value, fk: &FileKey) -> String {
-    decrypt_title(meta, fk, &[])
+/// The title with the file key, and the link secret when the caller has one
+/// (backup-key opens find it in `ownerLock.lockedLinkKey`, when that exists).
+pub(crate) fn title_with(meta: &Value, fk: &FileKey, secret: &[u8]) -> String {
+    decrypt_title(meta, fk, secret)
+}
+
+/// Unwrap a share-link key (as found in a URL fragment) to the link secret.
+pub(crate) fn link_secret_of(link_key: &[u8], meta: &Value) -> Result<Vec<u8>, String> {
+    link_secret(link_key, meta, &mut vec![])
+}
+
+/// A stand-in title from the document itself: its first heading, else its first
+/// line of text. Older dDocs seal the title with the share-link secret only, which
+/// a backup key cannot open; Fileverse's own app then shows "Untitled" unless the
+/// browser remembers the title.
+pub(crate) fn title_from_tabs(tabs: &[doc::Tab]) -> String {
+    let blocks = || tabs.iter().flat_map(|t| t.blocks.iter()).filter(|b| !b.text.trim().is_empty());
+    let first = blocks().find(|b| b.t.starts_with('h')).or_else(|| blocks().find(|b| b.t != "code"));
+    let line = first.map(|b| b.text.lines().next().unwrap_or("").trim().to_string()).unwrap_or_default();
+    if line.chars().count() > 80 {
+        format!("{}…", line.chars().take(79).collect::<String>().trim_end())
+    } else {
+        line
+    }
+}
+
+/// Fetch and decrypt a dDoc's content just to name it (see `title_from_tabs`).
+pub(crate) fn title_from_content(gw: &Gateways, content_cid: &str, fk: &FileKey) -> Result<String, String> {
+    let (blob, _) = gw.get(content_cid)?;
+    let content: Value = serde_json::from_slice(&decrypt_content(&blob, fk)?).map_err(|e| format!("decrypted content is not JSON: {e}"))?;
+    let ydoc = doc::load(&yjs_bytes(content.get("file").unwrap_or(&Value::Null))?)?;
+    Ok(title_from_tabs(&doc::tabs(&ydoc)))
 }
 
 fn decrypt_title(meta: &Value, fk: &FileKey, secret: &[u8]) -> String {
@@ -278,6 +307,10 @@ pub(crate) fn finish(
         out["sheets"] = serde_json::to_value(sheets).unwrap();
     } else {
         let tabs = doc::tabs(&ydoc);
+        if title.is_empty() {
+            out["title"] = Value::String(title_from_tabs(&tabs));
+            out["titleFromText"] = Value::Bool(true);
+        }
         out["markdown"] = Value::String(doc::markdown(&title, &tabs));
         // The body alone, for "Edit a copy" (the title is edited separately).
         out["markdownBody"] = Value::String(doc::markdown("", &tabs));
@@ -289,6 +322,20 @@ pub(crate) fn finish(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn title_from_text() {
+        let b = |t: &str, text: &str| {
+            let mut b = doc::Block::default();
+            (b.t, b.text) = (t.into(), text.into());
+            b
+        };
+        let tab = |blocks| doc::Tab { id: "t".into(), name: "".into(), depth: 0, blocks, slides: vec![] };
+        assert_eq!(title_from_tabs(&[tab(vec![b("p", "intro line\nmore"), b("h2", "Real heading")])]), "Real heading");
+        assert_eq!(title_from_tabs(&[tab(vec![b("code", "x = 1"), b("p", "  "), b("p", "first words\nsecond")])]), "first words");
+        assert_eq!(title_from_tabs(&[tab(vec![b("p", &"a".repeat(100))])]).chars().count(), 80);
+        assert_eq!(title_from_tabs(&[]), "");
+    }
 
     #[test]
     fn links() {
