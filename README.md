@@ -17,18 +17,24 @@ share link  ->  files(id) on the portal contract (Gnosis, via eth_rpc_module)
 | `fileverse_ui` | ui_qml, pure QML | Recent / My files / Drafts, document and sheet views, slide decks, the editor with live preview, settings. |
 | `ipfs_module` | core, Rust (`cdylib`) | An IPFS node for every Logos app: a bundled static Kubo run on loopback ports, started on first use, stopped with its host. |
 
-What it does (0.3.0):
+What it does (0.7.0):
 
-- **Read share links** (`…/<portal>/<fileId>#key=…`) from the legacy portal (`docs.fileverse.io`)
-  and the v3 App contract (`ddocs.new`, `dsheets.new`): raw and Argon2id-wrapped link keys,
-  secretbox and PBKDF2/AES-CBC link locks, `gz1:` sheets, document tabs.
+- **Read share links** from the legacy portal (`docs.fileverse.io`) and the v3 App contract
+  (`ddocs.new`, `dsheets.new`), in every form Fileverse hands out: `…/<portal>/<fileId>#key=…`,
+  short links `…/d/<code>#k=…` (portal looked up in the registry's logs on Gnosis) and
+  `…/document/<id>#k=…` (looked up in the portals you know, on chain). Raw and
+  Argon2id-wrapped link keys, secretbox and PBKDF2/AES-CBC link locks, version-4 titles,
+  `gz1:` sheets, document tabs.
+- **Live documents**: an open document is checked against its record on Gnosis every minute
+  and reloads when it was edited in Fileverse.
 - **Your own files**: import a dDocs/dSheets backup-key file; the portal is listed from Gnosis
   (titles decrypted locally) and every file opens with its owner/app lock (ECIES, or RSA-OAEP
   on legacy portals). Post-quantum (`FVPQ1`) locks are reported, not opened: that library is
   not public. Keys stay in the module's data directory (mode 600).
 - **Present** any dDoc (or draft) as a slide deck, cut the way dDocs' presentation mode cuts it.
-- **Edit**: "Edit a copy" of any document, or a new one. Markdown on the left, the document as
-  it will look on the right, saved on the device as you type. **Publish** encrypts it in the
+- **Edit**: "Edit a copy" of any document, or a new one, in a visual editor (toolbar, Ctrl+B/I/K,
+  typed shortcuts like `# ` and `- `), or as Markdown with a live preview. Saved on the device
+  as you type, as Markdown. **Publish** encrypts it in the
   Fileverse v3 format (Yjs content, GCM, secretbox link lock), pins it on your IPFS node and
   copies it into Logos Storage, and gives a `fvbc://ipfs/<manifest>#key=…` link that any
   Basecamp with this app opens. There is no chain record; ddocs.new cannot open these links.
@@ -41,7 +47,7 @@ What it does (0.3.0):
 Tested: see [docs/TESTING.md](docs/TESTING.md).
 
 Not yet: comments, version history, private (gate) shares, workspace files on Fileverse's
-private IPFS lane, writing back to Fileverse's chain records, live collaboration. See
+private IPFS lane, images, writing back to Fileverse's chain records, live collaboration. See
 [docs/PLAN.md](docs/PLAN.md).
 
 ## Trust model
