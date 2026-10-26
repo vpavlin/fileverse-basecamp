@@ -1,5 +1,23 @@
 # What was tested, and how to repeat it
 
+## 0.7.0: visual editor (2026-10-26)
+
+- The editor edits formatted text (Qt RichText) with a toolbar (text, H1-H3, bold, italic,
+  strikethrough, inline code, link, lists, task, quote, code block, undo/redo), Ctrl+B/I/K and
+  typed shortcuts (`# `, `## `, `- `, `1. `, `[] `, `> `, ```` ``` ````). Drafts stay Markdown.
+- Why not Qt's Markdown mode: its writer garbled code blocks and tables that follow lists or
+  quotes (seen in the harness). The core converts instead (`rich.rs`): Markdown -> HTML for Qt,
+  Qt's HTML -> Markdown, and block restyling on a block list counted as Qt counts text blocks.
+  `rich::tests` use HTML captured from Qt 6.9.2; Markdown -> HTML -> Markdown renders the same.
+- Found in the GUI and fixed: async conversions overwrote text typed meanwhile (now blocking
+  `callModule`, milliseconds); Qt drops empty headings/lists/quotes, so a block restyled while
+  empty holds a zero-width space (stripped on save); Enter after a heading continued the heading.
+- Basecamp 0.3.2 GUI (OpenGL): a new document typed with shortcuts and the toolbar saved as
+  `# Visual editor test / **Make this bold. And** ***this italic*** / - first item / - second item /
+  ## Next section / plain after heading`; a task ticked from the toolbar saved as `- [x]`; switching
+  to Markdown and back keeps the document.
+- Not done: tables are shown but cannot be edited structurally; headings drop inline bold.
+
 ## 0.6.0 (2026-10-26)
 
 - Version-4 titles are AES-GCM with a **24-byte** IV in front (`aesDecrypt` in

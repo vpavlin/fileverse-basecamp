@@ -1,7 +1,7 @@
 // Offscreen render check for fileverse_ui/Main.qml.
 // A mock `logos` (an id in this context, which the loaded view's context inherits)
 // answers the core calls from fixtures. Arguments after "--": MODE [N] OUT.png with
-// MODE one of doc | slides | sheet | error | settings | portal | import | edit | editslides.
+// MODE one of doc | slides | sheet | error | settings | portal | import | edit | editslides | wysiwyg.
 import QtQuick
 import QtQuick.Window
 
@@ -21,6 +21,7 @@ Window {
         id: logos
         signal moduleEventReceived(string moduleName, string eventName, var data)
         function onModuleEvent(m, e) {}
+        function callModule(module, method, args) { return JSON.stringify(win.answer(method, args)) }
         function callModuleAsync(module, method, args, cb, timeout) {
             Qt.callLater(function () { cb(JSON.stringify(win.answer(method, args))) })
         }
@@ -57,7 +58,16 @@ Window {
             drafts: [ { id: "abc123", title: "Logos plan", updatedAt: 1792700000000, link: "fvbc://x", publishedAt: 1792700000000 }, { id: "d2", title: "Notes", updatedAt: 1792690000000 } ] }
         if (method === "node_status") return { ok: true, reachable: true, source: "ipfs_module", peers: 43, pins: 12, repoSize: 52428800, api: "http://127.0.0.1:40263", gateway: "http://127.0.0.1:34231", peerId: "12D3KooWHeYVZC3hgJsXByFqD2tnVPdbhEfHt8rzJbXh5" }
         if (method === "storage_status") return { ok: true, available: true, peerId: "16Uiu2…" }
-        if (method === "draft_get" || method === "draft_save" || method === "draft_create") return { ok: true, draft: win.draft() }
+        if (method === "draft_get" || method === "draft_save" || method === "draft_save_rich" || method === "draft_create") return { ok: true, draft: win.draft() }
+        // A crude stand-in for the core's Markdown -> HTML (the real one is tested in Rust).
+        if (method === "rich_html") return { ok: true, html: String(args[0]).split("\n\n").map(function (b) {
+            var m = b.match(/^(#{1,3}) (.*)/)
+            if (m) return "<h" + m[1].length + ">" + m[2] + "</h" + m[1].length + ">"
+            if (/^[-\d]/.test(b)) return "<ul>" + b.split("\n").map(function (l) { return "<li>" + l.replace(/^\s*(-|\d+\.) (\[[ x]\] )?/, "") + "</li>" }).join("") + "</ul>"
+            if (/^> /.test(b)) return "<blockquote><p>" + b.substring(2) + "</p></blockquote>"
+            return "<p>" + b.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>") + "</p>"
+        }).join("") }
+        if (method === "rich_kind") return { ok: true, kind: "h1" }
         if (method === "job") {
             var id = args[0]
             if (mode === "error") return { ok: true, state: "failed", error: "the link key does not open this file (wrong or truncated link?)" }
@@ -95,7 +105,7 @@ Window {
             it.showSettings = (win.mode === "settings")
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
-            else if (win.mode === "edit" || win.mode === "editslides") { it.section = "drafts"; it.openDraft("abc123") }
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg") { it.section = "drafts"; it.openDraft("abc123") }
             else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
         })
     }

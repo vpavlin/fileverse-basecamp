@@ -34,7 +34,7 @@ use crate::backup::{self, PortalKeys};
 use crate::chain::{self, Rpc, GNOSIS_CHAIN_ID};
 use crate::ipfs::{BlockSource, Cid, Gateways, DEFAULT_GATEWAYS};
 use crate::node::{self, Node};
-use crate::{b64, doc, md, publish, viewer};
+use crate::{b64, doc, md, publish, rich, viewer};
 
 pub trait FileverseCoreModule: Send + Sync + 'static {
     /// Start opening a document by URL (share link, fvown://, fvbc://). Returns `{ ok, jobId }`.
@@ -77,6 +77,15 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn draft_create(&self, title: String, markdown: String, source_url: String) -> String;
     /// Save a draft's title and Markdown. Returns it with a fresh preview.
     fn draft_save(&self, draft_id: String, title: String, markdown: String) -> String;
+    /// Save a draft from the visual editor: its Qt rich-text HTML is converted to Markdown.
+    fn draft_save_rich(&self, draft_id: String, title: String, html: String) -> String;
+    /// Markdown -> HTML for the visual editor: `{ html }`.
+    fn rich_html(&self, markdown: String) -> String;
+    /// Restyle the editor's text block number `index` ("p", "h1".."h3", "ul", "ol",
+    /// "task", "done", "quote", "code"): `{ html }` with the whole document.
+    fn rich_block(&self, html: String, index: String, kind: String) -> String;
+    /// The style of the editor's text block number `index`: `{ kind }`.
+    fn rich_kind(&self, html: String, index: String) -> String;
     /// One draft with its Markdown and preview.
     fn draft_get(&self, draft_id: String) -> String;
     /// Delete a draft (published copies stay where they are).
@@ -1123,6 +1132,25 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         out.as_object_mut().unwrap().remove("secret");
         out["preview"] = preview_json(d["markdown"].as_str().unwrap_or(""));
         json!({ "ok": true, "draft": out }).to_string()
+    }
+
+    fn draft_save_rich(&self, draft_id: String, title: String, html: String) -> String {
+        self.draft_save(draft_id, title, rich::to_md(&html))
+    }
+
+    fn rich_html(&self, markdown: String) -> String {
+        json!({ "ok": true, "html": rich::to_html(&markdown) }).to_string()
+    }
+
+    fn rich_block(&self, html: String, index: String, kind: String) -> String {
+        match rich::set_block(&html, index.trim().parse().unwrap_or(usize::MAX), &kind) {
+            Ok(h) => json!({ "ok": true, "html": h }).to_string(),
+            Err(e) => err(e),
+        }
+    }
+
+    fn rich_kind(&self, html: String, index: String) -> String {
+        json!({ "ok": true, "kind": rich::kind_at(&html, index.trim().parse().unwrap_or(usize::MAX)) }).to_string()
     }
 
     fn draft_get(&self, draft_id: String) -> String {

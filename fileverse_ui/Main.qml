@@ -47,6 +47,12 @@ Item {
         })
     }
     function core(method, args, cb) { root.callVia(root.coreName, method, args, cb) }
+    // Blocking call, for the editor's millisecond conversions: an async reply could
+    // overwrite what was typed while it was on its way.
+    function coreSync(method, args) {
+        if (typeof logos === "undefined" || logos === null || typeof logos.callModule !== "function") return null
+        try { return root.j(logos.callModule(root.coreName, method, args || [])) } catch (e) { return null }
+    }
     // Results may arrive JSON-quoted once or twice by the bridge.
     function j(raw) {
         var v = raw
@@ -214,17 +220,152 @@ Item {
     }
     function editDraft(d) {
         root.draft = d; root.draftDirty = false; root.mode = "edit"; root.tabIndex = 0
-        titleField.text = d.title; mdArea.text = d.markdown
+        titleField.text = d.title; root.loadEditor(d.markdown)
     }
     function openDraft(id) { root.act("draft_get", [id], "", function (r) { root.editDraft(r.draft) }) }
     function saveDraft(then) {
         if (!root.draft) return
-        root.core("draft_save", [root.draft.id, titleField.text, mdArea.text], function (raw) {
+        var visual = root.visualEdit
+        root.core(visual ? "draft_save_rich" : "draft_save", [root.draft.id, titleField.text, visual ? richArea.text : mdArea.text], function (raw) {
             var r = root.j(raw)
             if (r && r.ok) { root.draft = r.draft; root.draftDirty = false; root.refresh(); if (then) then() }
             else root.fail(r ? r.error : "Saving failed.")
         })
     }
+    // ── the visual editor ──
+    // The TextArea edits formatted text in Qt's RichText mode; drafts stay Markdown.
+    // The core converts both ways (rich_html / draft_save_rich) and restyles blocks
+    // (rich_block), because QML has no block-format API and Qt's own Markdown writer
+    // garbles code blocks and tables. Inline styles go through `cursorSelection.font`.
+    property bool visualEdit: true
+    property bool loadingEditor: false
+    property string blockKind: "p"        // p h1 h2 h3 ul ol task done quote code hr table
+    function loadEditor(md) {
+        root.loadingEditor = true
+        mdArea.text = md
+        root.loadingEditor = false
+        if (!root.visualEdit) return
+        var r = root.coreSync("rich_html", [md])
+        if (!r || !r.ok) { root.fail("Could not open the visual editor; showing Markdown."); root.visualEdit = false; return }
+        root.loadingEditor = true
+        richArea.text = root.tintLinks(r.html)
+        root.loadingEditor = false
+        richArea.cursorPosition = 0
+        root.updateBlockKind()
+    }
+    function setVisualEdit(v) {
+        if (v === root.visualEdit || !root.draft) return
+        if (v) { root.visualEdit = true; root.loadEditor(mdArea.text); return }
+        // visual -> markdown: save converts, and hands the Markdown back
+        root.core("draft_save_rich", [root.draft.id, titleField.text, richArea.text], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok) { root.fail(r ? r.error : "Saving failed."); return }
+            root.draft = r.draft; root.draftDirty = false
+            root.visualEdit = false
+            root.loadEditor(r.draft.markdown)
+        })
+    }
+    function editorChanged() {
+        if (root.loadingEditor) return
+        root.draftDirty = true
+        previewTimer.restart()
+    }
+    // Which text block the cursor is in, counted as Qt counts them (paragraph
+    // separators; table cells are separated by other characters).
+    function blockIndex() {
+        var before = richArea.getText(0, richArea.cursorPosition)
+        return before.split("\u2029").length - 1
+    }
+    function blockStart() {
+        var p = richArea.getText(0, richArea.cursorPosition)
+        return p.lastIndexOf("\u2029") + 1
+    }
+    function inTable() {
+        var p = richArea.getText(0, richArea.length), pos = richArea.cursorPosition
+        var s = p.lastIndexOf("\u2029", pos - 1) + 1
+        var e = p.indexOf("\u2029", pos); if (e < 0) e = p.length
+        var seg = p.substring(s, e)
+        return seg.indexOf("\ufdd0") >= 0 || seg.indexOf("\ufdd1") >= 0
+    }
+    Timer { id: kindTimer; interval: 150; onTriggered: root.refreshBlockKind() }
+    function updateBlockKind() { if (root.visualEdit) kindTimer.restart() }
+    function refreshBlockKind() {
+        if (root.inTable()) { root.blockKind = "table"; return }
+        var r = root.coreSync("rich_kind", [richArea.text, String(root.blockIndex())])
+        if (r && r.ok) root.blockKind = r.kind || "p"
+    }
+    function setBlock(kind) {
+        if (root.inTable()) { root.say("Tables keep their own layout"); return }
+        var pos = richArea.cursorPosition
+        var r = root.coreSync("rich_block", [richArea.text, String(root.blockIndex()), kind])
+        if (!r || !r.ok) { root.fail(r ? r.error : "Could not change this block."); return }
+        root.loadingEditor = true
+        richArea.text = root.tintLinks(r.html)
+        root.loadingEditor = false
+        pos = Math.max(0, Math.min(pos, richArea.length))
+        // an empty block restyled holds a zero-width space (Qt drops empty headings): type after it
+        if (richArea.getText(pos, pos + 1) === "\u200b") pos++
+        richArea.cursorPosition = pos
+        richArea.forceActiveFocus()
+        root.editorChanged()
+        root.blockKind = kind
+    }
+    // Qt draws links in a fixed dark blue; give them the theme's colour.
+    function tintLinks(html) {
+        var c = String(Theme.palette.primary)
+        return html.replace(/<a href="([^"]*)">/g, '<a href="$1"><span style="color:' + c + ';">').replace(/<\/a>/g, "</span></a>")
+    }
+    function toggleBlock(kind) { root.setBlock(root.blockKind === kind ? "p" : kind) }
+    function toggleTask() { root.setBlock(root.blockKind === "task" ? "done" : "task") }
+    function toggleFont(prop) {
+        if (richArea.selectionStart === richArea.selectionEnd) { root.say("Select some text first"); return }
+        var f = richArea.cursorSelection.font
+        f[prop] = !f[prop]
+        richArea.cursorSelection.font = f
+        root.editorChanged()
+    }
+    function escHtml(t) { return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;") }
+    // Inline code and links go in as HTML, which TextArea.insert parses in RichText mode.
+    function wrapSelection(make) {
+        var s = richArea.selectionStart, e = richArea.selectionEnd
+        if (s === e) { root.say("Select some text first"); return false }
+        var t = richArea.selectedText
+        richArea.remove(s, e)
+        richArea.insert(s, make(root.escHtml(t)))
+        richArea.forceActiveFocus()
+        root.editorChanged()
+        return true
+    }
+    property var linkRange: null
+    function askLink() {
+        if (richArea.selectionStart === richArea.selectionEnd) { root.say("Select the text to link first"); return }
+        root.linkRange = [richArea.selectionStart, richArea.selectionEnd]
+        linkUrl.text = "https://"
+        linkUrl.forceActiveFocus(); linkUrl.selectAll()
+    }
+    function findEditor() { return richArea }
+    function applyLinkTo(u) { linkUrl.text = u; root.applyLink() }
+    function applyLink() {
+        var u = linkUrl.text.trim(), r = root.linkRange
+        root.linkRange = null
+        if (!r || !/^(https?:\/\/|mailto:)\S+$/.test(u)) { if (u !== "" && u !== "https://") root.say("Links must start with https://, http:// or mailto:"); return }
+        richArea.select(r[0], r[1])
+        root.wrapSelection(function (t) { return root.tintLinks("<a href=\"" + root.escHtml(u) + "\">" + t + "</a>") })
+    }
+    // Markdown typed at the start of a block becomes that block, as in Fileverse:
+    // "# " heading, "- " list, "1. " numbered, "[] " task, "> " quote, "``` " code.
+    function typedShortcut() {
+        if (root.blockKind === "code" || root.blockKind === "table") return false
+        var pos = richArea.cursorPosition
+        var p = richArea.getText(0, pos)
+        var typed = p.substring(p.lastIndexOf("\u2029") + 1)
+        var map = { "#": "h1", "##": "h2", "###": "h3", "-": "ul", "*": "ul", "1.": "ol", "[]": "task", ">": "quote", "```": "code" }
+        if (!(typed in map)) return false
+        richArea.remove(pos - typed.length, pos)
+        root.setBlock(map[typed])
+        return true
+    }
+
     function publishDraft() {
         root.saveDraft(function () {
             root.startJob("publish", [root.draft.id], "publish", function (r) {
@@ -1039,7 +1180,7 @@ Item {
                     Field {
                         id: titleField
                         Layout.fillWidth: true
-                        font.pixelSize: 20
+                        font.pixelSize: 22
                         font.weight: Theme.typography.weightBold
                         placeholderText: "Title"
                         background: Item {}
@@ -1062,14 +1203,169 @@ Item {
                     LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Copy link"; onClicked: root.copy(root.draft.published.link, "Link") }
                     LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Open published"; onClicked: root.open(root.draft.published.link) }
                     LogosButton { visible: !!(root.draft && root.draft.sourceUrl); compact: true; text: "Open original"; onClicked: root.open(root.draft.sourceUrl) }
-                    Item { Layout.fillWidth: true }
+                    Hint {
+                        text: root.draft && root.draft.published
+                              ? ("Published " + root.ago(root.draft.published.at) + ". Each publish makes a new link.")
+                              : ""
+                    }
                 }
-                Hint {
-                    text: root.draft && root.draft.published
-                          ? ("Published " + root.ago(root.draft.published.at) + ". Anyone with the link can read it in Basecamp; each publish makes a new link (content-addressed).")
-                          : "Markdown on the left, the document as it will look on the right. Publishing encrypts it in the Fileverse format and puts it on your IPFS node and in Logos Storage."
+
+                // toolbar
+                Rectangle {
+                    Layout.fillWidth: true
+                    implicitHeight: 42
+                    radius: Theme.spacing.radiusLarge
+                    color: Theme.palette.backgroundSecondary
+                    border.color: Theme.palette.borderHairline
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.leftMargin: 6
+                        anchors.rightMargin: 6
+                        spacing: 2
+                        Repeater {
+                            model: root.visualEdit ? [
+                                ["Text", "p", "Normal text", function () { root.setBlock("p") }],
+                                ["H1", "h1", "Heading 1 (type # and a space)", function () { root.toggleBlock("h1") }],
+                                ["H2", "h2", "Heading 2 (##)", function () { root.toggleBlock("h2") }],
+                                ["H3", "h3", "Heading 3 (###)", function () { root.toggleBlock("h3") }],
+                                ["|", "", "", null],
+                                ["B", "", "Bold (Ctrl+B)", function () { root.toggleFont("bold") }],
+                                ["I", "", "Italic (Ctrl+I)", function () { root.toggleFont("italic") }],
+                                ["S", "", "Strikethrough", function () { root.toggleFont("strikeout") }],
+                                ["</>", "", "Inline code", function () { root.wrapSelection(function (t) { return "<code>" + t + "</code>" }) }],
+                                ["Link", "", "Link (Ctrl+K)", function () { root.askLink() }],
+                                ["|", "", "", null],
+                                ["• List", "ul", "Bulleted list (-)", function () { root.toggleBlock("ul") }],
+                                ["1. List", "ol", "Numbered list (1.)", function () { root.toggleBlock("ol") }],
+                                ["☐ Task", "task", "Checklist ([] and a space); click again to tick", function () { root.toggleTask() }],
+                                ["❝ Quote", "quote", "Quote (>)", function () { root.toggleBlock("quote") }],
+                                ["{ } Code", "code", "Code block", function () { root.toggleBlock("code") }],
+                                ["|", "", "", null],
+                                ["↶", "", "Undo (Ctrl+Z)", function () { richArea.undo() }],
+                                ["↷", "", "Redo (Ctrl+Shift+Z)", function () { richArea.redo() }]
+                            ] : []
+                            Item {
+                                implicitWidth: modelData[0] === "|" ? 9 : tbLabel.implicitWidth + 16
+                                implicitHeight: 30
+                                Rectangle { visible: modelData[0] === "|"; anchors.centerIn: parent; width: 1; height: 18; color: Theme.palette.borderHairline }
+                                Rectangle {
+                                    visible: modelData[0] !== "|"
+                                    anchors.fill: parent
+                                    radius: Theme.spacing.radiusMedium
+                                    readonly property bool on: modelData[1] !== "" && (root.blockKind === modelData[1] || (modelData[1] === "task" && root.blockKind === "done"))
+                                    color: on ? Theme.colors.getColor(Theme.palette.primary, 0.18) : (tbMouse.containsMouse ? Theme.palette.hover : "transparent")
+                                    LogosText {
+                                        id: tbLabel
+                                        anchors.centerIn: parent
+                                        textFormat: Text.PlainText
+                                        font.pixelSize: 12
+                                        font.weight: Theme.typography.weightMedium
+                                        font.bold: modelData[0] === "B"
+                                        font.italic: modelData[0] === "I"
+                                        font.strikeout: modelData[0] === "S"
+                                        color: parent.on ? Theme.palette.primary : Theme.palette.textSecondary
+                                        text: modelData[1] === "task" && root.blockKind === "done" ? "☑ Task" : modelData[0]
+                                    }
+                                    MouseArea { id: tbMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: modelData[3]() }
+                                    LogosToolTip { text: modelData[2]; visible: tbMouse.containsMouse && text !== "" }
+                                }
+                            }
+                        }
+                        Hint { visible: !root.visualEdit; Layout.leftMargin: 6; text: "Markdown source. Switch back to Visual to edit formatted text." }
+                        Item { Layout.fillWidth: true }
+                        // Visual | Markdown
+                        Rectangle {
+                            implicitWidth: modeRow.implicitWidth + 4
+                            implicitHeight: 30
+                            radius: 15
+                            color: Theme.palette.backgroundInset
+                            Row {
+                                id: modeRow
+                                anchors.centerIn: parent
+                                Repeater {
+                                    model: [["Visual", true], ["Markdown", false]]
+                                    Rectangle {
+                                        width: modeLabel.implicitWidth + 20; height: 26; radius: 13
+                                        color: root.visualEdit === modelData[1] ? Theme.palette.surfaceRaised : "transparent"
+                                        LogosText { id: modeLabel; anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 12; color: root.visualEdit === modelData[1] ? Theme.palette.text : Theme.palette.textTertiary; text: modelData[0] }
+                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setVisualEdit(modelData[1]) }
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
+
+                // link prompt
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: root.linkRange !== null
+                    spacing: Theme.spacing.small
+                    Field {
+                        id: linkUrl
+                        Layout.fillWidth: true
+                        placeholderText: "https://…"
+                        onAccepted: root.applyLink()
+                        Keys.onEscapePressed: { root.linkRange = null; richArea.forceActiveFocus() }
+                    }
+                    LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Add link"; onClicked: root.applyLink() }
+                    LogosButton { compact: true; text: "Cancel"; onClicked: { root.linkRange = null; richArea.forceActiveFocus() } }
+                }
+
+                // visual: the document as a page you type into
+                Card {
+                    visible: root.visualEdit
+                    Layout.fillWidth: true
+                    Layout.fillHeight: true
+                    ScrollView {
+                        id: richScroll
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        clip: true
+                        TextArea {
+                            id: richArea
+                            readonly property int side: Math.max(28, (richScroll.width - 760) / 2)
+                            textFormat: TextEdit.RichText
+                            wrapMode: TextEdit.Wrap
+                            selectByMouse: true
+                            persistentSelection: true
+                            color: Theme.palette.text
+                            selectionColor: Theme.colors.getColor(Theme.palette.primary, 0.35)
+                            selectedTextColor: Theme.palette.text
+                            palette.link: Theme.palette.primary
+                            font.family: Theme.typography.publicSans
+                            font.pixelSize: 16
+                            leftPadding: side
+                            rightPadding: side
+                            topPadding: 28
+                            bottomPadding: 60
+                            placeholderText: "Start writing… (# heading, - list, [] task, > quote)"
+                            placeholderTextColor: Theme.palette.textPlaceholder
+                            background: Item {}
+                            onTextChanged: root.editorChanged()
+                            onCursorPositionChanged: root.updateBlockKind()
+                            Keys.onPressed: function (e) {
+                                var ctrl = e.modifiers & Qt.ControlModifier
+                                if (ctrl && e.key === Qt.Key_B) { root.toggleFont("bold"); e.accepted = true }
+                                else if (ctrl && e.key === Qt.Key_I) { root.toggleFont("italic"); e.accepted = true }
+                                else if (ctrl && e.key === Qt.Key_K) { root.askLink(); e.accepted = true }
+                                else if (!ctrl && e.key === Qt.Key_Space && root.typedShortcut()) e.accepted = true
+                                // Enter at the end of a heading starts normal text, as in Fileverse
+                                else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
+                                    // decided before Qt splits the block: is this a heading, and are we at its end?
+                                    root.refreshBlockKind()
+                                    var p = richArea.getText(0, richArea.length), c = richArea.cursorPosition
+                                    var atEnd = c === p.length || p.charAt(c) === "\u2029"
+                                    if (/^h[1-3]$/.test(root.blockKind) && atEnd) Qt.callLater(function () { root.setBlock("p") })
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // markdown source + preview
                 SplitView {
+                    visible: !root.visualEdit
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     orientation: Qt.Horizontal
@@ -1086,7 +1382,7 @@ Item {
                             textFormat: TextEdit.PlainText
                             padding: 14
                             background: Rectangle { color: Theme.palette.backgroundInset; radius: Theme.spacing.radiusLarge; border.color: Theme.palette.borderSubtle }
-                            onTextChanged: if (activeFocus) { root.draftDirty = true; previewTimer.restart() }
+                            onTextChanged: if (activeFocus) root.editorChanged()
                         }
                     }
                     Rectangle {
@@ -1100,7 +1396,7 @@ Item {
                             anchors.margins: 16
                             clip: true
                             spacing: 8
-                            model: root.mode === "edit" ? root.blocks : []
+                            model: root.mode === "edit" && !root.visualEdit ? root.blocks : []
                             ScrollBar.vertical: ScrollBar {}
                             delegate: Loader {
                                 width: previewList.width - 12
