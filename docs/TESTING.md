@@ -1,5 +1,16 @@
 # What was tested, and how to repeat it
 
+## fileverse_core 0.5.1 (2026-10-26)
+
+- `/document/<id>#k=` links (what docs.fileverse.io's Share dialog gives now): the id is the
+  document's `appFileId`. Fileverse's web app asks its indexer (`/ddoc/by-id/<id>`, refused
+  without the app's Origin header) for the portal; we look in the portals this app knows (backup
+  keys imported, portals opened before) with `appFileIdToFileId` and confirm with the file
+  record. Real link from the user, headless runtime: cold → clear error; after one open by long
+  link → the `/document/` link opens ("This is a test!").
+- Version-4 files lock the file key as `{"key","iv":"","authTag":""}`: a bare key in the legacy
+  JSON shape (it failed with "GCM nonce must be 12 bytes, got 0"). Unit test `file_key_wrappers`.
+
 ## 0.5.0 / ipfs_module 0.1.2 (2026-10-26)
 
 - New UI: sidebar with navigation and a status card, kind tiles instead of `¶`/`▦` prefixes,

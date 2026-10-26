@@ -118,6 +118,32 @@ pub fn resolve_token(rpc: &dyn Rpc, version: u8, token_id: u32) -> Result<String
     Ok(portal)
 }
 
+/// Which file of a v3 portal carries this document id (`/document/<id>` links), read
+/// with `appFileIdToFileId` and confirmed by the file record itself.
+pub fn find_app_file(rpc: &dyn Rpc, portal: &str, app_file_id: &str) -> Result<Option<FileRecord>, String> {
+    if !valid_address(portal) || app_file_id.is_empty() || app_file_id.len() > 64 {
+        return Ok(None);
+    }
+    let mut data = abi::selector("appFileIdToFileId(string)").to_vec();
+    let mut word = [0u8; 32];
+    word[31] = 0x20;
+    data.extend_from_slice(&word);
+    word = [0u8; 32];
+    word[24..].copy_from_slice(&(app_file_id.len() as u64).to_be_bytes());
+    data.extend_from_slice(&word);
+    let mut b = app_file_id.as_bytes().to_vec();
+    b.resize(app_file_id.len().div_ceil(32) * 32, 0);
+    data.extend_from_slice(&b);
+    // Legacy portals have no such function: the call reverts, which just means "not here".
+    let Ok(raw) = rpc.eth_call(portal, &format!("0x{}", hex::encode(data))) else { return Ok(None) };
+    let v = abi::decode(&abi::hex_bytes(&raw)?, &[Kind::Uint])?;
+    let id = v[0].as_u128() as u64;
+    match read_file(rpc, portal, id) {
+        Ok(rec) if rec.app_file_id == app_file_id => Ok(Some(rec)),
+        _ => Ok(None),
+    }
+}
+
 pub fn file_count(rpc: &dyn Rpc, portal: &str) -> Result<u64, String> {
     if !valid_address(portal) {
         return Err(format!("not a contract address: {portal}"));

@@ -718,7 +718,22 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                         .ok_or("no backup key stored for this portal")?;
                         backup::open(&ModuleRpc, &gw, &keys, id)
                     }
-                    None => viewer::open_link(&ModuleRpc, &gw, &url),
+                    None => {
+                        // Where a /document/<id> link may be: your portals, then ones opened before.
+                        let known: Vec<String> = {
+                            let s = me.state.lock().unwrap();
+                            let mut v: Vec<String> = s.keys.iter().map(|k| k.portal.clone()).collect();
+                            for r in &s.recent {
+                                if let Some(p) = r["portal"].as_str().filter(|p| !p.is_empty()) {
+                                    if !v.iter().any(|x| x.eq_ignore_ascii_case(p)) {
+                                        v.push(p.to_string());
+                                    }
+                                }
+                            }
+                            v
+                        };
+                        viewer::open_link_in(&ModuleRpc, &gw, &url, &known)
+                    }
                 }
             },
             move |s, v| record_recent(s, &u2, v),

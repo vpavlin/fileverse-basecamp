@@ -1,8 +1,9 @@
 //! fvview: open a Fileverse share link from the command line, with the same
 //! engine the Basecamp module uses.
 //!
-//!   fvview [--rpc URL] [--gateway URL]... [--keep IPFS_API] [--json] <share link>
+//!   fvview [--rpc URL] [--gateway URL]... [--portal ADDR]... [--keep IPFS_API] [--json] <share link>
 //!
+//! `--portal` names a portal to look in for a `/document/<id>` link.
 //! `--keep` copies the document's verified blocks into that IPFS node and pins them.
 
 use fileverse_core::{chain::HttpRpc, ipfs, node, viewer};
@@ -12,6 +13,7 @@ fn main() {
     let mut gws: Vec<String> = vec![];
     let mut json = false;
     let mut keep: Option<String> = None;
+    let mut portals: Vec<String> = vec![];
     let mut link = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -20,6 +22,7 @@ fn main() {
             "--gateway" => gws.push(args.next().expect("--gateway URL")),
             "--json" => json = true,
             "--keep" => keep = Some(args.next().expect("--keep IPFS_API_URL")),
+            "--portal" => portals.push(args.next().expect("--portal ADDRESS")),
             _ => link = Some(a),
         }
     }
@@ -32,7 +35,7 @@ fn main() {
     }
     let cache = std::env::temp_dir().join("fvview-blocks");
     let gw = ipfs::Gateways::new(gws, Some(cache));
-    let opened = viewer::open_link(&HttpRpc::new(&rpc), &gw, &link);
+    let opened = viewer::open_link_in(&HttpRpc::new(&rpc), &gw, &link, &portals);
     if let (Some(api), Ok(v)) = (&keep, &opened) {
         let blobs = v["provenance"]["blobs"].as_array().unwrap();
         let roots: Vec<String> = blobs.iter().map(|b| b["cid"].as_str().unwrap().to_string()).collect();

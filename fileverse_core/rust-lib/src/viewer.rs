@@ -27,6 +27,9 @@ pub struct Link {
     /// is empty until `resolve` looks it up on chain.
     #[serde(skip)]
     pub short: Option<(u8, u32)>,
+    /// `/document/<id>` links name the file by its document id only.
+    #[serde(skip)]
+    pub doc_id: Option<String>,
 }
 
 impl Link {
@@ -62,7 +65,7 @@ pub fn parse_link(url: &str) -> Result<Link, String> {
     for w in segs.windows(2) {
         if chain::valid_address(w[0]) {
             if let Ok(id) = w[1].parse::<u64>() {
-                return Ok(Link { portal: w[0].to_string(), file_id: id, key, host, short: None });
+                return Ok(Link { portal: w[0].to_string(), file_id: id, key, host, short: None, doc_id: None });
             }
         }
     }
@@ -73,14 +76,13 @@ pub fn parse_link(url: &str) -> Result<Link, String> {
         // `/d/<hex>` or `/d/o/<hex>`
         let next = if segs.get(i + 1) == Some(&"o") { segs.get(i + 2) } else { segs.get(i + 1) };
         if let Some(sl) = next.and_then(|h| chain::parse_short(h)) {
-            return Ok(Link { portal: String::new(), file_id: sl.file_id as u64, key, host, short: Some((sl.version, sl.token_id)) });
+            return Ok(Link { portal: String::new(), file_id: sl.file_id as u64, key, host, short: Some((sl.version, sl.token_id)), doc_id: None });
         }
     }
-    if segs.contains(&"document") {
-        return Err("this is an opaque /document/ link: only Fileverse's coordinator server knows which file it names, \
-                    so it cannot be opened without Fileverse. Share the document's long link (…/<portal>/<file>#key=…) \
-                    or its short link (…/d/…#k=…), or open it from My files with your backup key"
-            .into());
+    if let Some(i) = segs.iter().position(|s| *s == "document") {
+        if let Some(id) = segs.get(i + 1).filter(|id| !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric())) {
+            return Ok(Link { portal: String::new(), file_id: 0, key, host, short: None, doc_id: Some(id.to_string()) });
+        }
     }
     Err("could not find <portal address>/<file number> (or a /d/ short link) in the link".into())
 }
@@ -119,6 +121,14 @@ fn link_secret(link_key: &[u8], meta: &Value, steps: &mut Vec<String>) -> Result
 pub(crate) fn file_key_of(plain: &[u8]) -> Result<FileKey, String> {
     if plain.first() == Some(&b'{') {
         let v: Value = serde_json::from_slice(plain).map_err(|e| format!("file key: {e}"))?;
+        // Current dDocs wrap a bare key the same way, with empty iv/authTag.
+        if str_field(&v, "iv").is_empty() {
+            let k = b64::decode(str_field(&v, "key"))?;
+            if k.len() == 32 {
+                return Ok(FileKey::Raw(k));
+            }
+            return Err(format!("file key has an unknown format ({} byte key, no iv)", k.len()));
+        }
         return Ok(FileKey::Legacy {
             key: b64::decode(str_field(&v, "key"))?,
             iv: b64::decode(str_field(&v, "iv"))?,
@@ -274,13 +284,40 @@ pub fn open_published(gw: &Gateways, url: &str) -> Result<Value, String> {
 }
 
 pub fn open_link(rpc: &dyn Rpc, gw: &Gateways, url: &str) -> Result<Value, String> {
+    open_link_in(rpc, gw, url, &[])
+}
+
+/// Open a share link. `/document/<id>` links carry no portal: it is looked for in
+/// `known_portals` (the user's own and those opened before), on chain.
+pub fn open_link_in(rpc: &dyn Rpc, gw: &Gateways, url: &str, known_portals: &[String]) -> Result<Value, String> {
     if url.trim().starts_with(crate::publish::LINK_PREFIX) {
         return open_published(gw, url);
     }
     let mut link = parse_link(url)?;
     let mut steps = vec![];
     link.resolve(rpc, &mut steps)?;
-    let rec: FileRecord = chain::read_file(rpc, &link.portal, link.file_id)?;
+    let rec: FileRecord = match &link.doc_id {
+        Some(id) => {
+            let mut found = None;
+            for p in known_portals {
+                if let Some(r) = chain::find_app_file(rpc, p, id)? {
+                    found = Some(r);
+                    break;
+                }
+            }
+            let r = found.ok_or_else(|| {
+                format!(
+                    "this /document/ link names document {id} but not its portal, and it is in none of the {} portals this app knows. \
+                     Import the backup key of the portal it is in (My files), or open it once through a long link (…/<portal>/<file>#k=…). \
+                     Fileverse's web app finds it through Fileverse's own indexer",
+                    known_portals.len()
+                )
+            })?;
+            steps.push(format!("document {id} is file {} of portal {} (appFileIdToFileId, confirmed by the file record)", r.file_id, r.portal));
+            r
+        }
+        None => chain::read_file(rpc, &link.portal, link.file_id)?,
+    };
     steps.push(format!("read files({}) on {} ({:?} portal)", rec.file_id, rpc.describe(), rec.layout));
     if rec.metadata_cid.is_empty() {
         return Err(format!("file {} of portal {} is empty on chain (never written, or removed)", rec.file_id, rec.portal));
@@ -374,6 +411,18 @@ mod tests {
     }
 
     #[test]
+    fn file_key_wrappers() {
+        // current dDocs: a bare key in the legacy JSON shape, iv and authTag empty
+        let k = b64::encode(&[7u8; 32]);
+        let fk = file_key_of(format!(r#"{{"key":"{k}","iv":"","authTag":""}}"#).as_bytes()).unwrap();
+        assert!(matches!(fk, FileKey::Raw(ref b) if b == &vec![7u8; 32]));
+        let iv = b64::encode(&[1u8; 12]);
+        let fk = file_key_of(format!(r#"{{"key":"{k}","iv":"{iv}","authTag":"{iv}"}}"#).as_bytes()).unwrap();
+        assert!(matches!(fk, FileKey::Legacy { .. }));
+        assert!(file_key_of(br#"{"key":"AAAA","iv":""}"#).is_err());
+    }
+
+    #[test]
     fn short_and_opaque_links() {
         // version 2, token 1, file 7
         let l = parse_link("https://ddocs.new/d/02000001000c#k=abc").unwrap();
@@ -381,8 +430,8 @@ mod tests {
         let l = parse_link("https://dsheets.new/d/o/02ABCDEF0102#k=x").unwrap();
         assert_eq!((l.short, l.file_id), (Some((2, 0xabcdef)), 0x0102));
         assert!(parse_link("https://ddocs.new/d/0200000100#k=abc").is_err());
-        let e = parse_link("https://docs.fileverse.io/document/gsHnoL8mgxrpH7xqYGPfMe#k=x").unwrap_err();
-        assert!(e.contains("opaque /document/ link"), "{e}");
+        let l = parse_link("https://docs.fileverse.io/document/gsHnoL8mgxrpH7xqYGPfMe#k=x").unwrap();
+        assert_eq!((l.doc_id.as_deref(), l.key.as_str()), (Some("gsHnoL8mgxrpH7xqYGPfMe"), "x"));
     }
 
     struct Registry {
