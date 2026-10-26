@@ -182,14 +182,21 @@
         ]
       },
       "locked": {
-        "path": "../ipfs_module",
-        "type": "path"
+        "dir": "ipfs_module",
+        "lastModified": 1793025218,
+        "narHash": "sha256-mCuiCgX5f4qXDQMtjWHrxgdDXIEgKrzZG05eibov+9Y=",
+        "owner": "vpavlin",
+        "repo": "fileverse-basecamp",
+        "rev": "c8660fafa98807da394e896f7e5656dcfcb0154c",
+        "type": "github"
       },
       "original": {
-        "path": "../ipfs_module",
-        "type": "path"
-      },
-      "parent": []
+        "dir": "ipfs_module",
+        "owner": "vpavlin",
+        "repo": "fileverse-basecamp",
+        "rev": "c8660fafa98807da394e896f7e5656dcfcb0154c",
+        "type": "github"
+      }
     },
     "logos-capability-module": {
       "inputs": {

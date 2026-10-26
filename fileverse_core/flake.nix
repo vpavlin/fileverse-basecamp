@@ -10,7 +10,7 @@
     };
     # Optional: used when installed. Their contracts (LIDL) give the typed clients.
     ipfs_module = {
-      url = "path:../ipfs_module";
+      url = "github:vpavlin/fileverse-basecamp/c8660fafa98807da394e896f7e5656dcfcb0154c?dir=ipfs_module";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
     # The storage_module Basecamp 0.3.2 bundles.
