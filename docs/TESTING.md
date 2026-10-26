@@ -1,5 +1,17 @@
 # What was tested, and how to repeat it
 
+## 0.6.0 (2026-10-26)
+
+- Version-4 titles are AES-GCM with a **24-byte** IV in front (`aesDecrypt` in
+  @fileverse/crypto); they fell back to the first line of text. Test vector made with
+  WebCrypto (`gcm_with_a_24_byte_iv`); the user's renamed document now shows its title
+  ("Something testful") instead of its first line.
+- `check_update(url)`: re-reads the file record on Gnosis and compares its metadata/content
+  CIDs with the ones last opened. Runtime test on the user's document: unchanged → `false`;
+  with the stored roots made to look older → `true`. The view checks every 60 s while a
+  document is open (not while presenting) and reloads it in place, keeping the tab.
+  Not tested: an actual edit made in Fileverse while Basecamp watches (needs the user).
+
 ## fileverse_core 0.5.1 (2026-10-26)
 
 - `/document/<id>#k=` links (what docs.fileverse.io's Share dialog gives now): the id is the

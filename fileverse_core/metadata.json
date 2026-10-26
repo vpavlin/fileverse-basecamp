@@ -1,7 +1,7 @@
 {
   "name": "fileverse_core",
   "display_name": "Fileverse Viewer Core",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "description": "Fileverse dDocs/dSheets in Logos Basecamp without Fileverse servers: share links and your own files (backup key) read from Gnosis via eth_rpc_module and hash-checked IPFS blocks, copies kept on your IPFS node (ipfs_module) and Logos Storage, Markdown drafts published to both.",
   "author": "vpavlin",
   "type": "core",

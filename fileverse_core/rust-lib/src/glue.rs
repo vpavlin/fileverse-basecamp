@@ -31,7 +31,7 @@ use logos_rust_sdk::LogosError;
 use serde_json::{json, Value};
 
 use crate::backup::{self, PortalKeys};
-use crate::chain::{Rpc, GNOSIS_CHAIN_ID};
+use crate::chain::{self, Rpc, GNOSIS_CHAIN_ID};
 use crate::ipfs::{BlockSource, Cid, Gateways, DEFAULT_GATEWAYS};
 use crate::node::{self, Node};
 use crate::{b64, doc, md, publish, viewer};
@@ -53,6 +53,9 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn node_status(&self) -> String;
     /// Copy a recent document's blocks into your IPFS node and pin them. Returns a job.
     fn keep(&self, url: String) -> String;
+    /// Whether a recently opened document has a newer version on chain than the one
+    /// shown (its file record now names other blocks). Returns a job: `{ changed }`.
+    fn check_update(&self, url: String) -> String;
     /// Whether Logos Storage is available: `{ available, peerId }`.
     fn storage_status(&self) -> String;
     /// Copy a recent document's blocks into Logos Storage. Returns a job.
@@ -841,6 +844,28 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             None => json!({ "ok": true, "reachable": false, "error": "no IPFS node: install the IPFS Node module, or run Kubo and set it in Settings" }),
         }
         .to_string()
+    }
+
+    fn check_update(&self, url: String) -> String {
+        let entry = {
+            let s = self.state.lock().unwrap();
+            s.recent.iter().find(|r| r["url"].as_str() == Some(url.as_str())).cloned()
+        };
+        let Some(entry) = entry else { return err("this document is not among the recent ones") };
+        let portal = entry["portal"].as_str().unwrap_or("").to_string();
+        let file_id = entry["fileId"].as_u64();
+        let roots: Vec<String> = entry["roots"].as_array().map(|a| a.iter().filter_map(|c| c.as_str().map(str::to_string)).collect()).unwrap_or_default();
+        self.run_job(
+            move |_me, _job| {
+                // Published Basecamp documents are content-addressed: they never change.
+                let (Some(id), true) = (file_id, chain::valid_address(&portal)) else { return Ok(json!({ "ok": true, "changed": false })) };
+                let rec = chain::read_file(&ModuleRpc, &portal, id)?;
+                let same = |c: &str| c.is_empty() || roots.iter().any(|r| Cid::parse(r).map(|x| x.to_v1()).ok() == Cid::parse(c).map(|x| x.to_v1()).ok());
+                let changed = !same(&rec.metadata_cid) || !same(&rec.content_cid);
+                Ok(json!({ "ok": true, "changed": changed }))
+            },
+            |_s, _v| {},
+        )
     }
 
     fn keep(&self, url: String) -> String {

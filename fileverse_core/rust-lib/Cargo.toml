@@ -1,6 +1,6 @@
 [package]
 name = "fileverse_core"
-version = "0.5.1"
+version = "0.6.0"
 edition = "2021"
 
 # Standalone crate: the empty table keeps cargo from adopting a parent workspace.

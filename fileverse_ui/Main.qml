@@ -237,6 +237,52 @@ Item {
         })
     }
 
+    // ── live documents: while one is open, look for a newer version on chain ──
+    // Quiet jobs: no "Opening…" state, no error banner; they only act on success.
+    property var quietJobs: ({})          // id -> callback(result)
+    function quietJob(method, args, onDone) {
+        root.core(method, args, function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok || !r.jobId) return
+            var q = root.quietJobs; q[r.jobId] = onDone; root.quietJobs = q
+        })
+    }
+    function pollQuiet() {
+        Object.keys(root.quietJobs).forEach(function (id) {
+            root.core("job", [id], function (raw) {
+                var r = root.j(raw)
+                if (r && r.ok && r.state === "pending") return
+                var cb = root.quietJobs[id]
+                var q = root.quietJobs; delete q[id]; root.quietJobs = q
+                if (r && r.ok && r.state === "done" && cb) cb(r.result)
+            })
+        })
+    }
+    Timer { interval: 1500; running: Object.keys(root.quietJobs).length > 0; repeat: true; onTriggered: root.pollQuiet() }
+    property bool checkingUpdate: false
+    function checkForUpdate() {
+        var u = root.docUrl
+        if (root.mode !== "doc" || u === "" || u.indexOf("fvbc://") === 0 || root.busy || root.checkingUpdate || root.presenting) return
+        root.checkingUpdate = true
+        root.quietJob("check_update", [u], function (r) {
+            if (!r.changed || root.docUrl !== u) { root.checkingUpdate = false; return }
+            root.quietJob("open", [u], function (doc) {
+                root.checkingUpdate = false
+                if (root.docUrl !== u || root.mode !== "doc") return
+                var tab = root.tabIndex, sh = root.sheetIndex
+                root.docv = doc
+                root.tabIndex = Math.min(tab, Math.max(0, (doc.tabs || []).length - 1))
+                root.sheetIndex = Math.min(sh, Math.max(0, (doc.sheets || []).length - 1))
+                root.refresh()
+                root.say("Updated to the latest version")
+            })
+        })
+        // never stay stuck if a quiet job is lost
+        updateGuard.restart()
+    }
+    Timer { id: updateGuard; interval: 120000; onTriggered: root.checkingUpdate = false }
+    Timer { interval: 60000; running: root.mode === "doc"; repeat: true; onTriggered: root.checkForUpdate() }
+
     Timer { interval: 2500; running: true; repeat: true; onTriggered: root.refresh() }
     Timer { interval: 700; running: root.busy; repeat: true; onTriggered: root.pollJobs() }
     Timer { id: toastTimer; interval: 3500; onTriggered: root.toast = "" }

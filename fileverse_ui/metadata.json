@@ -1,7 +1,7 @@
 {
   "name": "fileverse_ui",
   "display_name": "Fileverse",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "type": "ui_qml",
   "category": "productivity",
   "description": "Fileverse dDocs and dSheets in Basecamp without Fileverse servers: read share links and your own files, present docs as slides, keep copies on IPFS and Logos Storage, write and publish documents.",
@@ -9,7 +9,7 @@
   "icon": "icon.png",
   "view": "Main.qml",
   "dependencies": [
-    { "name": "fileverse_core", "version": "~0.5.0" }
+    { "name": "fileverse_core", "version": "~0.6.0" }
   ],
   "nix": {
     "packages": { "build": [], "runtime": [] },

@@ -66,6 +66,19 @@ pub fn gcm_open_nonce_prefixed(key: &[u8], data: &[u8]) -> Result<Vec<u8>, Strin
     gcm_open(key, &data[..12], &data[12..])
 }
 
+/// Version-4 titles (`aesDecrypt` in @fileverse/crypto): a 24-byte IV first, then
+/// ciphertext and tag. GCM with a non-standard nonce length.
+pub fn gcm_open_nonce24_prefixed(key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
+    use aes_gcm::aead::generic_array::{typenum::U24, GenericArray};
+    if data.len() < 40 {
+        return Err("ciphertext too short".into());
+    }
+    let cipher = aes_gcm::AesGcm::<aes::Aes256, U24>::new_from_slice(key).map_err(|e| e.to_string())?;
+    cipher
+        .decrypt(GenericArray::from_slice(&data[..24]), &data[24..])
+        .map_err(|_| "authentication failed".to_string())
+}
+
 /// The v3 content layout: ciphertext, 16-byte tag, 12-byte IV.
 pub fn gcm_open_tag_iv_suffixed(key: &[u8], data: &[u8]) -> Result<Vec<u8>, String> {
     if data.len() < 28 {
@@ -135,6 +148,15 @@ pub fn ecies_open(private_key: &[u8], s: &str) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Made with WebCrypto (AES-GCM, 24-byte iv), as @fileverse/crypto's aesEncrypt does.
+    #[test]
+    fn gcm_with_a_24_byte_iv() {
+        let key: Vec<u8> = (0..32).collect();
+        let data = crate::b64::decode("ZGVmZ2hpamtsbW5vcHFyc3R1dnd4eXp7P8vow8wpK5YhACXUdmfCgpfoRzPfVHo5jEH5NqUgU3K7").unwrap();
+        assert_eq!(gcm_open_nonce24_prefixed(&key, &data).unwrap(), b"Something testful");
+        assert!(gcm_open_nonce24_prefixed(&[0u8; 32], &data).is_err());
+    }
 
     #[test]
     fn secretbox_roundtrip() {

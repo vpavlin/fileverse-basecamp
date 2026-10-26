@@ -218,7 +218,8 @@ fn decrypt_title(meta: &Value, fk: &FileKey, secret: &[u8]) -> String {
     }
     let r = match fk {
         FileKey::Legacy { key, iv, .. } => crypto::gcm_open(key, iv, &ct),
-        FileKey::Raw(key) => crypto::gcm_open_nonce_prefixed(key, &ct),
+        // v3 titles put a 12-byte nonce first; version-4 ones a 24-byte one
+        FileKey::Raw(key) => crypto::gcm_open_nonce_prefixed(key, &ct).or_else(|_| crypto::gcm_open_nonce24_prefixed(key, &ct)),
     };
     r.ok().and_then(|b| String::from_utf8(b).ok()).unwrap_or_default()
 }
