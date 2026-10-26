@@ -2,6 +2,7 @@
 //! the IPFS CIDs of its metadata, content and (v3) gate. Nothing secret is on chain.
 
 use serde::Serialize;
+use sha3::Digest;
 
 use crate::abi::{self, Kind};
 
@@ -14,6 +15,10 @@ pub trait Rpc {
     fn eth_call(&self, to: &str, data: &str) -> Result<String, String>;
     /// A short name for where the answer came from, shown to the user.
     fn describe(&self) -> String;
+    /// `eth_getLogs` with this filter; the raw JSON array of logs.
+    fn get_logs(&self, _filter: &serde_json::Value) -> Result<serde_json::Value, String> {
+        Err("this RPC cannot search logs".into())
+    }
 }
 
 #[derive(Clone, Copy, Debug, Serialize, PartialEq)]
@@ -44,6 +49,73 @@ pub struct FileRecord {
 
 pub fn valid_address(a: &str) -> bool {
     a.len() == 42 && a.starts_with("0x") && a[2..].chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// The v3 AppRegistry on Gnosis (ddocs.new / dsheets.new portals) and the block it
+/// was deployed in.
+pub const APP_REGISTRY: &str = "0xdb0def9f0992e68d7170e15c4788ff62a0210ca1";
+const APP_REGISTRY_FROM_BLOCK: u64 = 42_309_834;
+
+/// A ddocs.new short link, `/d/<12 hex>`: a registry version byte, a 3-byte portal
+/// token id and a 2-byte file id.
+#[derive(Debug, PartialEq)]
+pub struct ShortLink {
+    pub version: u8,
+    pub token_id: u32,
+    pub file_id: u16,
+}
+
+pub fn parse_short(hex12: &str) -> Option<ShortLink> {
+    if hex12.len() != 12 {
+        return None;
+    }
+    let b = hex::decode(hex12).ok()?;
+    Some(ShortLink {
+        version: b[0],
+        token_id: u32::from_be_bytes([0, b[1], b[2], b[3]]),
+        file_id: u16::from_be_bytes([b[4], b[5]]),
+    })
+}
+
+/// The portal a short link's token id names, read from the registry's
+/// `Mint(app, tokenId, account)` log and confirmed with `appInfo(app)`. Fileverse's
+/// web app asks its own indexer instead; this needs only a Gnosis RPC that serves
+/// `eth_getLogs` over the registry's lifetime.
+pub fn resolve_token(rpc: &dyn Rpc, version: u8, token_id: u32) -> Result<String, String> {
+    if version != 2 {
+        return Err(format!(
+            "this short link points into Fileverse's registry v{version}, which can only be searched through Fileverse's indexer; \
+             open the document in Fileverse and share the long link (…/<portal address>/<file number>#key=…) instead"
+        ));
+    }
+    let mut token = [0u8; 32];
+    token[28..].copy_from_slice(&token_id.to_be_bytes());
+    let mint_topic = format!("0x{}", hex::encode(sha3::Keccak256::digest(b"Mint(address,uint256,address)")));
+    let filter = serde_json::json!({
+        "address": APP_REGISTRY,
+        "fromBlock": format!("0x{:x}", APP_REGISTRY_FROM_BLOCK),
+        "toBlock": "latest",
+        "topics": [mint_topic, null, format!("0x{}", hex::encode(token))],
+    });
+    let logs = rpc.get_logs(&filter)?;
+    let topic = logs
+        .as_array()
+        .and_then(|a| a.first())
+        .and_then(|l| l.get("topics"))
+        .and_then(|t| t.get(1))
+        .and_then(|t| t.as_str())
+        .ok_or_else(|| format!("no Fileverse portal has token id {token_id} in the registry"))?;
+    let portal = format!("0x{}", topic.trim_start_matches("0x").get(24..).ok_or("bad Mint log")?);
+    // Do not take the log's word for it: the registry must say the same.
+    let mut data = abi::selector("appInfo(address)").to_vec();
+    data.extend_from_slice(&[0u8; 12]);
+    data.extend_from_slice(&hex::decode(&portal[2..]).map_err(|e| e.to_string())?);
+    let raw = rpc.eth_call(APP_REGISTRY, &format!("0x{}", hex::encode(data)))?;
+    let v = abi::decode(&abi::hex_bytes(&raw)?, &[abi::Kind::Address, abi::Kind::Uint, abi::Kind::Uint, abi::Kind::Address])?;
+    if !v[0].as_str().eq_ignore_ascii_case(&portal) || v[2].as_u128() != token_id as u128 {
+        return Err(format!("the registry does not confirm portal {portal} for token id {token_id}"));
+    }
+    Ok(portal)
 }
 
 pub fn file_count(rpc: &dyn Rpc, portal: &str) -> Result<u64, String> {
@@ -149,5 +221,20 @@ impl Rpc for HttpRpc {
 
     fn describe(&self) -> String {
         self.url.clone()
+    }
+
+    fn get_logs(&self, filter: &serde_json::Value) -> Result<serde_json::Value, String> {
+        let body = serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": "eth_getLogs", "params": [filter] });
+        let v: serde_json::Value = self
+            .client
+            .post(&self.url)
+            .json(&body)
+            .send()
+            .and_then(|r| r.json())
+            .map_err(|e| format!("RPC {}: {e}", self.url))?;
+        if let Some(e) = v.get("error") {
+            return Err(format!("RPC error: {e}"));
+        }
+        v.get("result").cloned().ok_or_else(|| format!("RPC returned no result: {v}"))
     }
 }

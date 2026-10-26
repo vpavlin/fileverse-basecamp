@@ -207,3 +207,13 @@ fn live_legacy_share_link() {
     assert_eq!(v["layout"], "legacy");
     assert!(v["markdown"].as_str().unwrap().contains("install @fileverse/agents"));
 }
+
+/// A ddocs.new short link's portal, resolved on Gnosis from the registry's Mint log:
+/// `cargo test --no-default-features -- --ignored live_short`
+#[test]
+#[ignore]
+fn live_short_link_token() {
+    let rpc = fileverse_core::chain::HttpRpc::new("https://rpc.gnosischain.com");
+    let p = fileverse_core::chain::resolve_token(&rpc, 2, 1).unwrap();
+    assert_eq!(p, "0x6a453c9f14651c05e04ff9ee77ed1ac6f36674e5");
+}

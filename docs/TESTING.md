@@ -1,5 +1,27 @@
 # What was tested, and how to repeat it
 
+## 0.5.0 / ipfs_module 0.1.2 (2026-10-26)
+
+- New UI: sidebar with navigation and a status card, kind tiles instead of `¶`/`▦` prefixes,
+  status chips (IPFS, Storage), relative dates, a filter for long portals, a readable-width
+  document page, an "Opening…" state that counts up. Rendered offscreen in every harness mode,
+  then checked in Basecamp 0.3.2 with OpenGL (llvmpipe): icons draw there (they are tinted by a
+  shader effect, which the offscreen harness and Qt's software renderer skip).
+- Short links `…/d/<12 hex>#k=…`: the portal token id is looked up in the v3 AppRegistry's
+  `Mint` log on Gnosis and confirmed with `appInfo` (unit test with a mock RPC that lies;
+  live test `live_short_link_token`: token 1 → 0x6a45…74e5). rpc.gnosischain.com serves the
+  whole log range; publicnode (50k blocks), drpc (10k) and 1rpc (50) refuse it, so the core
+  tries every endpoint. Registry v1 short links are refused with a hint (only Fileverse's
+  indexer can resolve them). In the GUI: a `/d/` link to token 5, file 0, with a dummy key
+  resolved the portal on chain, read the file record and its blocks, and refused the key.
+- Opaque `/document/<id>#k=` links: refused with an explanation (only Fileverse's coordinator
+  knows which file they name).
+- ipfs_module 0.1.2: a starting node reached 318 peers despite ConnMgr 10-20 and the first open
+  after Basecamp started timed out on every Gnosis RPC. With a resource-manager cap (64
+  connections) a 2-minute online run peaked at 44 peers with RPC calls at 60-150 ms
+  (`online_connection_count_stays_bounded`); in the GUI the same open succeeded 4 s after start
+  with 32 peers.
+
 ## fileverse_core 0.4.1 (2026-10-23)
 
 - Titles of older dDocs (metadata `version: "2"`) are sealed with the share-link secret, not

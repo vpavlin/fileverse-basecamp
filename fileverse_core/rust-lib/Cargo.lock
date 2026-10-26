@@ -429,7 +429,7 @@ dependencies = [
 
 [[package]]
 name = "fileverse_core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "aes",
  "aes-gcm",

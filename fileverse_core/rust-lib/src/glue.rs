@@ -188,6 +188,35 @@ impl Rpc for ModuleRpc {
     fn describe(&self) -> String {
         "eth_rpc_module (chain 100)".into()
     }
+
+    /// Many public RPCs cap the block range of eth_getLogs (publicnode 50k, drpc 10k);
+    /// rpc.gnosischain.com does not. Try the configured endpoint, then each fallback.
+    fn get_logs(&self, filter: &Value) -> Result<Value, String> {
+        let params = json!([filter]).to_string();
+        let rpc = modules().eth_rpc_module;
+        let mut why = vec![];
+        for url in std::iter::once(None).chain(FALLBACK_RPCS.iter().rev().map(|u| Some(*u))) {
+            let _slot = RpcSlot::take();
+            let raw = match url {
+                None => rpc.raw_rpc_with_timeout(GNOSIS_CHAIN_ID as i64, "eth_getLogs", &params, RPC_TIMEOUT),
+                Some(u) => rpc.raw_rpc_url_with_timeout(GNOSIS_CHAIN_ID as i64, u, "eth_getLogs", &params, RPC_TIMEOUT),
+            };
+            let v: Value = match raw.map_err(|e| e.to_string()).and_then(|r| serde_json::from_str(&r).map_err(|e| e.to_string())) {
+                Ok(v) => v,
+                Err(e) => {
+                    why.push(format!("{}: {e}", url.unwrap_or("configured endpoint")));
+                    continue;
+                }
+            };
+            if v.get("ok").and_then(Value::as_bool) == Some(true) {
+                if let Some(r) = v.get("result") {
+                    return Ok(r.clone());
+                }
+            }
+            why.push(format!("{}: {}", url.unwrap_or("configured endpoint"), v.get("error").and_then(Value::as_str).unwrap_or("no result")));
+        }
+        Err(format!("no Gnosis RPC would search the registry's logs ({})", why.join("; ")))
+    }
 }
 
 impl ModuleRpc {

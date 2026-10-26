@@ -23,10 +23,26 @@ pub struct Link {
     #[serde(skip)]
     pub key: String,
     pub host: String,
+    /// `/d/<12 hex>` short links name the portal by registry token id; `portal`
+    /// is empty until `resolve` looks it up on chain.
+    #[serde(skip)]
+    pub short: Option<(u8, u32)>,
+}
+
+impl Link {
+    /// Fill in the portal of a short link (no-op for long links).
+    pub fn resolve(&mut self, rpc: &dyn Rpc, steps: &mut Vec<String>) -> Result<(), String> {
+        if let Some((version, token)) = self.short {
+            self.portal = chain::resolve_token(rpc, version, token)?;
+            steps.push(format!("short link: portal token {token} is {} (registry Mint log, confirmed by appInfo)", self.portal));
+        }
+        Ok(())
+    }
 }
 
 /// `https://<host>/<portal>/<fileId>#key=<linkKey>` in any of its spellings
-/// (docs.fileverse.io, sheets.fileverse.io, ddocs.new, dsheets.new, ...).
+/// (docs.fileverse.io, sheets.fileverse.io, ddocs.new, dsheets.new, ...), and the
+/// short form `https://<host>/d/<12 hex>#k=<linkKey>`.
 pub fn parse_link(url: &str) -> Result<Link, String> {
     let url = url.trim();
     let (path, frag) = url.split_once('#').ok_or("the link has no #key= part; it is needed to decrypt")?;
@@ -46,11 +62,27 @@ pub fn parse_link(url: &str) -> Result<Link, String> {
     for w in segs.windows(2) {
         if chain::valid_address(w[0]) {
             if let Ok(id) = w[1].parse::<u64>() {
-                return Ok(Link { portal: w[0].to_string(), file_id: id, key, host });
+                return Ok(Link { portal: w[0].to_string(), file_id: id, key, host, short: None });
             }
         }
     }
-    Err("could not find <portal address>/<file number> in the link".into())
+    for (i, seg) in segs.iter().enumerate() {
+        if *seg != "d" {
+            continue;
+        }
+        // `/d/<hex>` or `/d/o/<hex>`
+        let next = if segs.get(i + 1) == Some(&"o") { segs.get(i + 2) } else { segs.get(i + 1) };
+        if let Some(sl) = next.and_then(|h| chain::parse_short(h)) {
+            return Ok(Link { portal: String::new(), file_id: sl.file_id as u64, key, host, short: Some((sl.version, sl.token_id)) });
+        }
+    }
+    if segs.contains(&"document") {
+        return Err("this is an opaque /document/ link: only Fileverse's coordinator server knows which file it names, \
+                    so it cannot be opened without Fileverse. Share the document's long link (…/<portal>/<file>#key=…) \
+                    or its short link (…/d/…#k=…), or open it from My files with your backup key"
+            .into());
+    }
+    Err("could not find <portal address>/<file number> (or a /d/ short link) in the link".into())
 }
 
 pub(crate) enum FileKey {
@@ -245,10 +277,14 @@ pub fn open_link(rpc: &dyn Rpc, gw: &Gateways, url: &str) -> Result<Value, Strin
     if url.trim().starts_with(crate::publish::LINK_PREFIX) {
         return open_published(gw, url);
     }
-    let link = parse_link(url)?;
+    let mut link = parse_link(url)?;
     let mut steps = vec![];
+    link.resolve(rpc, &mut steps)?;
     let rec: FileRecord = chain::read_file(rpc, &link.portal, link.file_id)?;
     steps.push(format!("read files({}) on {} ({:?} portal)", rec.file_id, rpc.describe(), rec.layout));
+    if rec.metadata_cid.is_empty() {
+        return Err(format!("file {} of portal {} is empty on chain (never written, or removed)", rec.file_id, rec.portal));
+    }
     let mut prov = vec![];
     let meta = fetch_json(gw, &rec.metadata_cid, &mut prov)?;
     if meta.get("isDeleted").and_then(Value::as_bool) == Some(true) {
@@ -335,6 +371,50 @@ mod tests {
         assert_eq!(title_from_tabs(&[tab(vec![b("code", "x = 1"), b("p", "  "), b("p", "first words\nsecond")])]), "first words");
         assert_eq!(title_from_tabs(&[tab(vec![b("p", &"a".repeat(100))])]).chars().count(), 80);
         assert_eq!(title_from_tabs(&[]), "");
+    }
+
+    #[test]
+    fn short_and_opaque_links() {
+        // version 2, token 1, file 7
+        let l = parse_link("https://ddocs.new/d/02000001000c#k=abc").unwrap();
+        assert_eq!((l.short, l.file_id, l.key.as_str(), l.portal.as_str()), (Some((2, 1)), 12, "abc", ""));
+        let l = parse_link("https://dsheets.new/d/o/02ABCDEF0102#k=x").unwrap();
+        assert_eq!((l.short, l.file_id), (Some((2, 0xabcdef)), 0x0102));
+        assert!(parse_link("https://ddocs.new/d/0200000100#k=abc").is_err());
+        let e = parse_link("https://docs.fileverse.io/document/gsHnoL8mgxrpH7xqYGPfMe#k=x").unwrap_err();
+        assert!(e.contains("opaque /document/ link"), "{e}");
+    }
+
+    struct Registry {
+        log_portal: &'static str,
+        info_portal: &'static str,
+        token: u64,
+    }
+    impl Rpc for Registry {
+        fn eth_call(&self, to: &str, data: &str) -> Result<String, String> {
+            assert!(to.eq_ignore_ascii_case(chain::APP_REGISTRY));
+            assert!(data.starts_with(&format!("0x{}", hex::encode(crate::abi::selector("appInfo(address)")))));
+            let w = |h: &str| format!("{:0>64}", h.trim_start_matches("0x"));
+            Ok(format!("0x{}{}{}{}", w(self.info_portal), w("0"), w(&format!("{:x}", self.token)), w("0x1365f81a3940b9ff84721d8232ebe70c88923ff4")))
+        }
+        fn describe(&self) -> String {
+            "mock".into()
+        }
+        fn get_logs(&self, f: &Value) -> Result<Value, String> {
+            assert_eq!(f["topics"][2], format!("0x{:064x}", self.token));
+            Ok(json!([{ "topics": [f["topics"][0], format!("0x{:0>64}", &self.log_portal[2..]), f["topics"][2], "0x0"] }]))
+        }
+    }
+
+    #[test]
+    fn short_link_portal_is_confirmed_by_the_registry() {
+        let p = "0x6a453c9f14651c05e04ff9ee77ed1ac6f36674e5";
+        let rpc = Registry { log_portal: p, info_portal: p, token: 1 };
+        assert_eq!(chain::resolve_token(&rpc, 2, 1).unwrap(), p);
+        // a log that the registry does not back up is refused
+        let liar = Registry { log_portal: "0x81fb962e2088de6925affa4e068dd3faf3efe163", info_portal: p, token: 1 };
+        assert!(chain::resolve_token(&liar, 2, 1).unwrap_err().contains("does not confirm"));
+        assert!(chain::resolve_token(&rpc, 1, 1).unwrap_err().contains("registry v1"));
     }
 
     #[test]
