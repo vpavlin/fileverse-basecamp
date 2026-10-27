@@ -688,6 +688,7 @@ fn draft_summary(d: &Value) -> Value {
     json!({
         "id": d["id"], "title": d["title"], "updatedAt": d["updatedAt"], "sourceUrl": d["sourceUrl"],
         "link": d["published"]["link"], "publishedAt": d["published"]["at"],
+        "links": d["links"].as_array().cloned().unwrap_or_else(|| d["published"]["link"].as_str().map(|l| vec![json!(l)]).unwrap_or_default()),
     })
 }
 
@@ -1237,6 +1238,8 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 let blocks = v["blocks"].clone();
                 let entry = json!({
                     "url": link2, "layout": "logos", "title": d["title"], "kind": "ddoc", "openedAt": now_ms(),
+                    // your own draft: opening it again should edit it, not copy it
+                    "draftId": d["id"],
                     "roots": blocks, "blocks": blocks,
                     "kept": if v.get("ipfs").is_some() { blocks.clone() } else { Value::Null },
                     "keptOn": v["peerId"].clone(),
@@ -1248,6 +1251,12 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 s.save();
                 let mut d = d.clone();
                 d["published"] = json!({ "link": link, "manifest": v["manifest"], "at": now_ms() });
+                // every link this draft was ever published under (each publish makes a new one)
+                let mut links: Vec<Value> = d["links"].as_array().cloned().unwrap_or_default();
+                if !links.contains(&json!(link)) {
+                    links.push(json!(link));
+                }
+                d["links"] = Value::Array(links);
                 write_private(&path, &d.to_string());
             },
         )

@@ -1,5 +1,14 @@
 # What was tested, and how to repeat it
 
+## 0.7.1 (2026-10-27)
+
+- Your own published drafts open as drafts: a recent entry records its draft (`draftId`),
+  and older entries are matched by the links the draft was published under (`links`).
+  Basecamp GUI: the published "SDK notes" in Recent ("Your draft") opened in the editor;
+  its published view offers "Edit" (not "Edit a copy"), which opened the same draft, and no
+  new draft was created.
+- Store name of the core: "Fileverse Core".
+
 ## 0.7.0: visual editor (2026-10-26)
 
 - The editor edits formatted text (Qt RichText) with a toolbar (text, H1-H3, bold, italic,

@@ -222,6 +222,19 @@ Item {
         root.draft = d; root.draftDirty = false; root.mode = "edit"; root.tabIndex = 0
         titleField.text = d.title; root.loadEditor(d.markdown)
     }
+    // The draft a document came from, if it is one of yours (a recent entry knows its
+    // draft; older entries are matched by the links the draft was published under).
+    function draftIdFor(url) {
+        var rs = root.snap.recent || []
+        for (var i = 0; i < rs.length; i++) if (rs[i].url === url && rs[i].draftId) return rs[i].draftId
+        var ds = root.snap.drafts || []
+        for (var j = 0; j < ds.length; j++) {
+            var d = ds[j]
+            if (d.link === url || (d.links || []).indexOf(url) >= 0) return d.id
+        }
+        return ""
+    }
+    readonly property string docDraftId: { root.snap; return root.draftIdFor(root.docUrl) }
     function openDraft(id) { root.act("draft_get", [id], "", function (r) { root.editDraft(r.draft) }) }
     function saveDraft(then) {
         if (!root.draft) return
@@ -734,12 +747,12 @@ Item {
                                     compact: true
                                     kind: modelData.kind || "ddoc"; layout: modelData.layout || ""
                                     title: modelData.title || "Untitled"
-                                    sub: (modelData.layout === "logos" ? "Published here" : (modelData.url.indexOf("fvown://") === 0 ? "My files" : "Shared link"))
+                                    sub: (root.draftIdFor(modelData.url) ? "Your draft" : modelData.layout === "logos" ? "Published here" : (modelData.url.indexOf("fvown://") === 0 ? "My files" : "Shared link"))
                                          + (modelData.openedAt ? " · " + root.ago(modelData.openedAt) : "")
                                          + (modelData.kept && modelData.keptOn === root.node.peerId ? " · IPFS" : "") + (modelData.inStorage ? " · Storage" : "")
                                     active: root.mode === "doc" && root.docUrl === modelData.url
                                     removable: true
-                                    onClicked: root.open(modelData.url)
+                                    onClicked: { var did = root.draftIdFor(modelData.url); if (did) { root.section = "drafts"; root.openDraft(did) } else root.open(modelData.url) }
                                     onRemoved: root.act("forget", [modelData.url], "")
                                 }
                             }
@@ -1118,7 +1131,8 @@ Item {
                 Layout.fillWidth: true
                 spacing: Theme.spacing.small
                 LogosButton { visible: root.deck.length > 0; compact: true; variant: LogosButton.Variant.Primary; text: "Present"; onClicked: root.present() }
-                LogosButton { visible: root.docv && root.docv.markdown !== undefined; compact: true; text: "Edit a copy"; onClicked: root.newDraft(root.docv.title || "Untitled", root.docv.markdownBody !== undefined ? root.docv.markdownBody : root.docv.markdown, root.docUrl) }
+                LogosButton { visible: root.docDraftId !== ""; compact: true; variant: LogosButton.Variant.Primary; text: "Edit"; onClicked: { root.section = "drafts"; root.openDraft(root.docDraftId) } }
+                LogosButton { visible: root.docv && root.docv.markdown !== undefined && root.docDraftId === ""; compact: true; text: "Edit a copy"; onClicked: root.newDraft(root.docv.title || "Untitled", root.docv.markdownBody !== undefined ? root.docv.markdownBody : root.docv.markdown, root.docUrl) }
                 LogosButton {
                     visible: (root.node.reachable || root.kept) && !root.kept
                     compact: true
