@@ -430,6 +430,16 @@ Item {
         var c = String(Theme.palette.primary)
         return html.replace(/<a href="([^"]*)">/g, '<a href="$1"><span style="color:' + c + ';">').replace(/<\/a>/g, "</span></a>")
     }
+    // Links open through the core: Basecamp's QML sandbox stops Qt.openUrlExternally.
+    function openLink(url) {
+        url = String(url)
+        if (!/^(https?:\/\/|mailto:)/i.test(url)) { root.say("Only web and mail links open"); return }
+        root.core("open_link", [url], function (raw) {
+            var r = root.j(raw)
+            if (r && r.ok) { root.say("Opening " + (url.length > 60 ? url.substring(0, 57) + "…" : url)); return }
+            if (!Qt.openUrlExternally(url)) root.fail((r && r.error) || "Could not open the link.")
+        })
+    }
     function toggleBlock(kind) { root.setBlock(root.blockKind === kind ? "p" : kind) }
     function toggleTask() { root.setBlock(root.blockKind === "task" ? "done" : "task") }
     function toggleFont(prop) {
@@ -1471,6 +1481,17 @@ Item {
                             background: Item {}
                             onTextChanged: root.editorChanged()
                             onCursorPositionChanged: root.updateBlockKind()
+                            // Ctrl+click opens a link (a plain click puts the cursor in it to edit)
+                            onReleased: function (ev) {
+                                if (!(ev.modifiers & Qt.ControlModifier)) return
+                                // (linkAt wants other coordinates in a padded TextArea; the hovered link is the one clicked)
+                                var l = String(richArea.hoveredLink || richArea.linkAt(ev.x - richArea.leftPadding, ev.y - richArea.topPadding))
+                                if (l) root.openLink(l)
+                            }
+                            HoverHandler { cursorShape: richArea.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
+                            ToolTip.visible: richArea.hoveredLink !== ""
+                            ToolTip.delay: 600
+                            ToolTip.text: "Ctrl+click to open the link"
                             Keys.onPressed: function (e) {
                                 var ctrl = e.modifiers & Qt.ControlModifier
                                 if (ctrl && e.key === Qt.Key_B) { root.toggleFont("bold"); e.accepted = true }
@@ -1692,7 +1713,7 @@ Item {
                     else if (b.t === "task") marker = (b.checked ? "☑  " : "☐  ")
                     return marker + b.html
                 }
-                onLinkActivated: function (link) { Qt.openUrlExternally(link) }
+                onLinkActivated: function (link) { root.openLink(link) }
                 HoverHandler { cursorShape: body.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor }
             }
         }
@@ -1760,7 +1781,7 @@ Item {
                                 color: Theme.palette.text
                                 linkColor: Theme.palette.primary
                                 text: modelData
-                                onLinkActivated: function (link) { Qt.openUrlExternally(link) }
+                                onLinkActivated: function (link) { root.openLink(link) }
                             }
                         }
                     }

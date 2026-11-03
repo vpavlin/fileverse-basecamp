@@ -333,7 +333,14 @@ impl InlineBuf {
                     label.push_str(&mark(&self.runs[j].0, &self.runs[j].2, plain_bold_ok));
                     j += 1;
                 }
-                out.push_str(&format!("[{label}]({})", href.replace(' ', "%20").replace(')', "%29")));
+                // a bare address (its text is the address, unstyled) stays bare
+                let plain: String = self.runs[i..j].iter().map(|r| r.2.as_str()).collect();
+                let unstyled = self.runs[i..j].iter().all(|r| r.0 == Style::default());
+                if unstyled && plain == *href && (href.starts_with("https://") || href.starts_with("http://")) && !href.contains(['*', '_', '[', ']', '<', '>', '`', '(', ')', ' ', '\\']) {
+                    out.push_str(href);
+                } else {
+                    out.push_str(&format!("[{label}]({})", href.replace(' ', "%20").replace(')', "%29")));
+                }
                 i = j;
                 continue;
             }
@@ -786,13 +793,14 @@ fn md_html(md: &str, img_width: u32) -> String {
     opts.insert(Options::ENABLE_TASKLISTS);
     let mut out = String::new();
     let mut in_code = false;
+    let mut in_link = false;
     let mut code = String::new();
     let mut item_open: Vec<bool> = vec![];
     // Task markers arrive after the <li> start; remember where it was written.
     let mut li_at: Option<usize> = None;
     let mut table_head = false;
     let mut image_alt: Option<(String, String)> = None; // (alt so far, destination)
-    for ev in Parser::new_ext(md, opts) {
+    for ev in crate::md::merged_events(md, opts) {
         if let Some((alt, dest)) = image_alt.as_mut() {
             match ev {
                 Event::End(TagEnd::Image) => {
@@ -886,15 +894,30 @@ fn md_html(md: &str, img_width: u32) -> String {
             Event::End(TagEnd::Emphasis) => out.push_str("</i>"),
             Event::Start(Tag::Strikethrough) => out.push_str("<s>"),
             Event::End(TagEnd::Strikethrough) => out.push_str("</s>"),
-            Event::Start(Tag::Link { dest_url, .. }) => out.push_str(&format!("<a href=\"{}\">", esc_html(&dest_url))),
-            Event::End(TagEnd::Link) => out.push_str("</a>"),
+            Event::Start(Tag::Link { dest_url, .. }) => {
+                in_link = true;
+                out.push_str(&format!("<a href=\"{}\">", esc_html(&dest_url)))
+            }
+            Event::End(TagEnd::Link) => {
+                in_link = false;
+                out.push_str("</a>")
+            }
             Event::Start(Tag::Image { dest_url, .. }) => image_alt = Some((String::new(), dest_url.to_string())),
             Event::Code(t) => out.push_str(&format!("<code>{}</code>", esc_html(&t))),
             Event::Text(t) => {
                 if in_code {
                     code.push_str(&t)
-                } else {
+                } else if in_link {
                     out.push_str(&esc_html(&t))
+                } else {
+                    // bare web addresses show as links, as they will be in the document
+                    let mut at = 0;
+                    for (a, e) in crate::md::bare_urls(&t) {
+                        out.push_str(&esc_html(&t[at..a]));
+                        out.push_str(&format!("<a href=\"{0}\">{0}</a>", esc_html(&t[a..e])));
+                        at = e;
+                    }
+                    out.push_str(&esc_html(&t[at..]));
                 }
             }
             Event::SoftBreak => out.push(' '),
@@ -1347,6 +1370,19 @@ li.checked::marker { content: "\2612"; }
         assert_eq!(kind_at(qt, 3), "table");
         assert_eq!(At::parse("12:101"), At { index: 12, gaps: vec![true, false, true] });
         assert_eq!(At::parse("x").index, usize::MAX);
+    }
+
+    /// A pasted address shows as a link in the editor and is written back bare.
+    #[test]
+    fn bare_addresses_are_links_in_the_editor() {
+        let html = to_html("Deck: https://logos.co/deck and [named](https://x.io)\n");
+        assert!(html.contains(r#"<a href="https://logos.co/deck">https://logos.co/deck</a>"#), "{html}");
+        assert_eq!(to_md(&html), "Deck: https://logos.co/deck and [named](https://x.io)\n");
+        // what Qt writes back for it (link tinted by the view)
+        let qt = r#"<html><body><p>Deck: <a href="https://logos.co/deck"><span style=" color:#ff8800;">https://logos.co/deck</span></a></p></body></html>"#;
+        assert_eq!(to_md(qt), "Deck: https://logos.co/deck\n");
+        // an address Markdown would misread keeps the explicit form
+        assert_eq!(to_md(r#"<p><a href="https://x.io/a_b_c">https://x.io/a_b_c</a></p>"#), "[https://x.io/a\\_b\\_c](https://x.io/a_b_c)\n");
     }
 
     #[test]

@@ -1,5 +1,25 @@
 # What was tested, and how to repeat it
 
+## 0.9.2: `===` page breaks and clickable links (2026-11-03)
+
+Asked by vpavlin: `===` should start a new slide, and links should be clickable.
+
+- `===` already broke slides on a line of its own, but directly under a line of text
+  Markdown reads it as that line's heading underline (no break, the line became a
+  heading). A line of only `=` (3 or more) outside code is now always a break. cargo:
+  `a_line_of_equals_signs_is_a_slide_break`.
+- Bare `http(s)://` addresses become links (in documents built from drafts, in the
+  preview and on slides, and in the visual editor; written back bare). cargo:
+  `bare_web_addresses_become_links`, `bare_addresses_are_links_in_the_editor`.
+- Links did not open: inside Basecamp `Qt.openUrlExternally` returns false (the view's
+  QML sandbox). They now open through the core (`open_link`: http, https and mailto
+  only, one argument to `xdg-open`/`open`). cargo: `only_web_and_mail_links_open`.
+- Basecamp GUI (with a stand-in `xdg-open` that logs its argument): a pasted
+  `https://logos.co/deck` showed as a link in the editor; Ctrl+click opened it, a plain
+  click did not (it places the cursor; `linkAt` is off by the TextArea's padding, so the
+  hovered link is used); clicking it in the Markdown preview and on a slide opened it, and
+  the slide did not advance; `===` typed under that line split the deck there.
+
 ## 0.9.1: lists and headings inside columns (2026-11-03)
 
 Reported by vpavlin on 0.9.0: in a column the list buttons said "Tables keep their own

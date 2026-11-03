@@ -98,6 +98,10 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// Put a picture (a file path or file:// URL) into a draft: kept with the draft on this
     /// device, encrypted and uploaded only when it is published. `{ md, html }` to insert.
     fn draft_add_image(&self, draft_id: String, path: String, view_dir: String) -> String;
+    /// Open a web or mail link from a document in the desktop's browser or mail program
+    /// (Basecamp's QML sandbox does not let the view do it): `{ ok }`. Only http, https
+    /// and mailto links.
+    fn open_link(&self, url: String) -> String;
     /// The style of the editor's text block at `index` (as for `rich_block`): `{ kind }`.
     fn rich_kind(&self, html: String, index: String) -> String;
     /// One draft with its Markdown and preview.
@@ -1322,6 +1326,27 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         .to_string()
     }
 
+    fn open_link(&self, url: String) -> String {
+        let Some(url) = crate::viewer::safe_link(&url) else {
+            return err("only web (http, https) and mail links open");
+        };
+        let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+        match std::process::Command::new(opener)
+            .arg(&url)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+        {
+            Ok(mut child) => {
+                // reap it when it is done
+                std::thread::spawn(move || child.wait());
+                json!({ "ok": true }).to_string()
+            }
+            Err(e) => err(format!("could not open the link ({opener}: {e})")),
+        }
+    }
+
     fn rich_kind(&self, html: String, index: String) -> String {
         json!({ "ok": true, "kind": rich::kind_at(&html, rich::At::parse(&index)) }).to_string()
     }
@@ -1523,3 +1548,4 @@ fn prune_image_cache(dir: &std::path::Path, older_than: Duration) {
 pub extern "Rust" fn logos_module_install() {
     install::<FileverseCoreModuleImpl>();
 }
+

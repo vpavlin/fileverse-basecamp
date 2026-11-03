@@ -118,6 +118,15 @@ pub fn segments(md: &str) -> Vec<Segment> {
                 _ => {}
             }
         }
+        // A line of only "===" is a slide break (fileverse-ddocs#550) wherever it is: not
+        // the underline of a heading, so it gets blank lines around it.
+        let brk;
+        let line = if !fence && t.len() >= 3 && t.chars().all(|c| c == '=') {
+            brk = format!("\n{t}\n\n");
+            brk.as_str()
+        } else {
+            line
+        };
         match cols.as_mut() {
             Some((_, c)) => c.last_mut().unwrap().push_str(line),
             None => plain.push_str(line),
@@ -299,7 +308,68 @@ pub fn to_yjs(markdown: &str) -> Vec<u8> {
     txn.encode_state_as_update_v1(&yrs::StateVector::default())
 }
 
+/// The parser's events with one text event per run of text (it may split a run, e.g.
+/// at a "_" inside a web address).
+pub(crate) fn merged_events(markdown: &str, opts: Options) -> Vec<Event<'_>> {
+    let mut events: Vec<Event> = vec![];
+    for ev in Parser::new_ext(markdown, opts) {
+        match (events.last_mut(), ev) {
+            (Some(Event::Text(prev)), Event::Text(t)) => *prev = format!("{prev}{t}").into(),
+            (_, ev) => events.push(ev),
+        }
+    }
+    events
+}
+
+/// Bare web addresses in a run of text, as byte ranges: `http://` or `https://` up to
+/// whitespace, without trailing punctuation (a closing parenthesis stays when the
+/// address opened one).
+pub(crate) fn bare_urls(t: &str) -> Vec<(usize, usize)> {
+    let mut out = vec![];
+    let mut from = 0;
+    while let Some(off) = ["https://", "http://"].iter().filter_map(|p| t[from..].find(p)).min() {
+        let start = from + off;
+        let ok_before = t[..start].chars().next_back().map_or(true, |c| !c.is_alphanumeric());
+        let mut end = t[start..].find(|c: char| c.is_whitespace() || matches!(c, '<' | '>' | '"' | '`')).map_or(t.len(), |e| start + e);
+        loop {
+            let last = t[start..end].chars().next_back();
+            match last {
+                Some('.' | ',' | ';' | ':' | '!' | '?' | '\'' | '*' | '_' | ']') => end -= 1,
+                Some(')') if t[start..end].matches('(').count() < t[start..end].matches(')').count() => end -= 1,
+                _ => break,
+            }
+        }
+        let scheme = if t[start..].starts_with("https://") { 8 } else { 7 };
+        if ok_before && end > start + scheme {
+            out.push((start, end));
+        }
+        from = end.max(start + scheme);
+    }
+    out
+}
+
 impl Builder<'_> {
+    /// Text with its bare web addresses as links (as Fileverse's editor makes them),
+    /// unless it is already inside a link or code.
+    fn insert_linked(&mut self, t: &str) {
+        if self.marks.link.is_some() || self.marks.code {
+            return self.insert(t);
+        }
+        let mut at = 0;
+        for (s, e) in bare_urls(t) {
+            if s > at {
+                self.insert(&t[at..s]);
+            }
+            self.marks.link = Some(t[s..e].to_string());
+            self.insert(&t[s..e]);
+            self.marks.link = None;
+            at = e;
+        }
+        if at < t.len() {
+            self.insert(&t[at..]);
+        }
+    }
+
     /// Add one run of Markdown at the builder's root.
     fn feed(&mut self, markdown: &str) {
         let b = self;
@@ -307,7 +377,7 @@ impl Builder<'_> {
         b.text = None;
         b.marks = Marks::default();
     let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-    let events: Vec<Event> = Parser::new_ext(markdown, opts).collect();
+    let events = merged_events(markdown, opts);
     // A list is a task list when its first item starts with a task marker.
     let is_task_list = |i: usize| -> bool {
         matches!(events.get(i + 1), Some(Event::Start(Tag::Item)))
@@ -441,7 +511,7 @@ impl Builder<'_> {
                 b.marks.code = false;
             }
             Event::Text(t) if b.image.is_some() => b.image.as_mut().unwrap().1.push_str(&t),
-            Event::Text(t) => b.insert(&t),
+            Event::Text(t) => b.insert_linked(&t),
             Event::SoftBreak => b.insert(" "),
             Event::HardBreak => b.hard_break(),
             Event::Html(h) | Event::InlineHtml(h) => b.insert(&h),
@@ -453,6 +523,18 @@ impl Builder<'_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn bare_web_addresses_become_links() {
+        let t = "See https://logos.co/a_b. Or (http://x.io/p(1)), not xhttps://no, https://";
+        let found: Vec<&str> = bare_urls(t).into_iter().map(|(a, e)| &t[a..e]).collect();
+        assert_eq!(found, ["https://logos.co/a_b", "http://x.io/p(1)"]);
+        let doc = crate::doc::load(&to_yjs("Slides at https://logos.co/a_b and [a link](https://x.io), `https://code`\n")).unwrap();
+        let html = &crate::doc::tabs(&doc)[0].blocks[0].html;
+        assert!(html.contains(r#"<a href="https://logos.co/a_b">https://logos.co/a_b</a> and "#), "{html}");
+        assert!(html.contains(r#"<a href="https://x.io">a link</a>"#), "{html}");
+        assert!(!html.contains(r#"href="https://code""#), "{html}");
+    }
+
     use super::*;
     use crate::doc;
 

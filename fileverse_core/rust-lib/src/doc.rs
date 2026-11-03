@@ -818,4 +818,18 @@ mod tests {
         assert_eq!(markdown("", &tabs), "- one\n\n### Next\n\n");
     }
 
+
+    /// `===` directly under a line of text would make that line a heading in Markdown;
+    /// for slides it is a break, as on a line of its own (not inside code).
+    #[test]
+    fn a_line_of_equals_signs_is_a_slide_break() {
+        let slides_of = |md: &str| tabs(&load(&crate::md::to_yjs(md)).unwrap())[0].slides.len();
+        assert_eq!(slides_of("# A\n\nx\n\n===\n\ny\n"), 2);
+        assert_eq!(slides_of("# A\n\nx\n===\ny\n"), 2);
+        assert_eq!(slides_of("# A\n\n- x\n=====\n\ny\n"), 2);
+        assert_eq!(slides_of("# A\n\n```\nx\n===\n```\n\ny\n"), 1);
+        let b = &tabs(&load(&crate::md::to_yjs("# A\n\nx\n===\ny\n")).unwrap())[0].blocks;
+        assert_eq!((b[1].t.as_str(), b[1].text.as_str()), ("p", "x"), "x stays a paragraph");
+    }
 }
+

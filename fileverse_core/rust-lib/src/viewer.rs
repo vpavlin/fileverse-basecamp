@@ -442,8 +442,27 @@ pub(crate) fn finish(
     Ok(out)
 }
 
+/// A link the desktop may open: http(s) with a host, or mailto; one argument, no spaces
+/// or control characters, nothing that reads as an option.
+pub(crate) fn safe_link(url: &str) -> Option<String> {
+    let u = url.trim();
+    let lower = u.to_ascii_lowercase();
+    let ok_scheme = (lower.starts_with("https://") && u.len() > 8) || (lower.starts_with("http://") && u.len() > 7) || (lower.starts_with("mailto:") && u.len() > 7);
+    (ok_scheme && u.len() <= 4096 && !u.chars().any(|c| c.is_whitespace() || c.is_control())).then(|| u.to_string())
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_web_and_mail_links_open() {
+        for ok in ["https://logos.co/deck", "http://x.io", "mailto:a@b.c", "HTTPS://X.IO"] {
+            assert!(safe_link(ok).is_some(), "{ok}");
+        }
+        for bad in ["file:///etc/passwd", "javascript:alert(1)", "-x https://a", "https://a b", "https://", "https://a\nb", "smb://h/s", ""] {
+            assert!(safe_link(bad).is_none(), "{bad}");
+        }
+    }
+
     use super::*;
 
     #[test]
