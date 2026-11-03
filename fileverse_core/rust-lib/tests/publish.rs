@@ -44,8 +44,8 @@ fn publish_then_open_from_a_mirror() {
     let blocks = v["tabs"][0]["blocks"].as_array().unwrap();
     assert_eq!(blocks[0]["t"], "h1");
     assert_eq!(blocks[1]["html"], "We go <b>self-sovereign</b>.");
-    // H1 title slide, its paragraph, the H2 section
-    assert_eq!(v["tabs"][0]["slides"].as_array().unwrap().len(), 3);
+    // the H1 with its paragraph, then the H2 section (a heading opens a slide, content packs beneath)
+    assert_eq!(v["tabs"][0]["slides"].as_array().unwrap().len(), 2);
     for b in v["provenance"]["blobs"].as_array().unwrap() {
         assert_eq!(b["gateway"], "mirror");
         assert_eq!(b["verified"], true);

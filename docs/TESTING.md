@@ -1,5 +1,29 @@
 # What was tested, and how to repeat it
 
+## 0.8.0: slides as in fileverse-ddocs#550 (2026-11-03)
+
+- Slides follow vpavlin's dDocs PR #550 (direct render): the core cuts at structure only (an
+  H1/H2 opens a slide and content packs beneath it, page breaks end one, no bare title
+  slides); the view lays each slide out on a fixed 1080x608 stage, measures it off screen,
+  and breaks between blocks (list items one by one), never inside columns, tables or images;
+  a heading never ends a slide, and headings stay with a block too tall to share. The stage is
+  scaled to the screen. Slide numbers on the stage; `+`/`-`/`0` change the font scale and
+  re-cut the deck, staying on the same content; `F` toggles full screen.
+- Columns (`columns` > `column`, dDocs' image beside text) are kept as one block with each
+  column's blocks; layouts `align-right`/`align-left` make one column twice as wide. Markdown
+  export lists the columns one after another. Test: `doc::tests::columns_keep_an_image_beside_text`.
+- Images: encrypted dDocs images (`resizableMedia` with `encryptionKey`, `nonce`, `authTag`,
+  `ipfsHash`) are fetched hash-checked and decrypted with AES-256-GCM as Penumbra writes them
+  (12-byte IV, tag in the node), and shown from memory as data: URIs. Test vector made with
+  WebCrypto (`tests/images.rs`). Headless runtime: the encrypted block put into the session's
+  ipfs_module node came back through `image` as the original PNG, byte for byte.
+- Basecamp GUI: a draft presented 10 slides; `+` x3 made 12 and stayed on the same slide.
+  Harness: the measured split of the Fileverse SDK doc; an H2 with columns (text | image)
+  renders side by side. Full screen: `Window.window` switches to FullScreen and back in the
+  harness; the Xvfb test display has no window manager, so the visible effect is untested.
+- Not tested against a real Fileverse document with images or columns (none available).
+  Images in Fileverse's private lane and unencrypted external images are not loaded.
+
 ## 0.7.1 (2026-10-27)
 
 - Your own published drafts open as drafts: a recent entry records its draft (`draftId`),

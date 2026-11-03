@@ -1,7 +1,7 @@
 // Offscreen render check for fileverse_ui/Main.qml.
 // A mock `logos` (an id in this context, which the loaded view's context inherits)
 // answers the core calls from fixtures. Arguments after "--": MODE [N] OUT.png with
-// MODE one of doc | slides | sheet | error | settings | portal | import | edit | editslides | wysiwyg.
+// MODE one of doc | slides | sheet | error | settings | portal | import | edit | editslides | wysiwyg | slidecols.
 import QtQuick
 import QtQuick.Window
 
@@ -68,8 +68,10 @@ Window {
             return "<p>" + b.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>") + "</p>"
         }).join("") }
         if (method === "rich_kind") return { ok: true, kind: "h1" }
+        if (method === "image") return { ok: true, jobId: "jimg" }
         if (method === "job") {
             var id = args[0]
+            if (id === "jimg") return { ok: true, state: "done", result: { ok: true, dataUri: win.samplePng } }
             if (mode === "error") return { ok: true, state: "failed", error: "the link key does not open this file (wrong or truncated link?)" }
             if (id === "jlist") return { ok: true, state: "done", result: { ok: true, portal: "0x2222222222222222222222222222222222222222", files: [
                 { fileId: 3, title: "Meeting notes", kind: "ddoc", updatedAt: 1792700000000, url: "fvown://0x2222222222222222222222222222222222222222/3" },
@@ -110,21 +112,42 @@ Window {
         })
     }
 
+    // a landscape picture standing in for a decrypted image
+    readonly property string samplePng: "data:image/svg+xml;utf8," + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="640" height="400"><rect width="640" height="400" fill="#2d6cdf"/><circle cx="470" cy="140" r="70" fill="#ffd34d"/><path d="M0 400 L220 180 L380 330 L470 250 L640 400 Z" fill="#1e8f5a"/></svg>')
     Component.onCompleted: {
         var xhr = new XMLHttpRequest()
         xhr.open("GET", Qt.resolvedUrl("doc.json"), false)
         xhr.send()
         win.docJson = JSON.parse(xhr.responseText)
+        if (mode === "slidecols") {
+            // dDocs' image beside text: an H2, then columns (text | image), align-right
+            var t = win.docJson.tabs[0], n = t.blocks.length
+            t.blocks.push({ t: "h2", html: "Image beside text", text: "Image beside text" })
+            t.blocks.push({ t: "columns", layout: "align-right", text: "", cols: [
+                [ { t: "p", html: "A column of text sits to the left of the picture, the way dDocs lays out a <b>two-column</b> block.", text: "x" },
+                  { t: "li", html: "Columns are never split across slides", text: "x" },
+                  { t: "li", html: "Images are decrypted locally", text: "x" } ],
+                [ { t: "image", text: "", img: { cid: "bafkreitest", key: "k", nonce: "n", tag: "t", mime: "image/png" } } ] ] })
+            t.slides.push({ kind: "content", blocks: [n, n + 1] })
+        }
     }
 
     Timer {
-        interval: 1800; running: win.mode === "slides" || win.mode === "editslides"
-        onTriggered: { view.item.present(); for (var i = 0; i < win.slideAt; i++) view.item.nextSlide() }
+        interval: 1800; running: win.mode === "slides" || win.mode === "editslides" || win.mode === "slidecols"
+        onTriggered: {
+            view.item.present()
+            var to = win.mode === "slidecols" ? view.item.deck.length - 1 : win.slideAt
+            for (var i = 0; i < to; i++) view.item.nextSlide()
+            if (win.mode === "slidecols") view.item.imageSrc({ cid: "bafkreitest" })
+        }
     }
     Timer {
         interval: 3500; running: true
         onTriggered: {
-            if (win.mode === "slides" || win.mode === "editslides") console.log("deck", view.item.deck.length, "slides; showing", win.slideAt + 1, "kind", view.item.slide ? view.item.slide.kind : "-")
+            if (win.mode === "slides" || win.mode === "editslides" || win.mode === "slidecols") {
+                console.log("deck", view.item.deck.length, "slides; showing", view.item.slideIndex + 1, "kind", view.item.slide ? view.item.slide.kind : "-")
+                console.log("slides:", JSON.stringify(view.item.deck.map(function (d) { return d.blocks })))
+            }
             if (win.mode === "error") console.log("error shown:", view.item.error)
             if (win.mode === "edit") console.log("editor md chars:", view.item.draft ? view.item.draft.markdown.length : -1, "preview blocks:", view.item.blocks.length)
             view.grabToImage(function (r) { r.saveToFile(win.args[win.args.length - 1]); console.log("SAVED"); Qt.exit(0) })

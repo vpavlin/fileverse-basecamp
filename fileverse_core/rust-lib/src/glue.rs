@@ -53,6 +53,9 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn node_status(&self) -> String;
     /// Copy a recent document's blocks into your IPFS node and pin them. Returns a job.
     fn keep(&self, url: String) -> String;
+    /// Decrypt an image a document embeds (`img` of an image block, as JSON). Returns a
+    /// job: `{ dataUri }` for the view's Image element; nothing is written to disk.
+    fn image(&self, image_json: String) -> String;
     /// Whether a recently opened document has a newer version on chain than the one
     /// shown (its file record now names other blocks). Returns a job: `{ changed }`.
     fn check_update(&self, url: String) -> String;
@@ -854,6 +857,22 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             None => json!({ "ok": true, "reachable": false, "error": "no IPFS node: install the IPFS Node module, or run Kubo and set it in Settings" }),
         }
         .to_string()
+    }
+
+    fn image(&self, image_json: String) -> String {
+        let r: doc::ImageRef = match serde_json::from_str(&image_json) {
+            Ok(r) => r,
+            Err(e) => return err(format!("bad image reference: {e}")),
+        };
+        self.run_job(
+            move |me, _job| {
+                let node = me.node(NODE_PROBE);
+                let gw = me.gateways(node.as_ref());
+                let (mime, bytes) = viewer::open_image(&gw, &r)?;
+                Ok(json!({ "ok": true, "cid": r.cid, "dataUri": format!("data:{mime};base64,{}", b64::encode(&bytes)) }))
+            },
+            |_s, _v| {},
+        )
     }
 
     fn check_update(&self, url: String) -> String {

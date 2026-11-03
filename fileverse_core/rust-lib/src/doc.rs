@@ -37,8 +37,47 @@ pub struct Block {
     pub lang: String,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub rows: Vec<Vec<String>>,
+    /// `columns`: each column's own blocks, side by side.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub cols: Vec<Vec<Block>>,
+    /// `columns`: dDocs' layout, `align-center` (equal), `align-right` (wide left) or
+    /// `align-left` (wide right).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub layout: String,
+    /// `image`: where the encrypted image is and how to open it (fetched on request).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub img: Option<ImageRef>,
     #[serde(skip_serializing, default)]
     md: String,
+}
+
+/// An image a dDoc embeds: AES-GCM ciphertext on IPFS (`cid`), with the key, IV and
+/// tag in the node's attributes (`encryptionKey`, `nonce`, `authTag`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
+pub struct ImageRef {
+    pub cid: String,
+    pub key: String,
+    pub nonce: String,
+    pub tag: String,
+    #[serde(default)]
+    pub mime: String,
+    /// The node's width (`100%`, `320px`, …) and alignment, as dDocs stores them.
+    #[serde(default)]
+    pub width: String,
+    #[serde(default)]
+    pub align: String,
+}
+
+/// The IPFS CID of an image node: `ipfsHash` (possibly lane-prefixed) or the path of
+/// `ipfsUrl`. Images in Fileverse's private lane are only served by Fileverse.
+fn image_cid(hash: &str, url: &str) -> Option<String> {
+    let looks_cid = |c: &str| (c.starts_with("Qm") && c.len() == 46) || (c.starts_with('b') && c.len() > 50);
+    let h = hash.rsplit([':', '/']).next().unwrap_or("");
+    if looks_cid(h) && !hash.starts_with("private") {
+        return Some(h.to_string());
+    }
+    let p = url.split("/ipfs/").nth(1)?.split(['/', '?', '#']).next()?;
+    looks_cid(p).then(|| p.to_string())
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -63,90 +102,49 @@ pub struct Slide {
     pub blocks: Vec<usize>,
 }
 
-// Limits from fileverse-ddocs `utils/md-to-slides.ts` (processMarkdownContent).
-const SLIDE_MAX_CHARS: usize = 1000;
-const SLIDE_MAX_WORDS: usize = 250;
-const SLIDE_MAX_LINES: usize = 8;
-
-fn block_lines(b: &Block) -> usize {
-    match b.t.as_str() {
-        "table" => b.rows.len() + 1,
-        _ => b.text.matches('\n').count() + 1,
-    }
-}
-
-/// Cut blocks into slides with dDocs' presentation-mode rules: a page break (or a
-/// `===` line, the md2slides marker) ends a slide; an H1 is a title slide on its
-/// own; an H2 starts a slide; an image gets a slide; otherwise content flows until
-/// a slide would pass 8 lines, 1000 characters or 250 words.
+/// Cut blocks into slides at the document's structure, the way dDocs' direct-render
+/// presentation does (fileverse-ddocs#550): a page break (or a `===` line, the
+/// md2slides marker) ends a slide, and an H1 or H2 opens one with what follows packed
+/// beneath it, so a title is never alone on a slide. How much fits on one slide is
+/// decided by the view, which measures the real stage and breaks between blocks
+/// (list items one by one; never inside columns or tables). `kind` is a layout hint:
+/// `title` when a slide holds only headings, `image` for a lone image.
 pub fn slides(blocks: &[Block]) -> Vec<Slide> {
     let mut out: Vec<Slide> = vec![];
     let mut cur: Vec<usize> = vec![];
-    let (mut chars, mut words, mut lines) = (0usize, 0usize, 0usize);
-    let flush = |cur: &mut Vec<usize>, out: &mut Vec<Slide>, c: &mut usize, w: &mut usize, l: &mut usize| {
-        if !cur.is_empty() {
-            out.push(Slide { kind: "content".into(), blocks: std::mem::take(cur) });
+    let kind = |cur: &[usize]| -> String {
+        if cur.len() == 1 && blocks[cur[0]].t == "image" {
+            "image".into()
+        } else if cur.iter().all(|&i| is_heading(&blocks[i])) {
+            "title".into()
+        } else {
+            "content".into()
         }
-        *c = 0;
-        *w = 0;
-        *l = 0;
+    };
+    let flush = |cur: &mut Vec<usize>, out: &mut Vec<Slide>| {
+        if !cur.is_empty() {
+            out.push(Slide { kind: kind(cur), blocks: std::mem::take(cur) });
+        }
     };
     for (i, b) in blocks.iter().enumerate() {
-        let empty = b.text.trim().is_empty() && b.rows.is_empty();
+        let shows = !b.text.trim().is_empty() || !b.rows.is_empty() || matches!(b.t.as_str(), "hr" | "image" | "columns" | "code");
         match b.t.as_str() {
-            "pagebreak" => flush(&mut cur, &mut out, &mut chars, &mut words, &mut lines),
-            "p" if b.text.trim().starts_with("===") => flush(&mut cur, &mut out, &mut chars, &mut words, &mut lines),
-            _ if empty && b.t != "hr" && b.t != "image" => {}
-            "h1" => {
-                flush(&mut cur, &mut out, &mut chars, &mut words, &mut lines);
-                out.push(Slide { kind: "title".into(), blocks: vec![i] });
-            }
-            "h2" => {
-                flush(&mut cur, &mut out, &mut chars, &mut words, &mut lines);
+            "pagebreak" => flush(&mut cur, &mut out),
+            "p" if b.text.trim().starts_with("===") => flush(&mut cur, &mut out),
+            _ if !shows => {}
+            "h1" | "h2" => {
+                flush(&mut cur, &mut out);
                 cur.push(i);
-                chars = b.text.len();
-                words = b.text.split_whitespace().count();
-                lines = 1;
             }
-            "image" => {
-                if cur.is_empty() {
-                    out.push(Slide { kind: "image".into(), blocks: vec![i] });
-                } else {
-                    cur.push(i);
-                }
-                flush(&mut cur, &mut out, &mut chars, &mut words, &mut lines);
-            }
-            _ => {
-                let (c, w, l) = (b.text.chars().count(), b.text.split_whitespace().count(), block_lines(b));
-                let over = chars + c > SLIDE_MAX_CHARS || words + w > SLIDE_MAX_WORDS || lines + l > SLIDE_MAX_LINES;
-                if over && !cur.is_empty() {
-                    // Keep a slide's H2 with what follows it when the H2 is all there is.
-                    let carry = cur.len() == 1 && blocks[cur[0]].t == "h2";
-                    if !carry {
-                        // A heading never ends a slide: it moves on with its content.
-                        let last = *cur.last().unwrap();
-                        let orphan = cur.len() > 1 && matches!(blocks[last].t.as_str(), "h3" | "h4" | "h5" | "h6");
-                        if orphan {
-                            cur.pop();
-                        }
-                        flush(&mut cur, &mut out, &mut chars, &mut words, &mut lines);
-                        if orphan {
-                            cur.push(last);
-                            chars = blocks[last].text.chars().count();
-                            words = blocks[last].text.split_whitespace().count();
-                            lines = 1;
-                        }
-                    }
-                }
-                cur.push(i);
-                chars += c;
-                words += w;
-                lines += l;
-            }
+            _ => cur.push(i),
         }
     }
-    flush(&mut cur, &mut out, &mut chars, &mut words, &mut lines);
+    flush(&mut cur, &mut out);
     out
+}
+
+fn is_heading(b: &Block) -> bool {
+    b.t.len() == 2 && b.t.starts_with('h') && b.t.as_bytes()[1].is_ascii_digit()
 }
 
 pub fn escape(s: &str) -> String {
@@ -415,7 +413,48 @@ fn walk<T: ReadTxn>(txn: &T, node: &XmlOut, ctx: &Ctx, blocks: &mut Vec<Block>) 
         "image" | "resizableMedia" => {
             let caption = attr(txn, e, "caption").or_else(|| attr(txn, e, "alt")).unwrap_or_default();
             let i = Inline { html: escape(&caption), text: caption.clone(), md: String::new() };
-            push(blocks, ctx, "image", i);
+            let a = |k: &str| attr(txn, e, k).unwrap_or_default();
+            let img = image_cid(&a("ipfsHash"), &a("ipfsUrl")).and_then(|cid| {
+                let (key, nonce, tag) = (a("encryptionKey"), a("nonce"), a("authTag"));
+                (!key.is_empty() && !nonce.is_empty() && !tag.is_empty()).then(|| ImageRef {
+                    cid,
+                    key,
+                    nonce,
+                    tag,
+                    mime: a("mimeType"),
+                    width: a("width"),
+                    align: a("dataAlign"),
+                })
+            });
+            push(blocks, ctx, "image", i).img = img;
+        }
+        "columns" => {
+            // Side by side (an image beside text): one block holding each column's blocks.
+            let mut cols = vec![];
+            let mut text = String::new();
+            for c in kids() {
+                let mut cb = vec![];
+                let inner = Ctx { depth: 0, quote: false, callout: false };
+                match &c {
+                    XmlOut::Element(ce) if ce.tag().to_string() == "column" => {
+                        for k in ce.children(txn) {
+                            walk(txn, &k, &inner, &mut cb);
+                        }
+                    }
+                    other => walk(txn, other, &inner, &mut cb),
+                }
+                for b in &cb {
+                    text.push_str(&b.text);
+                    text.push('\n');
+                }
+                cols.push(cb);
+            }
+            cols.retain(|c| !c.is_empty());
+            if !cols.is_empty() {
+                let b = push(blocks, ctx, "columns", Inline { text: text.trim_end().to_string(), ..Default::default() });
+                b.layout = attr(txn, e, "layout").unwrap_or_else(|| "align-center".into());
+                b.cols = cols;
+            }
         }
         "iframe" | "embeddedTweet" | "actionButton" | "linkPreview" => {
             let src = attr(txn, e, "src")
@@ -461,7 +500,7 @@ fn walk<T: ReadTxn>(txn: &T, node: &XmlOut, ctx: &Ctx, blocks: &mut Vec<Block>) 
             b.rows = rows;
         }
         _ => {
-            // dBlock, columns, column, details, footnotes and anything new:
+            // dBlock, column, details, footnotes and anything new:
             // transparent containers. Unknown content is shown, not dropped.
             for c in kids() {
                 walk(txn, &c, ctx, blocks);
@@ -563,7 +602,21 @@ pub fn markdown(title: &str, tabs: &[Tab]) -> String {
         if tabs.len() > 1 {
             md.push_str(&format!("{} {}\n\n", "#".repeat((tab.depth as usize + 2).min(4)), tab.name));
         }
-        for b in &tab.blocks {
+        blocks_md(&tab.blocks, &mut md);
+    }
+    md
+}
+
+fn blocks_md(blocks: &[Block], md: &mut String) {
+    {
+        for b in blocks {
+            if b.t == "columns" {
+                // Markdown has no columns: the columns follow each other.
+                for c in &b.cols {
+                    blocks_md(c, md);
+                }
+                continue;
+            }
             let indent = "  ".repeat(b.depth as usize);
             let q = if b.quote || b.callout { "> " } else { "" };
             let line = match b.t.as_str() {
@@ -588,7 +641,6 @@ pub fn markdown(title: &str, tabs: &[Tab]) -> String {
             md.push_str(if is_item(&b.t) { "\n" } else { "\n\n" });
         }
     }
-    md
 }
 
 #[cfg(test)]
@@ -606,56 +658,103 @@ mod tests {
     #[test]
     fn ddocs_presentation_rules() {
         let blocks = vec![
-            b("h1", "Deck"),          // 0 title slide
-            b("h2", "Why"),           // 1 starts a slide
-            b("p", "one"),            // 2
-            b("li", "two"),           // 3
-            b("pagebreak", ""),       // 4 ends it
-            b("p", "after break"),    // 5
-            b("image", ""),           // 6 joins, then ends the slide
-            b("image", "solo"),       // 7 its own slide
-            b("p", ""),               // 8 empty: skipped
-            b("h2", "Next"),          // 9
-            b("p", "==="),            // 10 md2slides break
-            b("p", "tail"),           // 11
+            b("h1", "Deck"),          // 0 opens a slide; what follows packs beneath
+            b("p", "intro"),          // 1
+            b("h2", "Why"),           // 2 opens the next
+            b("p", "one"),            // 3
+            b("li", "two"),           // 4
+            b("pagebreak", ""),       // 5 ends it
+            b("p", "after break"),    // 6
+            b("image", ""),           // 7 stays with it (the view measures)
+            b("pagebreak", ""),       // 8
+            b("image", "solo"),       // 9 alone: an image slide
+            b("p", ""),               // 10 empty: skipped
+            b("h2", "Next"),          // 11 a heading alone: a title slide
+            b("p", "==="),            // 12 md2slides break
+            b("p", "tail"),           // 13
         ];
         assert_eq!(
             kinds(&slides(&blocks)),
             vec![
-                ("title".into(), vec![0]),
-                ("content".into(), vec![1, 2, 3]),
-                ("content".into(), vec![5, 6]),
-                ("image".into(), vec![7]),
-                ("content".into(), vec![9]),
-                ("content".into(), vec![11]),
+                ("content".into(), vec![0, 1]),
+                ("content".into(), vec![2, 3, 4]),
+                ("content".into(), vec![6, 7]),
+                ("image".into(), vec![9]),
+                ("title".into(), vec![11]),
+                ("content".into(), vec![13]),
             ]
         );
     }
 
+    /// dDocs' shape for an image beside text: dBlock > columns > column > (resizableMedia | paragraph).
     #[test]
-    fn long_content_splits_at_eight_lines() {
-        let mut blocks = vec![b("h2", "Many")];
-        for i in 0..12 {
-            blocks.push(b("li", &format!("item {i}")));
+    fn columns_keep_an_image_beside_text() {
+        use yrs::{Text, Transact, XmlElementPrelim, XmlFragment, XmlTextPrelim};
+        let doc = Doc::new();
+        let frag = doc.get_or_insert_xml_fragment("default");
+        {
+            let mut txn = doc.transact_mut();
+            let d = frag.push_back(&mut txn, XmlElementPrelim::empty("dBlock"));
+            let h = d.push_back(&mut txn, XmlElementPrelim::empty("heading"));
+            h.insert_attribute(&mut txn, "level", "2");
+            let t = h.push_back(&mut txn, XmlTextPrelim::new(""));
+            t.insert(&mut txn, 0, "Beside");
+            let d = frag.push_back(&mut txn, XmlElementPrelim::empty("dBlock"));
+            let cols = d.push_back(&mut txn, XmlElementPrelim::empty("columns"));
+            cols.insert_attribute(&mut txn, "layout", "align-right");
+            let c1 = cols.push_back(&mut txn, XmlElementPrelim::empty("column"));
+            let p = c1.push_back(&mut txn, XmlElementPrelim::empty("paragraph"));
+            let t = p.push_back(&mut txn, XmlTextPrelim::new(""));
+            t.insert(&mut txn, 0, "Text on the left");
+            let c2 = cols.push_back(&mut txn, XmlElementPrelim::empty("column"));
+            let img = c2.push_back(&mut txn, XmlElementPrelim::empty("resizableMedia"));
+            for (k, v) in [
+                ("ipfsHash", "bafkreidybxhs4ymbvt53hvxmz3f6nekg5gfit7c7pl7pul7fhfedsibm2a"),
+                ("encryptionKey", "a2V5"),
+                ("nonce", "bm9uY2U="),
+                ("authTag", "dGFn"),
+                ("mimeType", "image/png"),
+                ("width", "100%"),
+            ] {
+                img.insert_attribute(&mut txn, k, v);
+            }
         }
-        let s = slides(&blocks);
-        assert_eq!(s.len(), 2);
-        assert_eq!(s[0].blocks, (0..8).collect::<Vec<_>>());
-        assert_eq!(s[1].blocks, (8..13).collect::<Vec<_>>());
+        let tabs = tabs(&doc);
+        let blocks = &tabs[0].blocks;
+        assert_eq!(blocks.len(), 2, "{blocks:?}");
+        let c = &blocks[1];
+        assert_eq!((c.t.as_str(), c.layout.as_str(), c.cols.len()), ("columns", "align-right", 2));
+        assert_eq!(c.cols[0][0].text, "Text on the left");
+        let img = c.cols[1][0].img.as_ref().expect("image reference");
+        assert_eq!((img.cid.as_str(), img.mime.as_str()), ("bafkreidybxhs4ymbvt53hvxmz3f6nekg5gfit7c7pl7pul7fhfedsibm2a", "image/png"));
+        // the heading opens the slide and the columns pack beneath it
+        assert_eq!(tabs[0].slides, vec![Slide { kind: "content".into(), blocks: vec![0, 1] }]);
+        // Markdown has no columns: they follow each other
+        assert!(markdown("", &tabs).contains("Text on the left"));
     }
 
     #[test]
-    fn a_heading_does_not_end_a_slide() {
-        let mut blocks = vec![b("h2", "Part")];
-        for i in 0..6 {
-            blocks.push(b("p", &format!("line {i}")));
-        }
-        blocks.push(b("h3", "Usage")); // 7: would be the 8th line, its code the 9th
-        blocks.push(Block { t: "code".into(), text: "a\nb".into(), ..Default::default() });
-        let s = slides(&blocks);
-        assert_eq!(s[0].blocks, (0..7).collect::<Vec<_>>());
-        assert_eq!(s[1].blocks, vec![7, 8]);
+    fn image_cids() {
+        let cid = "bafkreidybxhs4ymbvt53hvxmz3f6nekg5gfit7c7pl7pul7fhfedsibm2a";
+        assert_eq!(image_cid(cid, "").as_deref(), Some(cid));
+        assert_eq!(image_cid("", &format!("https://ipfs.fileverse.io/ipfs/{cid}?x=1")).as_deref(), Some(cid));
+        assert_eq!(image_cid(&format!("public:{cid}"), "").as_deref(), Some(cid));
+        // Fileverse's private lane: only Fileverse serves it
+        assert_eq!(image_cid(&format!("private:{cid}"), "https://x/private/gateway?cid=x"), None);
+        assert_eq!(image_cid("", "https://s3.example/img.png"), None);
     }
+
+    #[test]
+    fn long_content_is_left_to_the_view() {
+        // No line or word limits here: the view measures the stage and breaks between blocks.
+        let mut blocks = vec![b("h2", "Many")];
+        for i in 0..30 {
+            blocks.push(b("li", &format!("item {i}")));
+        }
+        assert_eq!(slides(&blocks).len(), 1);
+    }
+
+
 
     #[test]
     fn markdown_marks_hug_text_and_lists_end() {
@@ -673,10 +772,4 @@ mod tests {
         assert_eq!(markdown("", &tabs), "- one\n\n### Next\n\n");
     }
 
-    #[test]
-    fn long_paragraphs_split_by_words() {
-        let para = vec!["word"; 200].join(" ");
-        let blocks = vec![b("p", &para), b("p", &para)];
-        assert_eq!(slides(&blocks).len(), 2);
-    }
 }

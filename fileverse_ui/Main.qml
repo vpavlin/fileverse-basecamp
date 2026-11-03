@@ -394,11 +394,11 @@ Item {
     // ── live documents: while one is open, look for a newer version on chain ──
     // Quiet jobs: no "Opening…" state, no error banner; they only act on success.
     property var quietJobs: ({})          // id -> callback(result)
-    function quietJob(method, args, onDone) {
+    function quietJob(method, args, onDone, onFail) {
         root.core(method, args, function (raw) {
             var r = root.j(raw)
-            if (!r || !r.ok || !r.jobId) return
-            var q = root.quietJobs; q[r.jobId] = onDone; root.quietJobs = q
+            if (!r || !r.ok || !r.jobId) { if (onFail) onFail(r ? r.error : ""); return }
+            var q = root.quietJobs; q[r.jobId] = { done: onDone, fail: onFail }; root.quietJobs = q
         })
     }
     function pollQuiet() {
@@ -408,7 +408,8 @@ Item {
                 if (r && r.ok && r.state === "pending") return
                 var cb = root.quietJobs[id]
                 var q = root.quietJobs; delete q[id]; root.quietJobs = q
-                if (r && r.ok && r.state === "done" && cb) cb(r.result)
+                if (r && r.ok && r.state === "done") { if (cb && cb.done) cb.done(r.result) }
+                else if (cb && cb.fail) cb.fail(r ? r.error : "")
             })
         })
     }
@@ -1130,7 +1131,7 @@ Item {
                 visible: root.mode === "doc" && root.docv !== null
                 Layout.fillWidth: true
                 spacing: Theme.spacing.small
-                LogosButton { visible: root.deck.length > 0; compact: true; variant: LogosButton.Variant.Primary; text: "Present"; onClicked: root.present() }
+                LogosButton { visible: root.coreSlides.length > 0; compact: true; variant: LogosButton.Variant.Primary; text: "Present"; onClicked: root.present() }
                 LogosButton { visible: root.docDraftId !== ""; compact: true; variant: LogosButton.Variant.Primary; text: "Edit"; onClicked: { root.section = "drafts"; root.openDraft(root.docDraftId) } }
                 LogosButton { visible: root.docv && root.docv.markdown !== undefined && root.docDraftId === ""; compact: true; text: "Edit a copy"; onClicked: root.newDraft(root.docv.title || "Untitled", root.docv.markdownBody !== undefined ? root.docv.markdownBody : root.docv.markdown, root.docUrl) }
                 LogosButton {
@@ -1201,7 +1202,7 @@ Item {
                         onTextEdited: { root.draftDirty = true; previewTimer.restart() }
                     }
                     Chip { text: root.draftDirty ? "editing…" : "saved on this device"; tint: root.draftDirty ? Theme.palette.warning : Theme.palette.success }
-                    LogosButton { visible: root.deck.length > 0; compact: true; text: "Present"; onClicked: root.present() }
+                    LogosButton { visible: root.coreSlides.length > 0; compact: true; text: "Present"; onClicked: root.present() }
                     LogosButton {
                         compact: true
                         variant: LogosButton.Variant.Primary
@@ -1655,22 +1656,222 @@ Item {
             }
         }
     }
+    // Images: the core fetches the encrypted image (hash-checked) and decrypts it;
+    // the view keeps the result in memory as a data: URI. Nothing is written to disk.
+    property var imageCache: ({})          // cid -> data URI, "loading" or "failed"
+    property int imageTick: 0
+    // The cache is changed in place (no change signal, so bindings that read it cannot
+    // loop); `imageTick` tells them when to look again.
+    function imageSrc(img) {
+        if (!img || !img.cid) return ""
+        var c = root.imageCache[img.cid]
+        if (c !== undefined) return c
+        root.imageCache[img.cid] = "loading"
+        var done = function (v) { root.imageCache[img.cid] = v; root.imageTick++ }
+        Qt.callLater(function () {
+            root.quietJob("image", [JSON.stringify(img)], function (r) { done(r && r.dataUri ? r.dataUri : "failed") }, function () { done("failed") })
+        })
+        return "loading"
+    }
+    Component {
+        id: imageBlock
+        Item {
+            id: ib
+            readonly property var b: parent && parent.b ? parent.b : ({ t: "image", text: "" })
+            readonly property real fs: parent && parent.fs ? parent.fs : 1
+            // On a slide the box has a fixed height, so the deck can be measured before
+            // the image arrives; in the document it follows the picture.
+            readonly property real fixedHeight: parent && parent.imageHeight ? parent.imageHeight : 0
+            readonly property string src: { root.imageTick; return root.imageSrc(b.img) }
+            readonly property bool ready: src.indexOf("data:") === 0
+            readonly property real natural: pic.status === Image.Ready && pic.sourceSize.width > 0 ? width * pic.sourceSize.height / pic.sourceSize.width : 0
+            width: parent ? parent.width : 0
+            height: fixedHeight > 0 ? fixedHeight : (ready && natural > 0 ? Math.min(natural, Math.max(pic.sourceSize.height, 1), 520 * fs) : 120 * fs)
+            Image {
+                id: pic
+                anchors.fill: parent
+                source: ib.ready ? ib.src : ""
+                fillMode: Image.PreserveAspectFit
+                verticalAlignment: Image.AlignTop
+                horizontalAlignment: ib.b.img && ib.b.img.align === "left" ? Image.AlignLeft : ib.b.img && ib.b.img.align === "right" ? Image.AlignRight : Image.AlignHCenter
+                asynchronous: true
+                smooth: true
+                mipmap: true
+            }
+            Rectangle {
+                visible: !ib.ready
+                anchors.fill: parent
+                radius: Theme.spacing.radiusLarge
+                color: Theme.palette.surfaceRaised
+                LogosText {
+                    anchors.centerIn: parent
+                    width: parent.width - 24
+                    horizontalAlignment: Text.AlignHCenter
+                    wrapMode: Text.WordWrap
+                    textFormat: Text.PlainText
+                    font.pixelSize: Math.round(13 * ib.fs)
+                    color: Theme.palette.textTertiary
+                    text: !ib.b.img ? ("Image not available here" + (ib.b.text ? ": " + ib.b.text : ""))
+                          : ib.src === "failed" ? "Image could not be loaded" : "Loading image…"
+                }
+            }
+        }
+    }
+    // Side by side (an image beside text). dDocs' layouts: align-right makes the first
+    // column twice as wide, align-left the last one.
+    Component {
+        id: columnsBlock
+        Row {
+            id: cb
+            readonly property var b: parent && parent.b ? parent.b : ({ cols: [] })
+            readonly property real fs: parent && parent.fs ? parent.fs : 1
+            readonly property real imageHeight: parent && parent.imageHeight ? parent.imageHeight : 0
+            readonly property var weights: {
+                var n = (b.cols || []).length, w = []
+                for (var i = 0; i < n; i++) w.push(1)
+                if (n >= 2 && b.layout === "align-right") w[0] = 2
+                if (n >= 2 && b.layout === "align-left") w[n - 1] = 2
+                return w
+            }
+            readonly property real total: weights.reduce(function (a, x) { return a + x }, 0) || 1
+            width: parent ? parent.width : 0
+            spacing: 18 * fs
+            Repeater {
+                model: cb.b.cols || []
+                Column {
+                    readonly property var colBlocks: modelData
+                    width: (cb.width - cb.spacing * Math.max(0, cb.weights.length - 1)) * cb.weights[index] / cb.total
+                    spacing: 8 * cb.fs
+                    Repeater {
+                        model: parent.colBlocks
+                        Loader {
+                            width: parent.width
+                            property var b: modelData
+                            property real fs: cb.fs
+                            property real imageHeight: cb.imageHeight
+                            sourceComponent: root.blockComponent(b)
+                        }
+                    }
+                }
+            }
+        }
+    }
     function blockComponent(b) {
         if (!b) return textBlock
         if (b.t === "hr" || b.t === "pagebreak") return hrBlock
         if (b.t === "table") return tableBlock
         if (b.t === "code") return codeBlock
+        if (b.t === "image") return imageBlock
+        if (b.t === "columns") return columnsBlock
         return textBlock
     }
 
-    // ── presentation: the current tab as dDocs would present it ──
+    // ── presentation ──
+    // As dDocs' direct-render presentation (fileverse-ddocs#550): the core cuts the
+    // document at its structure (an H1/H2 opens a slide, page breaks end one); here each
+    // of those is fitted to a fixed 1080x608 stage by measuring it, breaking between
+    // blocks (list items one by one) and never inside columns, tables or images. A
+    // heading never ends a slide. The stage is then scaled to the screen.
+    readonly property int stageW: 1080
+    readonly property int stageH: 608
+    readonly property int stagePad: 48
+    readonly property real stageContentH: stageH - 2 * stagePad
+    property real slideFontScale: 1.0
+    readonly property real deckFs: 1.45 * slideFontScale
+    readonly property real deckImageHeight: stageContentH * 0.62
+    readonly property var coreSlides: root.activeTabs.length > 0 ? (root.activeTabs[Math.min(root.tabIndex, root.activeTabs.length - 1)].slides || []) : []
     property bool presenting: false
     property int slideIndex: 0
-    readonly property var deck: root.activeTabs.length > 0 ? (root.activeTabs[Math.min(root.tabIndex, root.activeTabs.length - 1)].slides || []) : []
+    property var deck: []
     readonly property var slide: root.deck.length > 0 ? root.deck[Math.min(root.slideIndex, root.deck.length - 1)] : null
-    function present() { root.slideIndex = 0; root.presenting = true; deckPane.forceActiveFocus() }
+
+    function isHeadingIdx(i) { var t = root.blocks[i] ? root.blocks[i].t : ""; return t.length === 2 && t.charAt(0) === "h" }
+    function heightOf(indices) {
+        measRep.model = indices
+        measCol.forceLayout()
+        return measCol.implicitHeight
+    }
+    // Break one structural slide into slides that fit the stage.
+    function fitSlide(indices) {
+        var out = [], pending = indices.slice()
+        while (pending.length > 0) {
+            if (pending.length === 1 || root.heightOf(pending) <= root.stageContentH) { out.push(pending); break }
+            // largest run of whole blocks that fits
+            var k = pending.length - 1
+            while (k > 1 && root.heightOf(pending.slice(0, k)) > root.stageContentH) k--
+            if (k === 1 && root.heightOf(pending.slice(0, 1)) > root.stageContentH) k = 1
+            var head = pending.slice(0, k)
+            // Only headings fit before a block too tall to share: keep them together and
+            // let the slide run long, rather than strand a title on its own.
+            if (head.every(root.isHeadingIdx)) {
+                k = Math.min(pending.length, k + 1)
+            } else {
+                // a heading never ends a slide: it moves on with its content
+                while (k > 1 && root.isHeadingIdx(pending[k - 1])) k--
+            }
+            out.push(pending.slice(0, k))
+            pending = pending.slice(k)
+        }
+        return out
+    }
+    function slideKind(indices) {
+        if (indices.length === 1 && root.blocks[indices[0]] && root.blocks[indices[0]].t === "image") return "image"
+        return indices.every(root.isHeadingIdx) ? "title" : "content"
+    }
+    function buildDeck() {
+        var keep = root.slide ? root.slide.blocks[0] : -1
+        var out = []
+        root.coreSlides.forEach(function (s) {
+            root.fitSlide(s.blocks).forEach(function (part) { out.push({ kind: root.slideKind(part), blocks: part }) })
+        })
+        measRep.model = []
+        root.deck = out
+        // stay on the slide that holds what was on screen
+        var at = 0
+        for (var i = 0; i < out.length; i++) if (out[i].blocks.indexOf(keep) >= 0) { at = i; break }
+        root.slideIndex = keep >= 0 ? at : Math.min(root.slideIndex, Math.max(0, out.length - 1))
+    }
+    function present() { root.slideIndex = 0; root.deck = []; root.buildDeck(); root.slideIndex = 0; root.presenting = true; deckPane.forceActiveFocus() }
     function nextSlide() { if (root.slideIndex < root.deck.length - 1) root.slideIndex++ }
     function prevSlide() { if (root.slideIndex > 0) root.slideIndex-- }
+    function setFontScale(v) {
+        root.slideFontScale = Math.max(0.6, Math.min(2.0, Math.round(v * 10) / 10))
+        root.buildDeck()
+    }
+    function toggleFullScreen() {
+        var w = root.Window.window
+        if (!w) return
+        w.visibility = w.visibility === Window.FullScreen ? Window.Windowed : Window.FullScreen
+    }
+    // Re-cut the deck when what it shows changes (an update arrived, another tab).
+    Connections {
+        target: root
+        function onCoreSlidesChanged() { if (root.presenting) Qt.callLater(root.buildDeck) }
+    }
+
+    // The stage, laid out off screen at full size, for measuring.
+    Item {
+        x: -20000
+        width: root.stageW - 2 * root.stagePad
+        height: 10
+        opacity: 0
+        Column {
+            id: measCol
+            width: parent.width
+            spacing: 10 * root.deckFs
+            Repeater {
+                id: measRep
+                model: []
+                Loader {
+                    width: measCol.width
+                    property var b: root.blocks[modelData]
+                    property real fs: root.deckFs
+                    property real imageHeight: root.deckImageHeight
+                    sourceComponent: root.blockComponent(b)
+                }
+            }
+        }
+    }
 
     Rectangle {
         id: deckPane
@@ -1679,56 +1880,98 @@ Item {
         color: Theme.palette.background
         focus: root.presenting
         Keys.onPressed: function (e) {
-            if (e.key === Qt.Key_Right || e.key === Qt.Key_Space || e.key === Qt.Key_PageDown) { root.nextSlide(); e.accepted = true }
-            else if (e.key === Qt.Key_Left || e.key === Qt.Key_PageUp) { root.prevSlide(); e.accepted = true }
+            if (e.key === Qt.Key_Right || e.key === Qt.Key_Space || e.key === Qt.Key_PageDown || e.key === Qt.Key_Down) { root.nextSlide(); e.accepted = true }
+            else if (e.key === Qt.Key_Left || e.key === Qt.Key_PageUp || e.key === Qt.Key_Up) { root.prevSlide(); e.accepted = true }
             else if (e.key === Qt.Key_Home) { root.slideIndex = 0; e.accepted = true }
             else if (e.key === Qt.Key_End) { root.slideIndex = root.deck.length - 1; e.accepted = true }
-            else if (e.key === Qt.Key_Escape) { root.presenting = false; e.accepted = true }
+            else if (e.key === Qt.Key_Plus || e.key === Qt.Key_Equal) { root.setFontScale(root.slideFontScale + 0.1); e.accepted = true }
+            else if (e.key === Qt.Key_Minus) { root.setFontScale(root.slideFontScale - 0.1); e.accepted = true }
+            else if (e.key === Qt.Key_0) { root.setFontScale(1.0); e.accepted = true }
+            else if (e.key === Qt.Key_F) { root.toggleFullScreen(); e.accepted = true }
+            else if (e.key === Qt.Key_Escape) {
+                var w = root.Window.window
+                if (w && w.visibility === Window.FullScreen) w.visibility = Window.Windowed
+                else root.presenting = false
+                e.accepted = true
+            }
         }
         MouseArea { anchors.fill: parent; onClicked: function (m) { if (m.x > width / 3) root.nextSlide(); else root.prevSlide(); deckPane.forceActiveFocus() } }
 
-        readonly property real fs: Math.max(1.2, Math.min(width / 760, height / 520))
-        Rectangle {
-            id: slideCard
+        // the stage, at its real size, scaled to the screen
+        Item {
+            id: stage
+            width: root.stageW
+            height: root.stageH
             anchors.centerIn: parent
-            anchors.verticalCenterOffset: -30
-            width: Math.min(parent.width - 80, (parent.height - 150) * 16 / 9)
-            height: width * 9 / 16
-            radius: Theme.spacing.radiusSmall
-            color: Theme.palette.surface
-            border.color: Theme.palette.borderHairline
-            clip: true
-            Column {
-                id: slideCol
-                readonly property bool isTitle: root.slide && root.slide.kind === "title"
-                // Shrink a slide that would overflow the card (long code, big tables).
-                readonly property real fit: Math.min(1, (slideCard.height - 80) / Math.max(1, implicitHeight))
-                width: parent.width - 96
-                x: 48
-                y: isTitle ? (parent.height - height * fit) / 2 : 40
-                scale: fit
-                transformOrigin: Item.TopLeft
-                spacing: 10 * deckPane.fs
-                Repeater {
-                    model: root.slide ? root.slide.blocks : []
-                    Loader {
-                        width: slideCol.width
-                        property var b: root.blocks[modelData]
-                        property real fs: slideCol.isTitle ? deckPane.fs * 1.6 : deckPane.fs
-                        sourceComponent: root.blockComponent(b)
+            anchors.verticalCenterOffset: controls.visible ? -26 : 0
+            scale: Math.min((deckPane.width - 40) / root.stageW, (deckPane.height - (controls.visible ? 96 : 24)) / root.stageH)
+            Rectangle {
+                anchors.fill: parent
+                radius: 10
+                color: Theme.palette.surface
+                border.color: Theme.palette.borderHairline
+            }
+            Item {
+                id: slideArea
+                x: root.stagePad
+                y: root.stagePad
+                width: root.stageW - 2 * root.stagePad
+                height: root.stageContentH
+                clip: true
+                Column {
+                    id: slideCol
+                    readonly property string kind: root.slide ? root.slide.kind : ""
+                    readonly property real fsHere: kind === "title" ? root.deckFs * 1.4 : root.deckFs
+                    // A slide the measurement let run long (a title kept with a large table)
+                    // shrinks to fit rather than being cut off.
+                    readonly property real fit: Math.min(1, slideArea.height / Math.max(1, implicitHeight))
+                    width: parent.width
+                    y: kind === "title" || kind === "image" ? (slideArea.height - implicitHeight * fit) / 2 : 0
+                    scale: fit
+                    transformOrigin: Item.TopLeft
+                    spacing: 10 * root.deckFs
+                    Repeater {
+                        model: root.slide ? root.slide.blocks : []
+                        Loader {
+                            width: slideCol.width
+                            property var b: root.blocks[modelData]
+                            property real fs: slideCol.fsHere
+                            property real imageHeight: slideCol.kind === "image" ? root.stageContentH : root.deckImageHeight
+                            sourceComponent: root.blockComponent(b)
+                        }
                     }
                 }
             }
+            // slide number
+            LogosText {
+                anchors.right: parent.right
+                anchors.bottom: parent.bottom
+                anchors.rightMargin: 22
+                anchors.bottomMargin: 14
+                textFormat: Text.PlainText
+                font.pixelSize: 15
+                color: Theme.palette.textTertiary
+                text: (root.slideIndex + 1) + " / " + root.deck.length
+            }
         }
+
         RowLayout {
+            id: controls
+            visible: !(root.Window.window && root.Window.window.visibility === Window.FullScreen)
             anchors.bottom: parent.bottom
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottomMargin: 16
-            spacing: Theme.spacing.medium
-            LogosButton { text: "‹ Prev"; enabled: root.slideIndex > 0; onClicked: { root.prevSlide(); deckPane.forceActiveFocus() } }
+            spacing: Theme.spacing.small
+            LogosButton { compact: true; text: "‹ Prev"; enabled: root.slideIndex > 0; onClicked: { root.prevSlide(); deckPane.forceActiveFocus() } }
             LogosText { textFormat: Text.PlainText; color: Theme.palette.textTertiary; text: (root.slideIndex + 1) + " / " + root.deck.length }
-            LogosButton { text: "Next ›"; enabled: root.slideIndex < root.deck.length - 1; onClicked: { root.nextSlide(); deckPane.forceActiveFocus() } }
-            LogosButton { text: "Exit (Esc)"; onClicked: root.presenting = false }
+            LogosButton { compact: true; text: "Next ›"; enabled: root.slideIndex < root.deck.length - 1; onClicked: { root.nextSlide(); deckPane.forceActiveFocus() } }
+            Item { width: 12 }
+            LogosButton { compact: true; text: "A−"; onClicked: { root.setFontScale(root.slideFontScale - 0.1); deckPane.forceActiveFocus() } }
+            LogosText { textFormat: Text.PlainText; color: Theme.palette.textTertiary; text: Math.round(root.slideFontScale * 100) + "%" }
+            LogosButton { compact: true; text: "A+"; onClicked: { root.setFontScale(root.slideFontScale + 0.1); deckPane.forceActiveFocus() } }
+            Item { width: 12 }
+            LogosButton { compact: true; text: "Full screen (F)"; onClicked: { root.toggleFullScreen(); deckPane.forceActiveFocus() } }
+            LogosButton { compact: true; text: "Exit (Esc)"; onClicked: root.presenting = false }
         }
     }
 

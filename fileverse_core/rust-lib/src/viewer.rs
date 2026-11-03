@@ -254,6 +254,40 @@ pub(crate) fn fetch_json(gw: &Gateways, cid: &str, prov: &mut Vec<Provenance>) -
     serde_json::from_slice(&b).map_err(|e| format!("{cid} is not JSON: {e}"))
 }
 
+/// The largest image the viewer decrypts (dDocs caps uploads well below this).
+const MAX_IMAGE: usize = 25 * 1024 * 1024;
+
+/// Fetch an image a dDoc embeds (hash-checked, from any source) and decrypt it:
+/// AES-256-GCM as Penumbra writes it, with the 12-byte IV (`nonce`) and the tag kept
+/// in the image node, not in the blob. Returns the MIME type and the bytes.
+pub fn open_image(gw: &Gateways, r: &crate::doc::ImageRef) -> Result<(String, Vec<u8>), String> {
+    let (blob, _) = gw.get(&r.cid)?;
+    if blob.len() > MAX_IMAGE {
+        return Err(format!("image is {} MB, more than this viewer opens", blob.len() / 1_048_576));
+    }
+    let key = b64::decode(&r.key)?;
+    let iv = b64::decode(&r.nonce)?;
+    let mut ct = blob;
+    ct.extend(b64::decode(&r.tag)?);
+    let plain = crypto::gcm_open(&key, &iv, &ct).map_err(|_| "the image's key does not open it".to_string())?;
+    let mime = if r.mime.starts_with("image/") { r.mime.clone() } else { sniff_image(&plain).to_string() };
+    if !mime.starts_with("image/") {
+        return Err("not an image".into());
+    }
+    Ok((mime, plain))
+}
+
+fn sniff_image(b: &[u8]) -> &'static str {
+    match b {
+        [0x89, b'P', b'N', b'G', ..] => "image/png",
+        [0xff, 0xd8, 0xff, ..] => "image/jpeg",
+        [b'G', b'I', b'F', b'8', ..] => "image/gif",
+        [b'R', b'I', b'F', b'F', _, _, _, _, b'W', b'E', b'B', b'P', ..] => "image/webp",
+        _ if b.starts_with(b"<svg") || b.starts_with(b"<?xml") => "image/svg+xml",
+        _ => "application/octet-stream",
+    }
+}
+
 /// A document published from Basecamp: manifest -> metadata, gate, content.
 pub fn open_published(gw: &Gateways, url: &str) -> Result<Value, String> {
     let (cid, key) = crate::publish::parse_link(url).ok_or("not a fvbc:// link")?;
