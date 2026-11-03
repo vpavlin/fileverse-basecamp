@@ -13,6 +13,8 @@ use std::time::Duration;
 use sha2::{Digest, Sha256};
 
 pub const DEFAULT_GATEWAYS: &[&str] = &[
+    // Fileverse's gateway for current (v3/v4) documents: serves trustless raw blocks.
+    "https://apps-ipfs.fileverse.io",
     // Serves Fileverse v3 uploads (they are pinned on Pinata) and trustless blocks.
     "https://gateway.pinata.cloud",
     // Fileverse's own dedicated gateway: legacy portal content only.
@@ -426,6 +428,46 @@ impl Gateways {
                     let bytes = b.len();
                     return Ok((b.to_vec(), Provenance { cid: cid_str.into(), gateway: g.clone(), verified, bytes, blocks: vec![] }));
                 }
+            }
+        }
+        Err(format!("could not fetch {cid_str}: {}", errors.join("; ")))
+    }
+
+    /// A whole file by CID, as a gateway serves it, NOT hash-checked: only for content
+    /// that authenticates itself (AES-GCM ciphertext whose key and tag come from a
+    /// verified document). Tries your node first (Kubo checks what it serves), then
+    /// `first`, then the configured gateways; at most `max` bytes.
+    pub fn get_whole(&self, cid_str: &str, first: &[&str], max: usize) -> Result<(Vec<u8>, String), String> {
+        let slow = reqwest::blocking::Client::builder()
+            .timeout(Duration::from_secs(120))
+            .user_agent("fileverse-basecamp-viewer")
+            .build()
+            .map_err(|e| e.to_string())?;
+        let mut tries: Vec<(String, &reqwest::blocking::Client)> = vec![];
+        if let Some((g, _)) = &self.node {
+            tries.push((g.clone(), &self.quick));
+        }
+        for g in first.iter().map(|g| g.to_string()).chain(self.urls.iter().cloned()) {
+            if !tries.iter().any(|(t, _)| *t == g) {
+                tries.push((g, &slow));
+            }
+        }
+        let mut errors = vec![];
+        for (g, client) in tries {
+            let url = format!("{}/ipfs/{}", g.trim_end_matches('/'), cid_str);
+            match client.get(&url).send().and_then(|r| r.error_for_status()) {
+                Ok(r) => {
+                    if r.content_length().map(|n| n as usize > max).unwrap_or(false) {
+                        errors.push(format!("{g}: too large"));
+                        continue;
+                    }
+                    match r.bytes() {
+                        Ok(b) if b.len() <= max => return Ok((b.to_vec(), g)),
+                        Ok(_) => errors.push(format!("{g}: too large")),
+                        Err(e) => errors.push(format!("{g}: {}", short(&e))),
+                    }
+                }
+                Err(e) => errors.push(format!("{g}: {}", short(&e))),
             }
         }
         Err(format!("could not fetch {cid_str}: {}", errors.join("; ")))

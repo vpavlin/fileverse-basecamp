@@ -1,5 +1,23 @@
 # What was tested, and how to repeat it
 
+## 0.8.1: images in Basecamp (2026-11-03)
+
+- On vpavlin's real dDoc with two images (one alone, one beside a list in columns), 0.8.0
+  showed blank images. Two causes:
+  1. Fileverse serves document images from separate gateways (`images.fileverse.io`,
+     `ipfsimages.mypinata.cloud`) that answer only with whole files, not hash-checkable
+     blocks, so the trustless fetch found nothing. Now images are fetched whole (your node
+     first, then those gateways): safe, because AES-GCM authenticates the ciphertext with
+     the key and tag from the hash-checked document. The document itself only loaded through
+     `apps-ipfs.fileverse.io`, now a default gateway (it serves raw blocks).
+  2. Basecamp's QML sandbox blocks `data:` URLs (and anything outside the view's install
+     directory); the offscreen harness has no sandbox, so it did not show. The core now
+     writes decrypted images to `plugins/fileverse_ui/imgcache` (only a directory with that
+     name, under a `plugins` directory, is accepted), pruned after a day and emptied when
+     the core starts. Decrypted images are therefore on disk while cached.
+- Basecamp GUI, same document: both images render in the document; presenting shows "Image
+  one" on its own slide and "Image Two" with the list beside the picture.
+
 ## 0.8.0: slides as in fileverse-ddocs#550 (2026-11-03)
 
 - Slides follow vpavlin's dDocs PR #550 (direct render): the core cuts at structure only (an

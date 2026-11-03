@@ -35,6 +35,7 @@ use crate::chain::{self, Rpc, GNOSIS_CHAIN_ID};
 use crate::ipfs::{BlockSource, Cid, Gateways, DEFAULT_GATEWAYS};
 use crate::node::{self, Node};
 use crate::{b64, doc, md, publish, rich, viewer};
+use sha2::{Digest, Sha256};
 
 pub trait FileverseCoreModule: Send + Sync + 'static {
     /// Start opening a document by URL (share link, fvown://, fvbc://). Returns `{ ok, jobId }`.
@@ -54,8 +55,11 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// Copy a recent document's blocks into your IPFS node and pin them. Returns a job.
     fn keep(&self, url: String) -> String;
     /// Decrypt an image a document embeds (`img` of an image block, as JSON). Returns a
-    /// job: `{ dataUri }` for the view's Image element; nothing is written to disk.
-    fn image(&self, image_json: String) -> String;
+    /// job. With `view_dir` empty: `{ dataUri }`. Basecamp's QML sandbox only lets a view
+    /// load files under its own install directory, so with `view_dir` (that directory,
+    /// which must be a `plugins/fileverse_ui` dir) the image is written to a short-lived
+    /// cache there instead: `{ fileUrl }`. The cache is emptied on start and pruned daily.
+    fn image(&self, image_json: String, view_dir: String) -> String;
     /// Whether a recently opened document has a newer version on chain than the one
     /// shown (its file record now names other blocks). Returns a job: `{ changed }`.
     fn check_update(&self, url: String) -> String;
@@ -703,6 +707,11 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
     fn on_context_ready(&self, ctx: &RustModuleContext) {
         // Local state only: the 0.3 runtime refuses calls to other modules from here.
         let dir = PathBuf::from(&ctx.instance_persistence_path);
+        // Decrypted images from the last run: Basecamp keeps module data in
+        // <base>/module_data/<module>/… and views in <base>/plugins/<view>.
+        if let Some(base) = dir.ancestors().find(|a| a.file_name().map(|n| n == "module_data").unwrap_or(false)).and_then(|m| m.parent()) {
+            prune_image_cache(&base.join("plugins/fileverse_ui/imgcache"), Duration::ZERO);
+        }
         let _ = std::fs::create_dir_all(dir.join("drafts"));
         let mut s = self.state.lock().unwrap();
         s.dir = Some(dir.clone());
@@ -859,17 +868,42 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         .to_string()
     }
 
-    fn image(&self, image_json: String) -> String {
+    fn image(&self, image_json: String, view_dir: String) -> String {
         let r: doc::ImageRef = match serde_json::from_str(&image_json) {
             Ok(r) => r,
             Err(e) => return err(format!("bad image reference: {e}")),
+        };
+        let cache = if view_dir.trim().is_empty() {
+            None
+        } else {
+            match image_cache_dir(&view_dir) {
+                Ok(d) => Some(d),
+                Err(e) => return err(e),
+            }
         };
         self.run_job(
             move |me, _job| {
                 let node = me.node(NODE_PROBE);
                 let gw = me.gateways(node.as_ref());
                 let (mime, bytes) = viewer::open_image(&gw, &r)?;
-                Ok(json!({ "ok": true, "cid": r.cid, "dataUri": format!("data:{mime};base64,{}", b64::encode(&bytes)) }))
+                match cache {
+                    None => Ok(json!({ "ok": true, "cid": r.cid, "dataUri": format!("data:{mime};base64,{}", b64::encode(&bytes)) })),
+                    Some(dir) => {
+                        prune_image_cache(&dir, Duration::from_secs(24 * 3600));
+                        let ext = match mime.as_str() {
+                            "image/jpeg" => "jpg",
+                            "image/gif" => "gif",
+                            "image/webp" => "webp",
+                            "image/svg+xml" => "svg",
+                            _ => "png",
+                        };
+                        // Not named by CID: the name says nothing about which image it is.
+                        let name = format!("{}.{ext}", hex::encode(&Sha256::digest(format!("{}:{}", r.cid, r.key).as_bytes())[..12]));
+                        let path = dir.join(name);
+                        std::fs::write(&path, &bytes).map_err(|e| format!("could not cache the image: {e}"))?;
+                        Ok(json!({ "ok": true, "cid": r.cid, "fileUrl": format!("file://{}", path.display()) }))
+                    }
+                }
             },
             |_s, _v| {},
         )
@@ -1279,6 +1313,37 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 write_private(&path, &d.to_string());
             },
         )
+    }
+}
+
+/// Where decrypted images go so the sandboxed view may load them: `imgcache` inside the
+/// view's own install directory. Refuses any directory that is not a Basecamp
+/// `plugins/fileverse_ui` directory, so the call cannot be used to write elsewhere.
+fn image_cache_dir(view_dir: &str) -> Result<PathBuf, String> {
+    let raw = view_dir.trim().trim_start_matches("file://");
+    let dir = std::fs::canonicalize(raw).map_err(|_| "the view directory does not exist".to_string())?;
+    let ok = dir.file_name().map(|n| n == "fileverse_ui").unwrap_or(false)
+        && dir.parent().and_then(|p| p.file_name()).map(|n| n == "plugins").unwrap_or(false);
+    if !ok {
+        return Err("images can only be cached in the Fileverse view's own directory".into());
+    }
+    let cache = dir.join("imgcache");
+    std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
+    IMAGE_CACHES.lock().unwrap().insert(cache.clone());
+    Ok(cache)
+}
+
+static IMAGE_CACHES: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// Decrypted images are plaintext on disk: keep them only briefly.
+fn prune_image_cache(dir: &std::path::Path, older_than: Duration) {
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let old = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map(|a| a >= older_than).unwrap_or(true);
+            if old {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
     }
 }
 

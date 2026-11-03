@@ -1669,9 +1669,15 @@ Item {
         root.imageCache[img.cid] = "loading"
         var done = function (v) { root.imageCache[img.cid] = v; root.imageTick++ }
         Qt.callLater(function () {
-            root.quietJob("image", [JSON.stringify(img)], function (r) { done(r && r.dataUri ? r.dataUri : "failed") }, function () { done("failed") })
+            root.quietJob("image", [JSON.stringify(img), root.viewDir], function (r) { done(r && (r.fileUrl || r.dataUri) ? (r.fileUrl || r.dataUri) : "failed") }, function () { done("failed") })
         })
         return "loading"
+    }
+    // Basecamp's sandbox lets this view load files only from its own install directory
+    // (not data: URLs), so the core writes decrypted images to a short-lived cache there.
+    readonly property string viewDir: {
+        var u = String(Qt.resolvedUrl("."))
+        return u.indexOf("file://") === 0 ? decodeURIComponent(u.substring(7)) : ""
     }
     Component {
         id: imageBlock
@@ -1683,7 +1689,7 @@ Item {
             // the image arrives; in the document it follows the picture.
             readonly property real fixedHeight: parent && parent.imageHeight ? parent.imageHeight : 0
             readonly property string src: { root.imageTick; return root.imageSrc(b.img) }
-            readonly property bool ready: src.indexOf("data:") === 0
+            readonly property bool ready: src.indexOf("data:") === 0 || src.indexOf("file:") === 0
             readonly property real natural: pic.status === Image.Ready && pic.sourceSize.width > 0 ? width * pic.sourceSize.height / pic.sourceSize.width : 0
             width: parent ? parent.width : 0
             height: fixedHeight > 0 ? fixedHeight : (ready && natural > 0 ? Math.min(natural, Math.max(pic.sourceSize.height, 1), 520 * fs) : 120 * fs)
