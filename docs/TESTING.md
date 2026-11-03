@@ -1,5 +1,36 @@
 # What was tested, and how to repeat it
 
+## 0.9.1: lists and headings inside columns (2026-11-03)
+
+Reported by vpavlin on 0.9.0: in a column the list buttons said "Tables keep their own
+layout", `- ` did not start a list (it was saved as `\-`), the cursor behaved oddly in
+columns and jumped to the top when switching between Visual and Markdown.
+
+- Causes, found with a Qt 6.9.2 TextArea probe (`qml` offscreen):
+  - the view only counted U+2029 between blocks; Qt marks each table cell with U+FDD0
+    and the table's end with U+FDD1, so a block inside a column had no number of its own;
+  - `getText(0, pos)` with `pos` inside a table returns the whole table (Qt widens a
+    selection that ends in a cell), so the view's idea of the cursor's block was wrong
+    there. The view now cuts the full text at the cursor (positions match);
+  - after a table Qt keeps an empty text block it does not write out, unless text was
+    typed into it. The view now says, per table, whether that piece is empty
+    (`rich::At`, "7:10").
+- The core restyles blocks inside a column (headings, lists, tasks, quotes; not code);
+  real tables still keep their layout. `to_html` no longer closes `</body></html>` after
+  every segment.
+- cargo: `blocks_inside_columns_are_found_and_restyled` and
+  `text_typed_after_columns_is_the_next_block` run against HTML Qt itself wrote back
+  (tests/fixtures/qt_columns*.html), `block_styles_change_one_block` updated to Qt's real
+  piece count (a table's cells and the piece after it).
+- Basecamp GUI: in a column, "• List" turned "Text here" into a list item and Enter
+  continued it; typing `- ` at the start of a line in a column made it a list item (the
+  Markdown shows `- Second item`, no `\-`); H2 in the right-hand column; text typed after
+  the last columns block (Ctrl+End) became an H2. Markdown → Visual and back keep the
+  cursor where it was (typed "XX" / "YY" landed after "Second item" both ways).
+- Also fixed: opening the editor straight after a restart showed remote pictures as thin
+  strips (Qt remembered that the cache file was missing when it first tried); the view now
+  reloads them with a new query once fetched, and the core ignores the query.
+
 ## 0.9.0: images and columns in the editor, a real full-screen window (2026-11-03)
 
 - cargo: `columns_and_images_cross_the_editor`, `qt_columns_and_images` (rich.rs),

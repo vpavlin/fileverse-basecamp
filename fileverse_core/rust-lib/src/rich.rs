@@ -231,15 +231,16 @@ enum Block {
 }
 
 impl Block {
-    /// How many of Qt's top-level text blocks this is: what the view counts with
-    /// paragraph separators. A table's cells are separated differently, and a code
-    /// block is one text block per line.
-    fn qt_blocks(&self) -> usize {
+    /// How many pieces of the view's plain text this block is. The view splits Qt's text
+    /// at paragraph separators (U+2029) and at the table markers Qt puts there (U+FDD0
+    /// before each cell, U+FDD1 after the last): a code block is one piece per line, a
+    /// table or columns one per text block in each cell (the empty piece Qt may keep
+    /// after a table is counted by `locate`).
+    fn units(&self) -> usize {
         match self {
             Block::Code(lines) => lines.len().max(1),
-            Block::Table(_) => 0,
-            // cells are separated otherwise; the blocks inside one cell by paragraph breaks
-            Block::Columns { cols, .. } => cols.iter().map(|c| c.iter().map(Block::qt_blocks).sum::<usize>().saturating_sub(1)).sum(),
+            Block::Table(rows) => rows.iter().map(|r| r.len()).sum::<usize>(),
+            Block::Columns { cols, .. } => cols.iter().map(|c| c.iter().map(Block::units).sum::<usize>().max(1)).sum::<usize>(),
             _ => 1,
         }
     }
@@ -773,6 +774,7 @@ pub fn to_html(md: &str) -> String {
             }
         }
     }
+    out.push_str("</body></html>");
     out
 }
 
@@ -902,7 +904,6 @@ fn md_html(md: &str, img_width: u32) -> String {
             _ => {}
         }
     }
-    out.push_str("</body></html>");
     out
 }
 
@@ -944,34 +945,131 @@ fn kind_of(b: &Block) -> &'static str {
     }
 }
 
-/// Which block (and which line of a code block) holds Qt text block `index`.
-fn locate(blocks: &[Block], index: usize) -> Option<(usize, usize)> {
-    let mut n = 0;
+/// Where the view's text piece `index` is.
+#[derive(Debug, PartialEq)]
+enum Loc {
+    /// Top-level block `i` (line `line` of a code block).
+    Top { i: usize, line: usize },
+    /// Block `j` (line `line`) of column `col` of the columns block `i`.
+    Cell { i: usize, col: usize, j: usize, line: usize },
+    /// A table cell, or the empty piece Qt keeps around a table.
+    Fixed,
+}
+
+/// Where the cursor is, as the view reports it: the number of its text piece, and for
+/// each top-level table (in order) whether the piece right after it is empty. Qt keeps
+/// an empty text block after a table that it does not write out as HTML, unless text
+/// was typed into it (then that block is the next paragraph). Written "7" or "7:10".
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct At {
+    pub index: usize,
+    pub gaps: Vec<bool>,
+}
+
+impl At {
+    pub fn parse(s: &str) -> At {
+        let (n, flags) = s.trim().split_once(':').unwrap_or((s.trim(), ""));
+        At { index: n.parse().unwrap_or(usize::MAX), gaps: flags.chars().map(|c| c != '0').collect() }
+    }
+}
+
+impl From<usize> for At {
+    fn from(index: usize) -> At {
+        At { index, gaps: vec![] }
+    }
+}
+
+fn locate(blocks: &[Block], at: &At) -> Option<Loc> {
+    let index = at.index;
+    // A document that starts with a table has an empty text block before it in Qt.
+    let mut n = usize::from(matches!(blocks.first(), Some(Block::Table(_) | Block::Columns { .. })));
+    if index < n {
+        return Some(Loc::Fixed);
+    }
+    let mut tables = 0;
     for (i, b) in blocks.iter().enumerate() {
-        let k = b.qt_blocks();
-        if k > 0 && index < n + k {
-            return Some((i, index - n));
+        let k = b.units();
+        let gap = if matches!(b, Block::Table(_) | Block::Columns { .. }) {
+            tables += 1;
+            usize::from(at.gaps.get(tables - 1).copied().unwrap_or(true))
+        } else {
+            0
+        };
+        if index >= n + k + gap {
+            n += k + gap;
+            continue;
         }
-        n += k;
+        if index >= n + k {
+            return Some(Loc::Fixed); // the empty piece after a table
+        }
+        let off = index - n;
+        return Some(match b {
+            Block::Columns { cols, .. } => {
+                let mut m = 0;
+                for (col, c) in cols.iter().enumerate() {
+                    let ck = c.iter().map(Block::units).sum::<usize>().max(1);
+                    if off < m + ck {
+                        let mut r = off - m;
+                        for (j, inner) in c.iter().enumerate() {
+                            let u = inner.units();
+                            if r < u {
+                                return Some(match inner {
+                                    Block::Table(_) | Block::Columns { .. } => Loc::Fixed,
+                                    _ => Loc::Cell { i, col, j, line: r },
+                                });
+                            }
+                            r -= u;
+                        }
+                        return Some(Loc::Fixed); // an empty cell
+                    }
+                    m += ck;
+                }
+                Loc::Fixed
+            }
+            Block::Table(_) => Loc::Fixed,
+            _ => Loc::Top { i, line: off },
+        });
     }
     None
 }
 
-/// The block kind at the view's text block `index` ("p", "h1".., "ul", "ol", "task",
-/// "done", "quote", "code", "hr", or "" when out of range).
-pub fn kind_at(html: &str, index: usize) -> String {
+/// The block kind at the view's text piece `index` ("p", "h1".., "ul", "ol", "task",
+/// "done", "quote", "code", "hr", "table" in a table cell, or "" when out of range).
+pub fn kind_at(html: &str, at: impl Into<At>) -> String {
     let blocks = blocks_from_html(html);
-    locate(&blocks, index).map(|(i, _)| kind_of(&blocks[i]).to_string()).unwrap_or_default()
+    match locate(&blocks, &at.into()) {
+        Some(Loc::Top { i, .. }) => kind_of(&blocks[i]).to_string(),
+        Some(Loc::Cell { i, col, j, .. }) => match &blocks[i] {
+            Block::Columns { cols, .. } => kind_of(&cols[col][j]).to_string(),
+            _ => String::new(),
+        },
+        Some(Loc::Fixed) => "table".into(),
+        None => String::new(),
+    }
 }
 
 /// Change the kind of the text block at `index` and return the document as HTML
 /// for Qt. `kind` is "p", "h1", "h2", "h3", "ul", "ol", "task", "done", "quote" or "code".
-pub fn set_block(html: &str, index: usize, kind: &str) -> Result<String, String> {
+/// Blocks inside columns can be restyled; table cells cannot.
+pub fn set_block(html: &str, at: impl Into<At>, kind: &str) -> Result<String, String> {
     let mut blocks = blocks_from_html(html);
-    let (i, line) = locate(&blocks, index).ok_or("the cursor is not in a text block this editor can restyle")?;
-    if matches!(blocks[i], Block::Table(_) | Block::Columns { .. }) {
-        return Err("tables and columns keep their layout".into());
+    match locate(&blocks, &at.into()).ok_or("the cursor is not in a text block this editor can restyle")? {
+        Loc::Top { i, line } => restyle(&mut blocks, i, line, kind)?,
+        Loc::Cell { i, col, j, line } => {
+            if kind == "code" {
+                return Err("code blocks cannot go inside columns".into());
+            }
+            let Block::Columns { cols, .. } = &mut blocks[i] else { unreachable!() };
+            restyle(&mut cols[col], j, line, kind)?;
+        }
+        Loc::Fixed => return Err("tables keep their layout".into()),
     }
+    // Keep empty text blocks as empty paragraphs so the view's block count still lines up.
+    Ok(to_html_blocks(&blocks))
+}
+
+/// Restyle block `i` (line `line` of a code block) of one run of blocks.
+fn restyle(blocks: &mut Vec<Block>, i: usize, line: usize, kind: &str) -> Result<(), String> {
     let inline_of = |b: &Block| -> String {
         match b {
             Block::Heading(_, t) | Block::Para(t) | Block::Quote(t) => t.clone(),
@@ -1027,8 +1125,7 @@ pub fn set_block(html: &str, index: usize, kind: &str) -> Result<String, String>
         }
         _ => blocks[i] = new,
     }
-    // Keep empty text blocks as empty paragraphs so the view's block count still lines up.
-    Ok(to_html_blocks(&blocks))
+    Ok(())
 }
 
 fn to_html_blocks(blocks: &[Block]) -> String {
@@ -1116,24 +1213,29 @@ li.checked::marker { content: "\2612"; }
 
     #[test]
     fn block_styles_change_one_block() {
-        // index counts Qt text blocks: Title=0 Some=1 one=2 two=3 nested=4 first=5 task=6 done=7 quote=8 line1=9 line2=10, table=none, empty=11, end=12
+        // index counts the view's text pieces (Qt's plain text, probed):
+        // Title=0 Some=1 one=2 two=3 nested=4 first=5 task=6 done=7 quote=8 line1=9 line2=10,
+        // the table's cells 11-14 and the piece after it 15, the empty paragraph 16, end=17
         assert_eq!(kind_at(QT_HTML, 0), "h1");
         assert_eq!(kind_at(QT_HTML, 4), "ul");
         assert_eq!(kind_at(QT_HTML, 6), "task");
         assert_eq!(kind_at(QT_HTML, 8), "quote");
         assert_eq!(kind_at(QT_HTML, 10), "code");
-        assert_eq!(kind_at(QT_HTML, 12), "p");
+        assert_eq!(kind_at(QT_HTML, 12), "table");
+        assert_eq!(kind_at(QT_HTML, 15), "table");
+        assert_eq!(kind_at(QT_HTML, 17), "p");
         let md = |h: String| to_md(&h);
         assert!(md(set_block(QT_HTML, 1, "h2").unwrap()).contains("\n## Some bold, *it*"));
         assert!(md(set_block(QT_HTML, 0, "p").unwrap()).starts_with("Title\n\nSome"));
         assert!(md(set_block(QT_HTML, 6, "done").unwrap()).contains("- [x] task\n- [x] done"));
-        assert!(md(set_block(QT_HTML, 12, "task").unwrap()).ends_with("- [ ] end\n"));
+        assert!(md(set_block(QT_HTML, 17, "task").unwrap()).ends_with("- [ ] end\n"));
         // a line out of a code block splits it
         let split = md(set_block(QT_HTML, 9, "p").unwrap());
         assert!(split.contains("> quote\n\nline1\n\n```\nline2\n```"), "{split}");
         // nested item keeps its depth
         assert!(md(set_block(QT_HTML, 4, "task").unwrap()).contains("    - [ ] nested"));
         assert!(set_block(QT_HTML, 99, "p").is_err());
+        assert!(set_block(QT_HTML, 13, "h1").is_err(), "table cells keep their layout");
     }
 
     fn bridge() -> Images {
@@ -1197,6 +1299,56 @@ li.checked::marker { content: "\2612"; }
         assert!(!to_md(qt).contains("fvimg"));
     }
 
+    /// Text pieces as the view counts them: Qt's plain text of
+    /// tests/fixtures/qt_columns.html (captured from a TextArea in RichText mode) is
+    /// `Test pres⏎A little image test▸This i cool:)⏎Yay!▸[image: pic]◂⏎Test▸Hello world how are you ?▸Right text◂⏎fdfd`
+    /// (⏎ U+2029, ▸ U+FDD0, ◂ U+FDD1), and the one that starts with columns `▸L▸R◂`.
+    #[test]
+    fn blocks_inside_columns_are_found_and_restyled() {
+        let qt = include_str!("../tests/fixtures/qt_columns.html");
+        let kinds: Vec<String> = (0..12).map(|k| kind_at(qt, k)).collect();
+        assert_eq!(kinds, ["h1", "h1", "ul", "ul", "p", "table", "h2", "p", "p", "table", "p", ""], "{kinds:?}");
+
+        // a paragraph in a column becomes a list item, and the columns stay
+        let md = to_md(&set_block(qt, 7, "ul").unwrap());
+        assert!(md.contains("## Test\n\n::: columns align-center\n\n- Hello world how are you ?\n\n::: column\n\nRight text\n\n:::"), "{md}");
+        // a list item in a column becomes a heading; its neighbour stays a list item
+        let md = to_md(&set_block(qt, 3, "h2").unwrap());
+        assert!(md.contains("- This i cool:)\n\n## Yay!\n\n::: column"), "{md}");
+        // the text between two columns blocks
+        let md = to_md(&set_block(qt, 6, "h1").unwrap());
+        assert!(md.contains(":::\n\n# Test\n\n::: columns"), "{md}");
+        // the piece after a table cannot be restyled; neither can code go into a column
+        assert!(set_block(qt, 5, "h1").is_err());
+        assert!(set_block(qt, 7, "code").is_err());
+        // after the restyle the view's count still lines up (the same pieces, one changed)
+        let again = set_block(qt, 7, "ul").unwrap();
+        assert_eq!(kind_at(&again, 7), "ul");
+        assert_eq!(kind_at(&again, 10), "p");
+
+        let first = include_str!("../tests/fixtures/qt_columns_first.html");
+        let kinds: Vec<String> = (0..5).map(|k| kind_at(first, k)).collect();
+        assert_eq!(kinds, ["table", "p", "p", "table", ""], "{kinds:?}");
+        let md = to_md(&set_block(first, 2, "h3").unwrap());
+        assert!(md.contains("L\n\n::: column\n\n### R"), "{md}");
+    }
+
+    /// Text typed straight after a table goes into the empty block Qt keeps there, and
+    /// Qt writes it as the next paragraph: the view says so with the table's flag.
+    /// (Qt's export below, styles trimmed; its plain text is `AB▸CD▸GH◂Z⏎IJ`.)
+    #[test]
+    fn text_typed_after_columns_is_the_next_block() {
+        let qt = r#"<html><body><p>AB</p><table border="0" width="100%" cellspacing="2" cellpadding="0"><tr><td><p>CD</p></td><td><p>GH</p></td></tr></table><p style=" margin-top:0px; margin-bottom:0px;">Z</p><p>IJ</p></body></html>"#;
+        let kinds: Vec<String> = (0..6).map(|k| kind_at(qt, At::parse(&format!("{k}:0")))).collect();
+        assert_eq!(kinds, ["p", "p", "p", "p", "p", ""], "{kinds:?}");
+        let md = to_md(&set_block(qt, At::parse("3:0"), "h2").unwrap());
+        assert!(md.contains(":::\n\n## Z\n\nIJ"), "{md}");
+        // without the flag the empty piece is assumed: piece 3 is that piece
+        assert_eq!(kind_at(qt, 3), "table");
+        assert_eq!(At::parse("12:101"), At { index: 12, gaps: vec![true, false, true] });
+        assert_eq!(At::parse("x").index, usize::MAX);
+    }
+
     #[test]
     fn an_empty_block_keeps_its_new_style() {
         let html = "<html><body><p>first</p><p style=\"-qt-paragraph-type:empty;\"><br /></p></body></html>";
@@ -1218,3 +1370,4 @@ li.checked::marker { content: "\2612"; }
         assert_eq!(back, md);
     }
 }
+

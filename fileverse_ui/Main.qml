@@ -289,7 +289,9 @@ Item {
             if (--left > 0 || !root.draft || root.draft.id !== draftId || !root.visualEdit) return
             var pos = richArea.cursorPosition
             root.loadingEditor = true
-            richArea.text = richArea.text
+            // Qt remembers that these files were missing: a new query makes it load them now
+            var stamp = "?r=" + Date.now()
+            richArea.text = richArea.text.replace(/(src="[^"?]*\/imgcache\/[^"?]*)(\?r=\d+)?"/g, "$1" + stamp + '"')
             root.loadingEditor = false
             richArea.cursorPosition = Math.min(pos, richArea.length)
         }
@@ -319,7 +321,20 @@ Item {
     }
     function setVisualEdit(v) {
         if (v === root.visualEdit || !root.draft) return
-        if (v) { root.visualEdit = true; root.loadEditor(mdArea.text); return }
+        if (v) {
+            var mp = mdArea.cursorPosition, mt = mdArea.text
+            var line = mt.substring(mt.lastIndexOf("\n", mp - 1) + 1, mp)
+            // what you see of that line: no block markers or inline marks
+            var seen = line.replace(/^\s*(#{1,6}\s|[-*+]\s(\[[ xX]\]\s)?|\d+[.)]\s|>\s?)/, "").replace(/[*_`~\\]/g, "")
+            root.visualEdit = true
+            root.loadEditor(mt)
+            richArea.cursorPosition = root.cursorFor(richArea.getText(0, richArea.length), seen, mt.length ? mp / mt.length : 0)
+            richArea.forceActiveFocus()
+            return
+        }
+        var rp = richArea.cursorPosition, rt = richArea.getText(0, richArea.length)
+        var before = rt.substring(0, rp)
+        var seenR = before.substring(root.lastBreak(before) + 1)
         // visual -> markdown: save converts, and hands the Markdown back
         root.core("draft_save_rich", [root.draft.id, titleField.text, richArea.text], function (raw) {
             var r = root.j(raw)
@@ -327,7 +342,26 @@ Item {
             root.draft = r.draft; root.draftDirty = false
             root.visualEdit = false
             root.loadEditor(r.draft.markdown)
+            mdArea.cursorPosition = root.cursorFor(mdArea.text, seenR, rt.length ? rp / rt.length : 0)
+            mdArea.forceActiveFocus()
         })
+    }
+    // Where the cursor goes after switching views: just after the text it followed (the
+    // last few characters of its line, the occurrence nearest the same relative place),
+    // else the same relative place.
+    function cursorFor(text, seen, frac) {
+        var approx = Math.round(frac * text.length)
+        var needle = String(seen).replace(/\u200b/g, "")
+        needle = needle.substring(Math.max(0, needle.length - 24))
+        if (needle.trim().length >= 2) {
+            var best = -1, at = text.indexOf(needle)
+            while (at >= 0) {
+                if (best < 0 || Math.abs(at - approx) < Math.abs(best - approx)) best = at
+                at = text.indexOf(needle, at + 1)
+            }
+            if (best >= 0) return best + needle.length
+        }
+        return Math.max(0, Math.min(approx, text.length))
     }
     function editorChanged() {
         if (root.loadingEditor) return
@@ -336,33 +370,50 @@ Item {
     }
     // Which text block the cursor is in, counted as Qt counts them (paragraph
     // separators; table cells are separated by other characters).
+    // Qt's plain text splits blocks with U+2029 and marks tables with U+FDD0 (before each
+    // cell) and U+FDD1 (after the last); the core counts the same pieces.
+    readonly property var pieceBreak: /[\u2029\ufdd0\ufdd1]/
+    // The editor's text up to `pos`. Not getText(0, pos): a range that ends inside a
+    // table is widened by Qt to the whole table. Positions in the full text match.
+    function textBefore(pos) {
+        return richArea.getText(0, richArea.length).substring(0, pos === undefined ? richArea.cursorPosition : pos)
+    }
+    // The cursor's text piece for the core, with one flag per table: is the piece right
+    // after it empty ("1"; Qt keeps an empty block there) or typed into ("0"). E.g. "7:10".
     function blockIndex() {
-        var before = richArea.getText(0, richArea.cursorPosition)
-        return before.split("\u2029").length - 1
+        var full = richArea.getText(0, richArea.length)
+        var n = full.substring(0, richArea.cursorPosition).split(root.pieceBreak).length - 1
+        var flags = ""
+        for (var i = full.indexOf("\ufdd1"); i >= 0; i = full.indexOf("\ufdd1", i + 1))
+            flags += (i + 1 >= full.length || root.pieceBreak.test(full.charAt(i + 1))) ? "1" : "0"
+        return flags ? n + ":" + flags : String(n)
+    }
+    function lastBreak(p) {
+        return Math.max(p.lastIndexOf("\u2029"), p.lastIndexOf("\ufdd0"), p.lastIndexOf("\ufdd1"))
     }
     function blockStart() {
-        var p = richArea.getText(0, richArea.cursorPosition)
-        return p.lastIndexOf("\u2029") + 1
+        return root.lastBreak(root.textBefore()) + 1
     }
+    // In a table or columns cell: the last table marker before the cursor opens a cell.
     function inTable() {
-        var p = richArea.getText(0, richArea.length), pos = richArea.cursorPosition
-        var s = p.lastIndexOf("\u2029", pos - 1) + 1
-        var e = p.indexOf("\u2029", pos); if (e < 0) e = p.length
-        var seg = p.substring(s, e)
-        return seg.indexOf("\ufdd0") >= 0 || seg.indexOf("\ufdd1") >= 0
+        var p = root.textBefore()
+        return p.lastIndexOf("\ufdd0") > p.lastIndexOf("\ufdd1")
     }
     Timer { id: kindTimer; interval: 150; onTriggered: root.refreshBlockKind() }
     function updateBlockKind() { if (root.visualEdit) kindTimer.restart() }
     function refreshBlockKind() {
-        if (root.inTable()) { root.blockKind = "table"; return }
         var r = root.coreSync("rich_kind", [richArea.text, String(root.blockIndex())])
         if (r && r.ok) root.blockKind = r.kind || "p"
     }
     function setBlock(kind) {
-        if (root.inTable()) { root.say("Tables keep their own layout"); return }
         var pos = richArea.cursorPosition
         var r = root.coreSync("rich_block", [richArea.text, String(root.blockIndex()), kind, root.draft ? root.draft.id : "", root.viewDir])
-        if (!r || !r.ok) { root.fail(r ? r.error : "Could not change this block."); return }
+        if (!r || !r.ok) {
+            var why = r ? String(r.error) : ""
+            if (/keep their layout|inside columns/.test(why)) root.say(why.charAt(0).toUpperCase() + why.substring(1))
+            else root.fail(why || "Could not change this block.")
+            return
+        }
         root.loadingEditor = true
         richArea.text = root.tintLinks(r.html)
         root.loadingEditor = false
@@ -421,8 +472,8 @@ Item {
     function typedShortcut() {
         if (root.blockKind === "code" || root.blockKind === "table") return false
         var pos = richArea.cursorPosition
-        var p = richArea.getText(0, pos)
-        var typed = p.substring(p.lastIndexOf("\u2029") + 1)
+        var p = root.textBefore(pos)
+        var typed = p.substring(root.lastBreak(p) + 1)
         var map = { "#": "h1", "##": "h2", "###": "h3", "-": "ul", "*": "ul", "1.": "ol", "[]": "task", ">": "quote", "```": "code" }
         if (!(typed in map)) return false
         richArea.remove(pos - typed.length, pos)
@@ -1431,7 +1482,7 @@ Item {
                                     // decided before Qt splits the block: is this a heading, and are we at its end?
                                     root.refreshBlockKind()
                                     var p = richArea.getText(0, richArea.length), c = richArea.cursorPosition
-                                    var atEnd = c === p.length || p.charAt(c) === "\u2029"
+                                    var atEnd = c === p.length || root.pieceBreak.test(p.charAt(c))
                                     if (/^h[1-3]$/.test(root.blockKind) && atEnd) Qt.callLater(function () { root.setBlock("p") })
                                 }
                             }

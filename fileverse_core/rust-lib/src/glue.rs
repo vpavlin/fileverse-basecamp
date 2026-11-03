@@ -90,13 +90,15 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// view's own directory (`view_dir`); `pending` lists the images (references) still
     /// to fetch with `image` before they appear.
     fn rich_html(&self, markdown: String, draft_id: String, view_dir: String) -> String;
-    /// Restyle the editor's text block number `index` ("p", "h1".."h3", "ul", "ol",
-    /// "task", "done", "quote", "code"): `{ html }` with the whole document.
+    /// Restyle the editor's text block at `index` ("p", "h1".."h3", "ul", "ol",
+    /// "task", "done", "quote", "code"): `{ html }` with the whole document. `index` is
+    /// the cursor's text piece, optionally with one flag per table saying whether the
+    /// piece after it is empty: "7" or "7:10" (see `rich::At`).
     fn rich_block(&self, html: String, index: String, kind: String, draft_id: String, view_dir: String) -> String;
     /// Put a picture (a file path or file:// URL) into a draft: kept with the draft on this
     /// device, encrypted and uploaded only when it is published. `{ md, html }` to insert.
     fn draft_add_image(&self, draft_id: String, path: String, view_dir: String) -> String;
-    /// The style of the editor's text block number `index`: `{ kind }`.
+    /// The style of the editor's text block at `index` (as for `rich_block`): `{ kind }`.
     fn rich_kind(&self, html: String, index: String) -> String;
     /// One draft with its Markdown and preview.
     fn draft_get(&self, draft_id: String) -> String;
@@ -698,7 +700,8 @@ impl FileverseCoreModuleImpl {
                 }
                 Some(format!("file://{}", p.display()))
             }),
-            url_of: Box::new(move |src: &str| by_name.get(src.rsplit('/').next()?).cloned()),
+            // (the view may add a query to make Qt load a picture again)
+            url_of: Box::new(move |src: &str| by_name.get(src.split(['?', '#']).next()?.rsplit('/').next()?).cloned()),
         }
     }
 
@@ -1270,7 +1273,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         let saved = self.load_draft(&draft_id).ok().and_then(|(_, d)| d["markdown"].as_str().map(str::to_string)).unwrap_or_default();
         let refs = self.draft_images(&draft_id, &saved);
         let bridge = self.image_bridge(&draft_id, refs, cache);
-        match rich::with_images(bridge, || rich::set_block(&html, index.trim().parse().unwrap_or(usize::MAX), &kind)) {
+        match rich::with_images(bridge, || rich::set_block(&html, rich::At::parse(&index), &kind)) {
             Ok(h) => json!({ "ok": true, "html": h }).to_string(),
             Err(e) => err(e),
         }
@@ -1320,7 +1323,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
     }
 
     fn rich_kind(&self, html: String, index: String) -> String {
-        json!({ "ok": true, "kind": rich::kind_at(&html, index.trim().parse().unwrap_or(usize::MAX)) }).to_string()
+        json!({ "ok": true, "kind": rich::kind_at(&html, rich::At::parse(&index)) }).to_string()
     }
 
     fn draft_get(&self, draft_id: String) -> String {
