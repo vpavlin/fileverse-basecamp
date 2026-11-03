@@ -292,7 +292,7 @@ pub fn open_image(gw: &Gateways, r: &crate::doc::ImageRef) -> Result<(String, Ve
     Ok((mime, plain))
 }
 
-fn sniff_image(b: &[u8]) -> &'static str {
+pub(crate) fn sniff_image(b: &[u8]) -> &'static str {
     match b {
         [0x89, b'P', b'N', b'G', ..] => "image/png",
         [0xff, 0xd8, 0xff, ..] => "image/jpeg",

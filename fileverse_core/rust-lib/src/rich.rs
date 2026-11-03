@@ -12,6 +12,39 @@
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 
+use crate::doc::ImageRef;
+use crate::md::{segments, Segment};
+
+// ── images ───────────────────────────────────────────────────────────────────
+
+/// How images cross between Markdown (`![alt](fvimg:…)`) and the editor, whose
+/// sandbox only loads local files from the view's own directory: `src_of` gives the
+/// file the editor shows for a reference, `url_of` maps such a file back to the
+/// reference. Installed by the caller around a conversion with `with_images`.
+pub struct Images {
+    pub src_of: Box<dyn Fn(&ImageRef) -> Option<String>>,
+    pub url_of: Box<dyn Fn(&str) -> Option<String>>,
+}
+
+thread_local! {
+    static IMAGES: std::cell::RefCell<Option<Images>> = const { std::cell::RefCell::new(None) };
+}
+
+pub fn with_images<T>(images: Images, f: impl FnOnce() -> T) -> T {
+    IMAGES.with(|c| *c.borrow_mut() = Some(images));
+    let out = f();
+    IMAGES.with(|c| *c.borrow_mut() = None);
+    out
+}
+
+fn image_src(r: &ImageRef) -> Option<String> {
+    IMAGES.with(|c| c.borrow().as_ref().and_then(|i| (i.src_of)(r)))
+}
+
+fn image_url(src: &str) -> Option<String> {
+    IMAGES.with(|c| c.borrow().as_ref().and_then(|i| (i.url_of)(src)))
+}
+
 // ── HTML in (Qt's output) ────────────────────────────────────────────────────
 
 enum Tok {
@@ -190,6 +223,9 @@ enum Block {
     Hr,
     /// Header row first.
     Table(Vec<Vec<String>>),
+    /// Side by side (dDocs' columns): each column's blocks; the editor shows them as a
+    /// borderless one-row table.
+    Columns { layout: String, cols: Vec<Vec<Block>> },
     /// An empty text block (Qt keeps them; Markdown drops them).
     Empty,
 }
@@ -202,6 +238,8 @@ impl Block {
         match self {
             Block::Code(lines) => lines.len().max(1),
             Block::Table(_) => 0,
+            // cells are separated otherwise; the blocks inside one cell by paragraph breaks
+            Block::Columns { cols, .. } => cols.iter().map(|c| c.iter().map(Block::qt_blocks).sum::<usize>().saturating_sub(1)).sum(),
             _ => 1,
         }
     }
@@ -252,17 +290,25 @@ fn escape_md(t: &str) -> String {
 /// each run's trimmed text, so `**bold **` cannot happen.
 struct InlineBuf {
     runs: Vec<(Style, Option<String>, String)>,
+    /// Markdown to keep as is (an image), at the position of the run with that index.
+    raw: Vec<(usize, String)>,
 }
 
 impl InlineBuf {
     fn new() -> Self {
-        InlineBuf { runs: vec![] }
+        InlineBuf { runs: vec![], raw: vec![] }
+    }
+    fn push_raw(&mut self, md: String) {
+        self.raw.push((self.runs.len(), md));
+        // a boundary, so text after it does not merge into the run before
+        self.runs.push((Style::default(), None, String::new()));
     }
     fn push(&mut self, st: Style, link: Option<String>, text: &str) {
         if text.is_empty() {
             return;
         }
-        if let Some(last) = self.runs.last_mut() {
+        let boundary = self.raw.last().map(|(k, _)| *k + 1 == self.runs.len()).unwrap_or(false);
+        if let Some(last) = self.runs.last_mut().filter(|_| !boundary) {
             if last.0 == st && last.1 == link {
                 last.2.push_str(text);
                 return;
@@ -273,7 +319,11 @@ impl InlineBuf {
     fn markdown(&self, plain_bold_ok: bool) -> String {
         let mut out = String::new();
         let mut i = 0;
+        let raw_at = |i: usize| self.raw.iter().filter(move |(k, _)| *k == i).map(|(_, m)| m.as_str());
         while i < self.runs.len() {
+            for m in raw_at(i) {
+                out.push_str(m);
+            }
             // a link spans consecutive runs with the same href
             if let Some(href) = &self.runs[i].1 {
                 let mut j = i;
@@ -316,16 +366,18 @@ fn mark(st: &Style, text: &str, bold_ok: bool) -> String {
 /// Qt's HTML (from `TextArea.text` in RichText mode) -> blocks.
 fn blocks_from_html(html: &str) -> Vec<Block> {
     let toks = tokenize(html);
+    // inside <body> only (Qt always writes one)
+    let start = toks.iter().position(|t| matches!(t, Tok::Open(n, _) if n == "body")).map(|b| b + 1).unwrap_or(0);
+    blocks_from_toks(&toks[start..])
+}
+
+fn blocks_from_toks(toks: &[Tok]) -> Vec<Block> {
     let mut blocks = vec![];
     // list stack: (ordered)
     let mut lists: Vec<bool> = vec![];
     let mut list_id = 0usize;
     let mut quote_depth = 0usize;
     let mut i = 0;
-    // inside <body> only (Qt always writes one)
-    if let Some(b) = toks.iter().position(|t| matches!(t, Tok::Open(n, _) if n == "body")) {
-        i = b + 1;
-    }
     let mut code_run: Vec<String> = vec![];
     let flush_code = |code_run: &mut Vec<String>, blocks: &mut Vec<Block>| {
         if !code_run.is_empty() {
@@ -359,7 +411,7 @@ fn blocks_from_html(html: &str) -> Vec<Block> {
                 let name = n.clone();
                 let css = attr(a, "style").to_string();
                 let class = attr(a, "class").to_string();
-                let (buf, plain, next) = read_inline(&toks, i + 1, &name);
+                let (buf, plain, next) = read_inline(toks, i + 1, &name);
                 i = next;
                 let empty = css.contains("-qt-paragraph-type:empty") || plain.trim().is_empty();
                 if name == "pre" {
@@ -395,9 +447,22 @@ fn blocks_from_html(html: &str) -> Vec<Block> {
                 blocks.push(Block::Hr);
                 i += 1;
             }
-            Tok::Open(n, _) if n == "table" => {
+            Tok::Open(n, a) if n == "table" => {
                 flush_code(&mut code_run, &mut blocks);
-                let (rows, next) = read_table(&toks, i + 1);
+                // a borderless single-row table is how the editor shows columns
+                if attr(a, "border") == "0" {
+                    if let Some((cols, widths, next)) = read_columns(toks, i + 1) {
+                        let layout = match (widths.first(), widths.last()) {
+                            (Some(&f), Some(&l)) if widths.len() >= 2 && f > l * 1.5 => "align-right",
+                            (Some(&f), Some(&l)) if widths.len() >= 2 && l > f * 1.5 => "align-left",
+                            _ => "align-center",
+                        };
+                        blocks.push(Block::Columns { layout: layout.into(), cols });
+                        i = next;
+                        continue;
+                    }
+                }
+                let (rows, next) = read_table(toks, i + 1);
                 i = next;
                 if !rows.is_empty() {
                     blocks.push(Block::Table(rows));
@@ -433,6 +498,13 @@ fn read_inline(toks: &[Tok], mut i: usize, end: &str) -> (InlineBuf, String, usi
             Tok::Open(n, _) if matches!(n.as_str(), "p" | "h1" | "h2" | "h3" | "h4" | "h5" | "h6" | "pre" | "table") && n != end => {
                 if end != "li" {
                     return (buf, plain, i);
+                }
+                i += 1;
+            }
+            Tok::Open(n, a) if n == "img" => {
+                if let Some(url) = image_url(attr(a, "src")) {
+                    buf.push_raw(format!("![{}]({url})", attr(a, "alt").replace(['[', ']'], "")));
+                    plain.push_str("[image]");
                 }
                 i += 1;
             }
@@ -479,6 +551,47 @@ fn read_inline(toks: &[Tok], mut i: usize, end: &str) -> (InlineBuf, String, usi
         }
     }
     (buf, plain, i)
+}
+
+/// A one-row table read as columns: each cell's blocks and its width (%), and the
+/// token after the table. `None` when it has more than one row.
+fn read_columns(toks: &[Tok], start: usize) -> Option<(Vec<Vec<Block>>, Vec<f64>, usize)> {
+    let mut i = start;
+    let mut rows = 0;
+    let mut cols = vec![];
+    let mut widths = vec![];
+    let mut depth = 0usize; // nested tables
+    while i < toks.len() {
+        match &toks[i] {
+            Tok::Open(n, _) if n == "table" => depth += 1,
+            Tok::Close(n) if n == "table" => {
+                if depth == 0 {
+                    return (rows == 1 && !cols.is_empty()).then_some((cols, widths, i + 1));
+                }
+                depth -= 1;
+            }
+            Tok::Open(n, _) if n == "tr" && depth == 0 => rows += 1,
+            Tok::Open(n, a) if (n == "td" || n == "th") && depth == 0 => {
+                widths.push(attr(a, "width").trim_end_matches('%').parse::<f64>().unwrap_or(0.0));
+                // the cell's tokens, up to its own closing tag
+                let (from, mut j, mut d) = (i + 1, i + 1, 0usize);
+                while j < toks.len() {
+                    match &toks[j] {
+                        Tok::Open(t, _) if t == "table" => d += 1,
+                        Tok::Close(t) if t == "table" => d = d.saturating_sub(1),
+                        Tok::Close(t) if (t == "td" || t == "th") && d == 0 => break,
+                        _ => {}
+                    }
+                    j += 1;
+                }
+                cols.push(blocks_from_toks(&toks[from..j]));
+                i = j;
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
 }
 
 fn read_table(toks: &[Tok], mut i: usize) -> (Vec<Vec<String>>, usize) {
@@ -582,6 +695,20 @@ fn blocks_to_md(blocks: &[Block]) -> String {
                     out.push_str(&row(r));
                 }
             }
+            Block::Columns { layout, cols } => {
+                out.push_str(&format!("::: columns {layout}\n\n"));
+                for (k, c) in cols.iter().enumerate() {
+                    if k > 0 {
+                        out.push_str("::: column\n\n");
+                    }
+                    let inner = blocks_to_md(c);
+                    if !inner.trim().is_empty() {
+                        out.push_str(inner.trim_end());
+                        out.push_str("\n\n");
+                    }
+                }
+                out.push_str(":::");
+            }
             Block::Empty => {}
         }
         prev_list = list;
@@ -618,26 +745,61 @@ fn esc_html(t: &str) -> String {
 }
 
 /// Markdown -> HTML that Qt's importer turns into the same blocks `to_md` reads.
+/// Columns become a borderless one-row table, `fvimg:` images `<img>` (when an image
+/// bridge is installed, see `with_images`).
 pub fn to_html(md: &str) -> String {
+    let mut out = String::from("<html><body>");
+    for seg in segments(md) {
+        match seg {
+            Segment::Md(m) => out.push_str(&md_html(&m, 560)),
+            Segment::Columns { layout, cols } => {
+                let n = cols.len().max(1) as f64;
+                let w: Vec<f64> = (0..cols.len())
+                    .map(|k| match layout.as_str() {
+                        "align-right" if cols.len() >= 2 => if k == 0 { 2.0 } else { 1.0 },
+                        "align-left" if cols.len() >= 2 => if k + 1 == cols.len() { 2.0 } else { 1.0 },
+                        _ => 1.0,
+                    })
+                    .collect();
+                let total: f64 = w.iter().sum::<f64>().max(1.0);
+                out.push_str("<table border=\"0\" width=\"100%\" cellpadding=\"8\"><tr>");
+                for (k, c) in cols.iter().enumerate() {
+                    let pct = (w[k] / total * 100.0).round();
+                    out.push_str(&format!("<td width=\"{pct}%\" valign=\"top\">"));
+                    out.push_str(&md_html(c, (520.0 * w[k] / total * n / n).max(160.0) as u32));
+                    out.push_str("</td>");
+                }
+                out.push_str("</tr></table>");
+            }
+        }
+    }
+    out
+}
+
+/// One run of plain Markdown as HTML (no wrapper). `img_width`: how wide images show.
+fn md_html(md: &str, img_width: u32) -> String {
     let mut opts = Options::empty();
     opts.insert(Options::ENABLE_STRIKETHROUGH);
     opts.insert(Options::ENABLE_TABLES);
     opts.insert(Options::ENABLE_TASKLISTS);
-    let mut out = String::from("<html><body>");
+    let mut out = String::new();
     let mut in_code = false;
     let mut code = String::new();
     let mut item_open: Vec<bool> = vec![];
     // Task markers arrive after the <li> start; remember where it was written.
     let mut li_at: Option<usize> = None;
     let mut table_head = false;
-    let mut image_alt: Option<String> = None;
+    let mut image_alt: Option<(String, String)> = None; // (alt so far, destination)
     for ev in Parser::new_ext(md, opts) {
-        if let Some(alt) = image_alt.as_mut() {
+        if let Some((alt, dest)) = image_alt.as_mut() {
             match ev {
                 Event::End(TagEnd::Image) => {
-                    let a = std::mem::take(alt);
+                    let (a, d) = (std::mem::take(alt), std::mem::take(dest));
                     image_alt = None;
-                    out.push_str(&esc_html(&format!("[image{}]", if a.is_empty() { String::new() } else { format!(": {a}") })));
+                    match ImageRef::from_url(&d).and_then(|r| image_src(&r)) {
+                        Some(src) => out.push_str(&format!("<img src=\"{}\" width=\"{img_width}\" alt=\"{}\" />", esc_html(&src), esc_html(&a))),
+                        None => out.push_str(&esc_html(&format!("[image{}]", if a.is_empty() { String::new() } else { format!(": {a}") }))),
+                    }
                 }
                 Event::Text(t) | Event::Code(t) => alt.push_str(&t),
                 _ => {}
@@ -724,7 +886,7 @@ pub fn to_html(md: &str) -> String {
             Event::End(TagEnd::Strikethrough) => out.push_str("</s>"),
             Event::Start(Tag::Link { dest_url, .. }) => out.push_str(&format!("<a href=\"{}\">", esc_html(&dest_url))),
             Event::End(TagEnd::Link) => out.push_str("</a>"),
-            Event::Start(Tag::Image { .. }) => image_alt = Some(String::new()),
+            Event::Start(Tag::Image { dest_url, .. }) => image_alt = Some((String::new(), dest_url.to_string())),
             Event::Code(t) => out.push_str(&format!("<code>{}</code>", esc_html(&t))),
             Event::Text(t) => {
                 if in_code {
@@ -776,7 +938,7 @@ fn kind_of(b: &Block) -> &'static str {
         Block::Item { ordered: true, .. } => "ol",
         Block::Item { .. } => "ul",
         Block::Code(_) => "code",
-        Block::Table(_) => "table",
+        Block::Table(_) | Block::Columns { .. } => "table",
         Block::Hr => "hr",
         _ => "p",
     }
@@ -807,6 +969,9 @@ pub fn kind_at(html: &str, index: usize) -> String {
 pub fn set_block(html: &str, index: usize, kind: &str) -> Result<String, String> {
     let mut blocks = blocks_from_html(html);
     let (i, line) = locate(&blocks, index).ok_or("the cursor is not in a text block this editor can restyle")?;
+    if matches!(blocks[i], Block::Table(_) | Block::Columns { .. }) {
+        return Err("tables and columns keep their layout".into());
+    }
     let inline_of = |b: &Block| -> String {
         match b {
             Block::Heading(_, t) | Block::Para(t) | Block::Quote(t) => t.clone(),
@@ -969,6 +1134,67 @@ li.checked::marker { content: "\2612"; }
         // nested item keeps its depth
         assert!(md(set_block(QT_HTML, 4, "task").unwrap()).contains("    - [ ] nested"));
         assert!(set_block(QT_HTML, 99, "p").is_err());
+    }
+
+    fn bridge() -> Images {
+        Images {
+            src_of: Box::new(|r: &ImageRef| Some(format!("file:///cache/{}.png", if r.local.is_empty() { r.cid.clone() } else { r.local.replace('/', "_") }))),
+            url_of: Box::new(|src: &str| {
+                let name = src.rsplit('/').next()?.trim_end_matches(".png");
+                Some(if name.starts_with("Qm") {
+                    ImageRef { cid: name.into(), key: "k".into(), nonce: "n".into(), tag: "t".into(), ..Default::default() }.to_url()
+                } else {
+                    ImageRef { local: name.replacen('_', "/", 1), ..Default::default() }.to_url()
+                })
+            }),
+        }
+    }
+
+    #[test]
+    fn columns_and_images_cross_the_editor() {
+        let img = ImageRef { cid: "QmPic".into(), key: "k".into(), nonce: "n".into(), tag: "t".into(), ..Default::default() };
+        let md = format!("## Beside\n\n::: columns align-right\n\n- one\n- **two**\n\n::: column\n\n![a lambda]({})\n\n:::\n\nAfter\n", img.to_url());
+        let (html, back) = with_images(bridge(), || {
+            let h = to_html(&md);
+            let b = to_md(&h);
+            (h, b)
+        });
+        assert!(html.contains("<table border=\"0\" width=\"100%\"") && html.contains("width=\"67%\"") && html.contains("src=\"file:///cache/QmPic.png\""), "{html}");
+        assert!(back.contains("::: columns align-right") && back.contains("- **two**") && back.contains("::: column"), "{back}");
+        let refs: Vec<ImageRef> = back.split("](").skip(1).filter_map(|r| ImageRef::from_url(r.split(')').next().unwrap())).collect();
+        assert_eq!(refs.len(), 1, "{back}");
+        assert_eq!(refs[0].cid, "QmPic");
+        assert!(back.trim_end().ends_with("After"), "{back}");
+    }
+
+    /// What Qt 6.9 writes back for the editor's columns and an image (captured with a
+    /// TextArea in RichText mode; styles trimmed).
+    #[test]
+    fn qt_columns_and_images() {
+        let qt = r#"<html><body>
+<p>Before</p>
+<table border="0" width="100%" cellspacing="2" cellpadding="6">
+<tr>
+<td width="66%">
+<p>Left <span style=" font-weight:700;">text</span></p>
+<ul>
+<li>one</li></ul></td>
+<td width="34%">
+<p><img src="file:///cache/QmPic.png" width="300" /></p></td></tr></table>
+<table border="1" cellspacing="2" cellpadding="4">
+<tr>
+<td>
+<p align="center"><span style=" font-weight:700;">a</span></p></td></tr>
+<tr>
+<td>
+<p>1</p></td></tr></table>
+<p>After <img src="file:///cache/d1_x.png" width="120" /></p></body></html>"#;
+        let md = with_images(bridge(), || to_md(qt));
+        assert!(md.starts_with("Before\n\n::: columns align-right\n\nLeft **text**\n\n- one\n\n::: column\n\n![](fvimg:"), "{md}");
+        assert!(md.contains("| a |\n| --- |\n| 1 |"), "a real table stays a table: {md}");
+        assert!(md.contains("After ![](fvimg:"), "{md}");
+        // without a bridge (no image support) images drop out, text stays
+        assert!(!to_md(qt).contains("fvimg"));
     }
 
     #[test]

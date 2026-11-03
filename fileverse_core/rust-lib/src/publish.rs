@@ -18,6 +18,46 @@ pub const LINK_PREFIX: &str = "fvbc://ipfs/";
 /// One block per file: what Kubo's block/put and bitswap accept.
 pub const MAX_FILE: usize = 1024 * 1024;
 
+/// The images a draft holds on this device (`fvimg:` references with `local`), as a
+/// reader will see them: each encrypted with a fresh key (AES-256-GCM, 12-byte IV, the
+/// tag kept apart as dDocs does) and stored as UnixFS blocks. Returns the Markdown with
+/// those references replaced, and the blocks to publish.
+pub fn upload_local_images(
+    markdown: &str,
+    read_local: impl Fn(&str) -> Result<Vec<u8>, String>,
+) -> Result<(String, Vec<(String, Vec<u8>)>), String> {
+    let mut out = markdown.to_string();
+    let mut blocks = vec![];
+    let mut done: Vec<String> = vec![];
+    for part in markdown.split("](").skip(1) {
+        let url = part.split(')').next().unwrap_or("");
+        let Some(r) = crate::doc::ImageRef::from_url(url) else { continue };
+        if r.local.is_empty() || done.iter().any(|d| d == url) {
+            continue;
+        }
+        let bytes = read_local(&r.local)?;
+        let key: [u8; 32] = crypto::random();
+        let iv: [u8; 12] = crypto::random();
+        let mut ct = crypto::gcm_seal(&key, &iv, &bytes)?;
+        let tag = ct.split_off(ct.len() - 16);
+        let (cid, b) = crate::ipfs::unixfs_file(&ct);
+        blocks.extend(b);
+        let up = crate::doc::ImageRef {
+            cid,
+            key: b64::encode(&key),
+            nonce: b64::encode(&iv),
+            tag: b64::encode(&tag),
+            mime: r.mime.clone(),
+            width: r.width.clone(),
+            align: r.align.clone(),
+            local: String::new(),
+        };
+        out = out.replace(&format!("]({url})"), &format!("]({})", up.to_url()));
+        done.push(url.to_string());
+    }
+    Ok((out, blocks))
+}
+
 pub struct Published {
     pub link: String,
     pub manifest: String,

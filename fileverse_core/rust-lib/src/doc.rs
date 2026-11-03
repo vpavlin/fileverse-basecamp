@@ -55,17 +55,39 @@ pub struct Block {
 /// tag in the node's attributes (`encryptionKey`, `nonce`, `authTag`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, serde::Deserialize)]
 pub struct ImageRef {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub cid: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub nonce: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tag: String,
     #[serde(default)]
     pub mime: String,
     /// The node's width (`100%`, `320px`, …) and alignment, as dDocs stores them.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub width: String,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub align: String,
+    /// A draft's own image, not uploaded yet: `<draft id>/<file>` in the drafts folder.
+    /// Publishing encrypts it and replaces it with a `cid` reference.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub local: String,
+}
+
+/// Images in this app's Markdown: `![alt](fvimg:<base64url of the reference as JSON>)`.
+pub const IMAGE_SCHEME: &str = "fvimg:";
+
+impl ImageRef {
+    pub fn to_url(&self) -> String {
+        format!("{IMAGE_SCHEME}{}", crate::b64::encode_url(serde_json::to_string(self).unwrap_or_default().as_bytes()))
+    }
+    pub fn from_url(u: &str) -> Option<ImageRef> {
+        let b = crate::b64::decode(u.strip_prefix(IMAGE_SCHEME)?).ok()?;
+        let r: ImageRef = serde_json::from_slice(&b).ok()?;
+        (!r.local.is_empty() || (!r.cid.is_empty() && !r.key.is_empty())).then_some(r)
+    }
 }
 
 /// The IPFS CID of an image node: `ipfsHash` (possibly lane-prefixed) or the path of
@@ -414,7 +436,11 @@ fn walk<T: ReadTxn>(txn: &T, node: &XmlOut, ctx: &Ctx, blocks: &mut Vec<Block>) 
             let caption = attr(txn, e, "caption").or_else(|| attr(txn, e, "alt")).unwrap_or_default();
             let i = Inline { html: escape(&caption), text: caption.clone(), md: String::new() };
             let a = |k: &str| attr(txn, e, k).unwrap_or_default();
-            let img = image_cid(&a("ipfsHash"), &a("ipfsUrl")).and_then(|cid| {
+            let local = a("localRef");
+            let img = if !local.is_empty() {
+                Some(ImageRef { local, mime: a("mimeType"), width: a("width"), align: a("dataAlign"), ..Default::default() })
+            } else {
+                image_cid(&a("ipfsHash"), &a("ipfsUrl")).and_then(|cid| {
                 let (key, nonce, tag) = (a("encryptionKey"), a("nonce"), a("authTag"));
                 (!key.is_empty() && !nonce.is_empty() && !tag.is_empty()).then(|| ImageRef {
                     cid,
@@ -424,8 +450,10 @@ fn walk<T: ReadTxn>(txn: &T, node: &XmlOut, ctx: &Ctx, blocks: &mut Vec<Block>) 
                     mime: a("mimeType"),
                     width: a("width"),
                     align: a("dataAlign"),
+                    local: String::new(),
                 })
-            });
+            })
+            };
             push(blocks, ctx, "image", i).img = img;
         }
         "columns" => {
@@ -611,10 +639,25 @@ fn blocks_md(blocks: &[Block], md: &mut String) {
     {
         for b in blocks {
             if b.t == "columns" {
-                // Markdown has no columns: the columns follow each other.
-                for c in &b.cols {
-                    blocks_md(c, md);
+                // This app's Markdown keeps columns: `::: columns <layout>`, `::: column`, `:::`.
+                if !md.is_empty() && !md.ends_with("\n\n") {
+                    md.push('\n');
                 }
+                md.push_str(&format!("::: columns {}\n\n", if b.layout.is_empty() { "align-center" } else { &b.layout }));
+                for (k, c) in b.cols.iter().enumerate() {
+                    if k > 0 {
+                        md.push_str("::: column\n\n");
+                    }
+                    blocks_md(c, md);
+                    if !md.ends_with("\n\n") {
+                        md.push('\n');
+                    }
+                }
+                md.push_str(":::\n\n");
+                continue;
+            }
+            // an empty paragraph (the line an image was written on) adds nothing
+            if b.t == "p" && b.md.trim().is_empty() {
                 continue;
             }
             let indent = "  ".repeat(b.depth as usize);
@@ -626,7 +669,10 @@ fn blocks_md(blocks: &[Block], md: &mut String) {
                 "task" => format!("{indent}- [{}] {}", if b.checked == Some(true) { "x" } else { " " }, b.md),
                 "code" => format!("```{}\n{}\n```", b.lang, b.md),
                 "hr" | "pagebreak" => "---".into(),
-                "image" => format!("*[image{}]*", if b.text.is_empty() { String::new() } else { format!(": {}", b.text) }),
+                "image" => match &b.img {
+                    Some(r) => format!("![{}]({})", b.text.replace([']', '['], ""), r.to_url()),
+                    None => format!("*[image{}]*", if b.text.is_empty() { String::new() } else { format!(": {}", b.text) }),
+                },
                 "embed" => format!("<{}>", b.md),
                 "table" => b.md.trim_end().to_string(),
                 _ => b.md.clone(),

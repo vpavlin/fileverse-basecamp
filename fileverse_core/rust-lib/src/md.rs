@@ -8,6 +8,8 @@ use std::sync::Arc;
 
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use yrs::types::Attrs;
+
+use crate::doc::ImageRef;
 use yrs::{Any, Doc, ReadTxn, Text, Transact, Xml, XmlElementPrelim, XmlElementRef, XmlFragment, XmlTextPrelim, XmlTextRef};
 
 #[derive(Default, Clone)]
@@ -60,6 +62,74 @@ struct Builder<'a> {
     code_lang: String,
     code_buf: Option<String>,
     in_table_head: bool,
+    /// Where top-level blocks go: the fragment (each in a dBlock) or a column.
+    root: Option<XmlElementRef>,
+    /// An `fvimg:` image being read: its reference and alt text so far.
+    image: Option<(ImageRef, String)>,
+}
+
+/// This app's Markdown dialect adds columns (dDocs' image beside text):
+///
+/// ```text
+/// ::: columns align-right
+/// left column
+/// ::: column
+/// right column
+/// :::
+/// ```
+#[derive(Debug, PartialEq)]
+pub enum Segment {
+    Md(String),
+    Columns { layout: String, cols: Vec<String> },
+}
+
+/// Split Markdown into plain parts and column blocks (top level, outside code fences).
+pub fn segments(md: &str) -> Vec<Segment> {
+    let mut out = vec![];
+    let mut plain = String::new();
+    let mut cols: Option<(String, Vec<String>)> = None;
+    let mut fence = false;
+    for line in md.split_inclusive('\n') {
+        let t = line.trim();
+        if t.starts_with("```") {
+            fence = !fence;
+        }
+        if !fence {
+            let word = t.strip_prefix(":::").map(|r| r.trim());
+            match (word, cols.as_mut()) {
+                (Some(w), None) if w == "columns" || w.starts_with("columns ") => {
+                    if !plain.trim().is_empty() {
+                        out.push(Segment::Md(std::mem::take(&mut plain)));
+                    }
+                    plain.clear();
+                    let layout = w.strip_prefix("columns").unwrap_or("").trim();
+                    cols = Some((if layout.is_empty() { "align-center".into() } else { layout.to_string() }, vec![String::new()]));
+                    continue;
+                }
+                (Some("column"), Some((_, c))) => {
+                    c.push(String::new());
+                    continue;
+                }
+                (Some(""), Some(_)) => {
+                    let (layout, c) = cols.take().unwrap();
+                    out.push(Segment::Columns { layout, cols: c });
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        match cols.as_mut() {
+            Some((_, c)) => c.last_mut().unwrap().push_str(line),
+            None => plain.push_str(line),
+        }
+    }
+    if let Some((layout, c)) = cols {
+        out.push(Segment::Columns { layout, cols: c });
+    }
+    if !plain.trim().is_empty() {
+        out.push(Segment::Md(plain));
+    }
+    out
 }
 
 impl<'a> Builder<'a> {
@@ -75,14 +145,52 @@ impl<'a> Builder<'a> {
         self.text = None;
         let el = match self.stack.last() {
             Some(Node::El(p)) => p.push_back(&mut self.txn, XmlElementPrelim::empty(tag)),
-            _ => {
-                // top level: dDocs wraps every block in a dBlock
-                let d = self.frag.push_back(&mut self.txn, XmlElementPrelim::empty("dBlock"));
-                d.push_back(&mut self.txn, XmlElementPrelim::empty(tag))
-            }
+            _ => self.top_level(tag),
         };
         self.stack.push(Node::El(el.clone()));
         el
+    }
+
+    /// A new top-level block: in a column as is, in the document wrapped in a dBlock.
+    fn top_level(&mut self, tag: &str) -> XmlElementRef {
+        match self.root.clone() {
+            Some(col) => col.push_back(&mut self.txn, XmlElementPrelim::empty(tag)),
+            None => {
+                let d = self.frag.push_back(&mut self.txn, XmlElementPrelim::empty("dBlock"));
+                d.push_back(&mut self.txn, XmlElementPrelim::empty(tag))
+            }
+        }
+    }
+
+    /// An image is a block of its own in dDocs (`resizableMedia`), placed after the
+    /// paragraph it was written in.
+    fn media(&mut self, r: &ImageRef, alt: &str) {
+        self.close_implicit();
+        self.text = None;
+        let container = self.stack.iter().rev().find_map(|n| match n {
+            Node::El(e) if !matches!(e.tag().as_ref(), "paragraph" | "heading") => Some(e.clone()),
+            _ => None,
+        });
+        let el = match container {
+            Some(c) => c.push_back(&mut self.txn, XmlElementPrelim::empty("resizableMedia")),
+            None => self.top_level("resizableMedia"),
+        };
+        let mut attrs: Vec<(&str, String)> = vec![];
+        if r.local.is_empty() {
+            attrs.extend([("ipfsHash", r.cid.clone()), ("encryptionKey", r.key.clone()), ("nonce", r.nonce.clone()), ("authTag", r.tag.clone())]);
+        } else {
+            attrs.push(("localRef", r.local.clone()));
+        }
+        attrs.push(("mimeType", r.mime.clone()));
+        attrs.push(("width", if r.width.is_empty() { "100%".into() } else { r.width.clone() }));
+        attrs.push(("dataAlign", if r.align.is_empty() { "center".into() } else { r.align.clone() }));
+        attrs.push(("media-type", "img".into()));
+        attrs.push(("caption", alt.to_string()));
+        for (k, v) in attrs {
+            if !v.is_empty() {
+                el.insert_attribute(&mut self.txn, k, v);
+            }
+        }
     }
 
     fn pop(&mut self) {
@@ -107,10 +215,7 @@ impl<'a> Builder<'a> {
         if need {
             let el = match self.stack.last() {
                 Some(Node::El(p)) => p.push_back(&mut self.txn, XmlElementPrelim::empty("paragraph")),
-                _ => {
-                    let d = self.frag.push_back(&mut self.txn, XmlElementPrelim::empty("dBlock"));
-                    d.push_back(&mut self.txn, XmlElementPrelim::empty("paragraph"))
-                }
+                _ => self.top_level("paragraph"),
             };
             self.text = None;
             self.stack.push(Node::Implicit(el));
@@ -159,154 +264,191 @@ pub fn to_yjs(markdown: &str) -> Vec<u8> {
         let txn = doc.transact_mut();
         let mut b = Builder {
             txn,
-            frag,
+            frag: frag.clone(),
             stack: vec![Node::Frag],
             text: None,
             marks: Marks::default(),
             code_lang: String::new(),
             code_buf: None,
             in_table_head: false,
+            root: None,
+            image: None,
         };
-        let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
-        let events: Vec<Event> = Parser::new_ext(markdown, opts).collect();
-        // A list is a task list when its first item starts with a task marker.
-        let is_task_list = |i: usize| -> bool {
-            matches!(events.get(i + 1), Some(Event::Start(Tag::Item)))
-                && matches!(
-                    events.get(i + 2),
-                    Some(Event::TaskListMarker(_))
-                ) || (matches!(events.get(i + 2), Some(Event::Start(Tag::Paragraph)))
-                    && matches!(events.get(i + 3), Some(Event::TaskListMarker(_))))
-        };
-        let mut task_lists: Vec<bool> = vec![];
-        for (i, ev) in events.iter().cloned().enumerate() {
-            if let Some(buf) = b.code_buf.as_mut() {
-                match ev {
-                    Event::Text(t) => {
-                        buf.push_str(&t);
-                        continue;
+        for seg in segments(markdown) {
+            match seg {
+                Segment::Md(m) => {
+                    b.root = None;
+                    b.feed(&m);
+                }
+                Segment::Columns { layout, cols } => {
+                    b.root = None;
+                    let d = frag.push_back(&mut b.txn, XmlElementPrelim::empty("dBlock"));
+                    let c = d.push_back(&mut b.txn, XmlElementPrelim::empty("columns"));
+                    c.insert_attribute(&mut b.txn, "layout", layout);
+                    for col in cols {
+                        let el = c.push_back(&mut b.txn, XmlElementPrelim::empty("column"));
+                        b.root = Some(el);
+                        b.feed(&col);
                     }
-                    Event::End(TagEnd::CodeBlock) => {}
-                    _ => continue,
+                    b.root = None;
                 }
-            }
-            match ev {
-                Event::Start(Tag::Paragraph) => {
-                    b.push_el("paragraph");
-                }
-                Event::End(TagEnd::Paragraph) => b.pop(),
-                Event::Start(Tag::Heading { level: l, .. }) => {
-                    let el = b.push_el("heading");
-                    el.insert_attribute(&mut b.txn, "level", level(l).to_string());
-                }
-                Event::End(TagEnd::Heading(_)) => b.pop(),
-                Event::Start(Tag::BlockQuote(_)) => {
-                    b.push_el("blockquote");
-                }
-                Event::End(TagEnd::BlockQuote(_)) => b.pop(),
-                Event::Start(Tag::List(start)) => {
-                    let task = start.is_none() && is_task_list(i);
-                    task_lists.push(task);
-                    let tag = if task { "taskList" } else if start.is_some() { "orderedList" } else { "bulletList" };
-                    let el = b.push_el(tag);
-                    if let Some(n) = start {
-                        el.insert_attribute(&mut b.txn, "start", n.to_string());
-                    }
-                }
-                Event::End(TagEnd::List(_)) => {
-                    task_lists.pop();
-                    b.pop();
-                }
-                Event::Start(Tag::Item) => {
-                    let task = task_lists.last().copied().unwrap_or(false);
-                    b.push_el(if task { "taskItem" } else { "listItem" });
-                }
-                Event::End(TagEnd::Item) => b.pop(),
-                Event::TaskListMarker(done) => {
-                    // the marker follows the item (or its first paragraph) start
-                    for n in b.stack.iter().rev() {
-                        if let Node::El(e) = n {
-                            if e.tag().as_ref() == "taskItem" {
-                                e.insert_attribute(&mut b.txn, "checked", done.to_string());
-                                break;
-                            }
-                        }
-                    }
-                }
-                Event::Start(Tag::CodeBlock(kind)) => {
-                    b.code_lang = match kind {
-                        CodeBlockKind::Fenced(l) => l.to_string(),
-                        CodeBlockKind::Indented => String::new(),
-                    };
-                    b.code_buf = Some(String::new());
-                }
-                Event::End(TagEnd::CodeBlock) => {
-                    let code = b.code_buf.take().unwrap_or_default();
-                    let el = b.push_el("codeBlock");
-                    if !b.code_lang.is_empty() {
-                        el.insert_attribute(&mut b.txn, "language", b.code_lang.clone());
-                    }
-                    let t = el.push_back(&mut b.txn, XmlTextPrelim::new(""));
-                    t.insert(&mut b.txn, 0, code.trim_end_matches('\n'));
-                    b.pop();
-                }
-                Event::Rule => {
-                    b.push_el("horizontalRule");
-                    b.pop();
-                }
-                Event::Start(Tag::Table(_)) => {
-                    b.push_el("table");
-                }
-                Event::End(TagEnd::Table) => b.pop(),
-                Event::Start(Tag::TableHead) => {
-                    b.in_table_head = true;
-                    b.push_el("tableRow");
-                }
-                Event::End(TagEnd::TableHead) => {
-                    b.in_table_head = false;
-                    b.pop();
-                }
-                Event::Start(Tag::TableRow) => {
-                    b.push_el("tableRow");
-                }
-                Event::End(TagEnd::TableRow) => b.pop(),
-                Event::Start(Tag::TableCell) => {
-                    let tag = if b.in_table_head { "tableHeader" } else { "tableCell" };
-                    b.push_el(tag);
-                    b.push_el("paragraph");
-                }
-                Event::End(TagEnd::TableCell) => {
-                    b.pop();
-                    b.pop();
-                }
-                Event::Start(Tag::Strong) => b.marks.bold = true,
-                Event::End(TagEnd::Strong) => b.marks.bold = false,
-                Event::Start(Tag::Emphasis) => b.marks.italic = true,
-                Event::End(TagEnd::Emphasis) => b.marks.italic = false,
-                Event::Start(Tag::Strikethrough) => b.marks.strike = true,
-                Event::End(TagEnd::Strikethrough) => b.marks.strike = false,
-                Event::Start(Tag::Link { dest_url, .. }) => b.marks.link = Some(dest_url.to_string()),
-                Event::End(TagEnd::Link) => b.marks.link = None,
-                Event::Start(Tag::Image { dest_url, .. }) => {
-                    // Images are not uploaded by this editor; keep the reference as a link.
-                    b.marks.link = Some(dest_url.to_string());
-                }
-                Event::End(TagEnd::Image) => b.marks.link = None,
-                Event::Code(c) => {
-                    b.marks.code = true;
-                    b.insert(&c);
-                    b.marks.code = false;
-                }
-                Event::Text(t) => b.insert(&t),
-                Event::SoftBreak => b.insert(" "),
-                Event::HardBreak => b.hard_break(),
-                Event::Html(h) | Event::InlineHtml(h) => b.insert(&h),
-                _ => {}
             }
         }
     }
     let txn = doc.transact();
     txn.encode_state_as_update_v1(&yrs::StateVector::default())
+}
+
+impl Builder<'_> {
+    /// Add one run of Markdown at the builder's root.
+    fn feed(&mut self, markdown: &str) {
+        let b = self;
+        b.stack = vec![Node::Frag];
+        b.text = None;
+        b.marks = Marks::default();
+    let opts = Options::ENABLE_TABLES | Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let events: Vec<Event> = Parser::new_ext(markdown, opts).collect();
+    // A list is a task list when its first item starts with a task marker.
+    let is_task_list = |i: usize| -> bool {
+        matches!(events.get(i + 1), Some(Event::Start(Tag::Item)))
+            && matches!(
+                events.get(i + 2),
+                Some(Event::TaskListMarker(_))
+            ) || (matches!(events.get(i + 2), Some(Event::Start(Tag::Paragraph)))
+                && matches!(events.get(i + 3), Some(Event::TaskListMarker(_))))
+    };
+    let mut task_lists: Vec<bool> = vec![];
+    for (i, ev) in events.iter().cloned().enumerate() {
+        if let Some(buf) = b.code_buf.as_mut() {
+            match ev {
+                Event::Text(t) => {
+                    buf.push_str(&t);
+                    continue;
+                }
+                Event::End(TagEnd::CodeBlock) => {}
+                _ => continue,
+            }
+        }
+        match ev {
+            Event::Start(Tag::Paragraph) => {
+                b.push_el("paragraph");
+            }
+            Event::End(TagEnd::Paragraph) => b.pop(),
+            Event::Start(Tag::Heading { level: l, .. }) => {
+                let el = b.push_el("heading");
+                el.insert_attribute(&mut b.txn, "level", level(l).to_string());
+            }
+            Event::End(TagEnd::Heading(_)) => b.pop(),
+            Event::Start(Tag::BlockQuote(_)) => {
+                b.push_el("blockquote");
+            }
+            Event::End(TagEnd::BlockQuote(_)) => b.pop(),
+            Event::Start(Tag::List(start)) => {
+                let task = start.is_none() && is_task_list(i);
+                task_lists.push(task);
+                let tag = if task { "taskList" } else if start.is_some() { "orderedList" } else { "bulletList" };
+                let el = b.push_el(tag);
+                if let Some(n) = start {
+                    el.insert_attribute(&mut b.txn, "start", n.to_string());
+                }
+            }
+            Event::End(TagEnd::List(_)) => {
+                task_lists.pop();
+                b.pop();
+            }
+            Event::Start(Tag::Item) => {
+                let task = task_lists.last().copied().unwrap_or(false);
+                b.push_el(if task { "taskItem" } else { "listItem" });
+            }
+            Event::End(TagEnd::Item) => b.pop(),
+            Event::TaskListMarker(done) => {
+                // the marker follows the item (or its first paragraph) start
+                for n in b.stack.iter().rev() {
+                    if let Node::El(e) = n {
+                        if e.tag().as_ref() == "taskItem" {
+                            e.insert_attribute(&mut b.txn, "checked", done.to_string());
+                            break;
+                        }
+                    }
+                }
+            }
+            Event::Start(Tag::CodeBlock(kind)) => {
+                b.code_lang = match kind {
+                    CodeBlockKind::Fenced(l) => l.to_string(),
+                    CodeBlockKind::Indented => String::new(),
+                };
+                b.code_buf = Some(String::new());
+            }
+            Event::End(TagEnd::CodeBlock) => {
+                let code = b.code_buf.take().unwrap_or_default();
+                let el = b.push_el("codeBlock");
+                if !b.code_lang.is_empty() {
+                    el.insert_attribute(&mut b.txn, "language", b.code_lang.clone());
+                }
+                let t = el.push_back(&mut b.txn, XmlTextPrelim::new(""));
+                t.insert(&mut b.txn, 0, code.trim_end_matches('\n'));
+                b.pop();
+            }
+            Event::Rule => {
+                b.push_el("horizontalRule");
+                b.pop();
+            }
+            Event::Start(Tag::Table(_)) => {
+                b.push_el("table");
+            }
+            Event::End(TagEnd::Table) => b.pop(),
+            Event::Start(Tag::TableHead) => {
+                b.in_table_head = true;
+                b.push_el("tableRow");
+            }
+            Event::End(TagEnd::TableHead) => {
+                b.in_table_head = false;
+                b.pop();
+            }
+            Event::Start(Tag::TableRow) => {
+                b.push_el("tableRow");
+            }
+            Event::End(TagEnd::TableRow) => b.pop(),
+            Event::Start(Tag::TableCell) => {
+                let tag = if b.in_table_head { "tableHeader" } else { "tableCell" };
+                b.push_el(tag);
+                b.push_el("paragraph");
+            }
+            Event::End(TagEnd::TableCell) => {
+                b.pop();
+                b.pop();
+            }
+            Event::Start(Tag::Strong) => b.marks.bold = true,
+            Event::End(TagEnd::Strong) => b.marks.bold = false,
+            Event::Start(Tag::Emphasis) => b.marks.italic = true,
+            Event::End(TagEnd::Emphasis) => b.marks.italic = false,
+            Event::Start(Tag::Strikethrough) => b.marks.strike = true,
+            Event::End(TagEnd::Strikethrough) => b.marks.strike = false,
+            Event::Start(Tag::Link { dest_url, .. }) => b.marks.link = Some(dest_url.to_string()),
+            Event::End(TagEnd::Link) => b.marks.link = None,
+            Event::Start(Tag::Image { dest_url, .. }) => match ImageRef::from_url(&dest_url) {
+                Some(r) => b.image = Some((r, String::new())),
+                // other images are not fetched: keep the reference as a link
+                None => b.marks.link = Some(dest_url.to_string()),
+            },
+            Event::End(TagEnd::Image) => match b.image.take() {
+                Some((r, alt)) => b.media(&r, &alt),
+                None => b.marks.link = None,
+            },
+            Event::Code(c) => {
+                b.marks.code = true;
+                b.insert(&c);
+                b.marks.code = false;
+            }
+            Event::Text(t) if b.image.is_some() => b.image.as_mut().unwrap().1.push_str(&t),
+            Event::Text(t) => b.insert(&t),
+            Event::SoftBreak => b.insert(" "),
+            Event::HardBreak => b.hard_break(),
+            Event::Html(h) | Event::InlineHtml(h) => b.insert(&h),
+            _ => {}
+        }
+    }
+    }
 }
 
 #[cfg(test)]
@@ -317,6 +459,53 @@ mod tests {
     fn render(md: &str) -> Vec<crate::doc::Block> {
         let d = doc::load(&to_yjs(md)).unwrap();
         doc::tabs(&d).remove(0).blocks
+    }
+
+    #[test]
+    fn column_blocks_are_split_out() {
+        let md = "intro\n\n::: columns align-right\n\nleft\n\n::: column\n\nright\n\n:::\n\nafter\n\n```\n::: columns\n```\n";
+        let s = segments(md);
+        assert_eq!(s.len(), 3, "{s:?}");
+        assert_eq!(s[1], Segment::Columns { layout: "align-right".into(), cols: vec!["\nleft\n\n".into(), "\nright\n\n".into()] });
+        // inside a code fence it is just text
+        assert!(matches!(&s[2], Segment::Md(m) if m.contains("::: columns")));
+    }
+
+    #[test]
+    fn columns_and_images_survive_a_round_trip() {
+        let img = ImageRef { cid: "bafkreidybxhs4ymbvt53hvxmz3f6nekg5gfit7c7pl7pul7fhfedsibm2a".into(), key: "a2V5".into(), nonce: "bm9uY2U".into(), tag: "dGFn".into(), mime: "image/png".into(), ..Default::default() };
+        let local = ImageRef { local: "d1/abc.png".into(), mime: "image/png".into(), ..Default::default() };
+        let md = format!("## Beside\n\n::: columns align-right\n\n- one\n- two\n\n::: column\n\n![a lambda]({})\n\n:::\n\n![mine]({})\n", img.to_url(), local.to_url());
+        let d = doc::load(&to_yjs(&md)).unwrap();
+        let tabs = doc::tabs(&d);
+        let b = &tabs[0].blocks;
+        let cols = b.iter().find(|x| x.t == "columns").expect("columns block");
+        assert_eq!((cols.layout.as_str(), cols.cols.len()), ("align-right", 2));
+        assert_eq!(cols.cols[0].iter().filter(|x| x.t == "li").count(), 2);
+        let pic = cols.cols[1].iter().find(|x| x.t == "image").expect("image in the second column");
+        assert_eq!(pic.img.as_ref().unwrap().cid, img.cid);
+        assert_eq!(pic.text, "a lambda");
+        let mine = b.iter().find(|x| x.t == "image").expect("a local image");
+        assert_eq!(mine.img.as_ref().unwrap().local, "d1/abc.png");
+        // and back to Markdown: same columns, same images
+        let back = doc::markdown("", &tabs);
+        assert!(back.contains("::: columns align-right") && back.contains("::: column"), "{back}");
+        let refs: Vec<ImageRef> = back.split("](").skip(1).filter_map(|r| ImageRef::from_url(r.split(')').next().unwrap())).collect();
+        assert_eq!(refs.iter().map(|r| (r.cid.as_str(), r.local.as_str())).collect::<Vec<_>>(), vec![(img.cid.as_str(), ""), ("", "d1/abc.png")]);
+        assert!(!back.contains("\n\n\n\n"), "no piles of blank lines: {back:?}");
+        let again = doc::tabs(&doc::load(&to_yjs(&back)).unwrap());
+        assert_eq!(serde_json::to_string(&again[0].blocks).unwrap(), serde_json::to_string(&tabs[0].blocks).unwrap());
+    }
+
+    #[test]
+    fn image_urls() {
+        let r = ImageRef { cid: "Qm123".into(), key: "k".into(), nonce: "n".into(), tag: "t".into(), ..Default::default() };
+        assert_eq!(ImageRef::from_url(&r.to_url()), Some(r));
+        assert_eq!(ImageRef::from_url("fvimg:bm9wZQ"), None);
+        assert_eq!(ImageRef::from_url("https://example.com/x.png"), None);
+        // other images stay links and are not fetched
+        let b = render("![x](https://example.com/x.png)\n");
+        assert!(b.iter().all(|x| x.t != "image"));
     }
 
     #[test]

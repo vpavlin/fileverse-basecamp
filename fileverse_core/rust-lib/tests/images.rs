@@ -31,3 +31,34 @@ fn an_embedded_image_decrypts() {
     assert!(viewer::open_image(&gw, &bad).unwrap_err().contains("does not open"));
     let _ = std::fs::remove_dir_all(dir);
 }
+
+/// A draft's own image: published encrypted (as dDocs stores images) and read back
+/// through the same path a reader uses.
+#[test]
+fn a_drafts_image_is_published_encrypted() {
+    use fileverse_core::publish;
+    let picture: Vec<u8> = std::iter::once(0x89u8).chain(b"PNG\r\n\x1a\n".iter().copied()).chain((0..600_000).map(|i| (i % 251) as u8)).collect();
+    let local = ImageRef { local: "d1/pic.png".into(), mime: "image/png".into(), width: "50%".into(), ..Default::default() };
+    let md = format!("# Deck\n\n![a picture]({})\n", local.to_url());
+    let (out, blocks) = publish::upload_local_images(&md, |l| {
+        assert_eq!(l, "d1/pic.png");
+        Ok(picture.clone())
+    })
+    .unwrap();
+    assert!(!out.contains(&local.to_url()));
+    let url = out.split("](").nth(1).unwrap().split(')').next().unwrap();
+    let r = ImageRef::from_url(url).unwrap();
+    assert!(r.local.is_empty() && !r.cid.is_empty() && r.width == "50%");
+    assert!(blocks.len() > 1, "a 600 KB image takes several blocks");
+    // a reader with only the blocks (no gateway) opens it
+    let dir = std::env::temp_dir().join(format!("fv-pub-img-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let gw = Gateways::new(vec!["http://127.0.0.1:1".into()], Some(dir.clone()));
+    for (c, b) in &blocks {
+        gw.cache_block(&Cid::parse(c).unwrap(), b);
+    }
+    let (mime, bytes) = viewer::open_image(&gw, &r).unwrap();
+    assert_eq!((mime.as_str(), bytes.len()), ("image/png", picture.len()));
+    assert_eq!(bytes, picture);
+    let _ = std::fs::remove_dir_all(dir);
+}

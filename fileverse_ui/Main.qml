@@ -164,7 +164,7 @@ Item {
         if (u === "") return
         root.startJob("open", [u], "open", function (doc) {
             root.docv = doc; root.docUrl = u; root.mode = "doc"
-            root.presenting = false; root.slideIndex = 0; root.tabIndex = 0; root.sheetIndex = 0
+            root.stopPresenting(); root.slideIndex = 0; root.tabIndex = 0; root.sheetIndex = 0
             root.refreshNode(); root.refreshStorage()
         })
     }
@@ -235,6 +235,15 @@ Item {
         return ""
     }
     readonly property string docDraftId: { root.snap; return root.draftIdFor(root.docUrl) }
+    // Your most recent copy of someone else's document, so "Edit" reopens it
+    // instead of making another copy each time.
+    function copyIdFor(url) {
+        var ds = root.snap.drafts || [], best = null
+        for (var j = 0; j < ds.length; j++)
+            if (url && ds[j].sourceUrl === url && (!best || (ds[j].updatedAt || 0) > (best.updatedAt || 0))) best = ds[j]
+        return best ? best.id : ""
+    }
+    readonly property string docCopyId: { root.snap; return root.copyIdFor(root.docUrl) }
     function openDraft(id) { root.act("draft_get", [id], "", function (r) { root.editDraft(r.draft) }) }
     function saveDraft(then) {
         if (!root.draft) return
@@ -258,13 +267,55 @@ Item {
         mdArea.text = md
         root.loadingEditor = false
         if (!root.visualEdit) return
-        var r = root.coreSync("rich_html", [md])
+        var r = root.coreSync("rich_html", [md, root.draft ? root.draft.id : "", root.viewDir])
         if (!r || !r.ok) { root.fail("Could not open the visual editor; showing Markdown."); root.visualEdit = false; return }
         root.loadingEditor = true
         richArea.text = root.tintLinks(r.html)
         root.loadingEditor = false
         richArea.cursorPosition = 0
         root.updateBlockKind()
+        root.fetchEditorImages(r.pending || [])
+    }
+    // Images the editor shows but the cache does not have yet (a copy of a Fileverse
+    // document): fetch them, then show the document again where the cursor was.
+    function fetchEditorImages(pending) {
+        if (!pending.length) return
+        var left = pending.length
+        var draftId = root.draft ? root.draft.id : ""
+        pending.forEach(function (ref) {
+            root.quietJob("image", [JSON.stringify(ref), root.viewDir], finish, finish)
+        })
+        function finish() {
+            if (--left > 0 || !root.draft || root.draft.id !== draftId || !root.visualEdit) return
+            var pos = richArea.cursorPosition
+            root.loadingEditor = true
+            richArea.text = richArea.text
+            root.loadingEditor = false
+            richArea.cursorPosition = Math.min(pos, richArea.length)
+        }
+    }
+    function insertImage(path) {
+        if (!root.draft) return
+        var r = root.coreSync("draft_add_image", [root.draft.id, String(path), root.viewDir])
+        if (!r || !r.ok) { root.fail(r ? r.error : "Could not add the picture."); return }
+        if (root.visualEdit) {
+            richArea.insert(richArea.cursorPosition, r.html)
+            richArea.forceActiveFocus()
+        } else {
+            mdArea.insert(mdArea.cursorPosition, "\n\n" + r.md + "\n\n")
+        }
+        root.editorChanged()
+    }
+    // Two columns side by side (dDocs' image beside text): a borderless table in the editor.
+    function insertColumns() {
+        if (root.visualEdit) {
+            if (root.inTable()) { root.say("Columns cannot go inside a table or other columns"); return }
+            richArea.insert(richArea.cursorPosition, '<table border="0" width="100%" cellpadding="8"><tr><td width="50%" valign="top"><p>Text here</p></td><td width="50%" valign="top"><p>Image or text here</p></td></tr></table><p></p>')
+            richArea.forceActiveFocus()
+        } else {
+            mdArea.insert(mdArea.cursorPosition, "\n\n::: columns align-center\n\nText here\n\n::: column\n\nImage or text here\n\n:::\n\n")
+        }
+        root.editorChanged()
     }
     function setVisualEdit(v) {
         if (v === root.visualEdit || !root.draft) return
@@ -310,7 +361,7 @@ Item {
     function setBlock(kind) {
         if (root.inTable()) { root.say("Tables keep their own layout"); return }
         var pos = richArea.cursorPosition
-        var r = root.coreSync("rich_block", [richArea.text, String(root.blockIndex()), kind])
+        var r = root.coreSync("rich_block", [richArea.text, String(root.blockIndex()), kind, root.draft ? root.draft.id : "", root.viewDir])
         if (!r || !r.ok) { root.fail(r ? r.error : "Could not change this block."); return }
         root.loadingEditor = true
         richArea.text = root.tintLinks(r.html)
@@ -474,6 +525,12 @@ Item {
     TextEdit { id: clip; visible: false; textFormat: TextEdit.PlainText }
     function copy(text, what) { clip.text = text; clip.selectAll(); clip.copy(); root.say((what || "Text") + " copied") }
 
+    FileDialog {
+        id: imageDialog
+        title: "Choose a picture"
+        nameFilters: ["Pictures (*.png *.jpg *.jpeg *.gif *.webp *.svg)", "All files (*)"]
+        onAccepted: root.insertImage(selectedFile)
+    }
     FileDialog {
         id: backupDialog
         title: "Choose a dDocs/dSheets backup-key file"
@@ -1133,7 +1190,8 @@ Item {
                 spacing: Theme.spacing.small
                 LogosButton { visible: root.coreSlides.length > 0; compact: true; variant: LogosButton.Variant.Primary; text: "Present"; onClicked: root.present() }
                 LogosButton { visible: root.docDraftId !== ""; compact: true; variant: LogosButton.Variant.Primary; text: "Edit"; onClicked: { root.section = "drafts"; root.openDraft(root.docDraftId) } }
-                LogosButton { visible: root.docv && root.docv.markdown !== undefined && root.docDraftId === ""; compact: true; text: "Edit a copy"; onClicked: root.newDraft(root.docv.title || "Untitled", root.docv.markdownBody !== undefined ? root.docv.markdownBody : root.docv.markdown, root.docUrl) }
+                LogosButton { visible: root.docDraftId === "" && root.docCopyId !== ""; compact: true; text: "Edit my copy"; onClicked: { root.section = "drafts"; root.openDraft(root.docCopyId) } }
+                LogosButton { visible: root.docv && root.docv.markdown !== undefined && root.docDraftId === ""; compact: true; text: root.docCopyId !== "" ? "New copy" : "Edit a copy"; onClicked: root.newDraft(root.docv.title || "Untitled", root.docv.markdownBody !== undefined ? root.docv.markdownBody : root.docv.markdown, root.docUrl) }
                 LogosButton {
                     visible: (root.node.reachable || root.kept) && !root.kept
                     compact: true
@@ -1255,6 +1313,9 @@ Item {
                                 ["☐ Task", "task", "Checklist ([] and a space); click again to tick", function () { root.toggleTask() }],
                                 ["❝ Quote", "quote", "Quote (>)", function () { root.toggleBlock("quote") }],
                                 ["{ } Code", "code", "Code block", function () { root.toggleBlock("code") }],
+                                ["|", "", "", null],
+                                ["🖼 Image", "", "Insert a picture (kept with the draft; encrypted when published)", function () { imageDialog.open() }],
+                                ["▥ Columns", "", "Two columns side by side, e.g. an image beside text", function () { root.insertColumns() }],
                                 ["|", "", "", null],
                                 ["↶", "", "Undo (Ctrl+Z)", function () { richArea.undo() }],
                                 ["↷", "", "Redo (Ctrl+Shift+Z)", function () { richArea.redo() }]
@@ -1663,11 +1724,13 @@ Item {
     // The cache is changed in place (no change signal, so bindings that read it cannot
     // loop); `imageTick` tells them when to look again.
     function imageSrc(img) {
-        if (!img || !img.cid) return ""
-        var c = root.imageCache[img.cid]
+        // A draft's own picture has no CID until it is published, only a local reference.
+        var key = img ? (img.cid || (img.local ? "local:" + img.local : "")) : ""
+        if (!key) return ""
+        var c = root.imageCache[key]
         if (c !== undefined) return c
-        root.imageCache[img.cid] = "loading"
-        var done = function (v) { root.imageCache[img.cid] = v; root.imageTick++ }
+        root.imageCache[key] = "loading"
+        var done = function (v) { root.imageCache[key] = v; root.imageTick++ }
         Qt.callLater(function () {
             root.quietJob("image", [JSON.stringify(img), root.viewDir], function (r) { done(r && (r.fileUrl || r.dataUri) ? (r.fileUrl || r.dataUri) : "failed") }, function () { done("failed") })
         })
@@ -1844,11 +1907,39 @@ Item {
         root.slideFontScale = Math.max(0.6, Math.min(2.0, Math.round(v * 10) / 10))
         root.buildDeck()
     }
-    function toggleFullScreen() {
-        var w = root.Window.window
-        if (!w) return
-        w.visibility = w.visibility === Window.FullScreen ? Window.Windowed : Window.FullScreen
+    // Basecamp shows this view inside a widget, whose window cannot go full screen;
+    // presenting full screen moves the deck into a window of its own.
+    property bool fullScreen: false
+    Window {
+        id: presWindow
+        visible: false
+        title: "Presentation"
+        // Screen size up front: without a window manager (or if it ignores the
+        // full-screen request) the window would otherwise open tiny.
+        width: Screen.width > 0 ? Screen.width : 1280
+        height: Screen.height > 0 ? Screen.height : 720
+        color: Theme.palette.background
+        onClosing: function (close) { root.leaveFullScreen() }
     }
+    function toggleFullScreen() { if (root.fullScreen) root.leaveFullScreen(); else root.enterFullScreen() }
+    function enterFullScreen() {
+        if (root.fullScreen) return
+        deckPane.parent = presWindow.contentItem
+        root.fullScreen = true
+        presWindow.showFullScreen()
+        presWindow.raise()
+        presWindow.requestActivate()
+        deckPane.forceActiveFocus()
+    }
+    function leaveFullScreen() {
+        if (!root.fullScreen) return
+        root.fullScreen = false
+        deckPane.parent = root
+        presWindow.hide()
+        deckPane.forceActiveFocus()
+    }
+    function findDeck() { return deckPane }
+    function stopPresenting() { root.leaveFullScreen(); root.presenting = false }
     // Re-cut the deck when what it shows changes (an update arrived, another tab).
     Connections {
         target: root
@@ -1895,8 +1986,7 @@ Item {
             else if (e.key === Qt.Key_0) { root.setFontScale(1.0); e.accepted = true }
             else if (e.key === Qt.Key_F) { root.toggleFullScreen(); e.accepted = true }
             else if (e.key === Qt.Key_Escape) {
-                var w = root.Window.window
-                if (w && w.visibility === Window.FullScreen) w.visibility = Window.Windowed
+                if (root.fullScreen) root.leaveFullScreen()
                 else root.presenting = false
                 e.accepted = true
             }
@@ -1963,7 +2053,7 @@ Item {
 
         RowLayout {
             id: controls
-            visible: !(root.Window.window && root.Window.window.visibility === Window.FullScreen)
+            visible: !root.fullScreen
             anchors.bottom: parent.bottom
             anchors.horizontalCenter: parent.horizontalCenter
             anchors.bottomMargin: 16
@@ -1977,7 +2067,7 @@ Item {
             LogosButton { compact: true; text: "A+"; onClicked: { root.setFontScale(root.slideFontScale + 0.1); deckPane.forceActiveFocus() } }
             Item { width: 12 }
             LogosButton { compact: true; text: "Full screen (F)"; onClicked: { root.toggleFullScreen(); deckPane.forceActiveFocus() } }
-            LogosButton { compact: true; text: "Exit (Esc)"; onClicked: root.presenting = false }
+            LogosButton { compact: true; text: "Exit (Esc)"; onClicked: root.stopPresenting() }
         }
     }
 

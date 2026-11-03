@@ -221,6 +221,75 @@ fn parse_dag_pb(block: &[u8]) -> Result<PbNode, String> {
     Ok(PbNode { links, data })
 }
 
+fn put_varint(out: &mut Vec<u8>, mut v: u64) {
+    loop {
+        let b = (v & 0x7f) as u8;
+        v >>= 7;
+        if v == 0 {
+            out.push(b);
+            return;
+        }
+        out.push(b | 0x80);
+    }
+}
+
+fn pb_bytes(out: &mut Vec<u8>, field: u64, b: &[u8]) {
+    put_varint(out, field << 3 | 2);
+    put_varint(out, b.len() as u64);
+    out.extend_from_slice(b);
+}
+
+fn pb_varint(out: &mut Vec<u8>, field: u64, v: u64) {
+    put_varint(out, field << 3);
+    put_varint(out, v);
+}
+
+/// A CIDv1 in binary (version, codec, sha2-256 multihash), as dag-pb links hold it.
+fn cid_bytes(c: &Cid) -> Vec<u8> {
+    let mut b = vec![1u8];
+    put_varint(&mut b, c.codec);
+    b.extend([0x12, 0x20]);
+    b.extend(c.digest);
+    b
+}
+
+/// A file as UnixFS blocks, laid out like `ipfs add --cid-version 1 --raw-leaves`:
+/// one raw block when it fits in a chunk, else 256 KiB raw leaves under a dag-pb
+/// root. Returns the root CID and every block (root first).
+pub fn unixfs_file(bytes: &[u8]) -> (String, Vec<(String, Vec<u8>)>) {
+    const CHUNK: usize = 256 * 1024;
+    if bytes.len() <= CHUNK {
+        let c = raw_cid(bytes).to_v1();
+        return (c.clone(), vec![(c, bytes.to_vec())]);
+    }
+    let mut blocks = vec![];
+    let mut links = vec![];
+    for chunk in bytes.chunks(CHUNK) {
+        let c = raw_cid(chunk);
+        blocks.push((c.to_v1(), chunk.to_vec()));
+        links.push((c, chunk.len() as u64));
+    }
+    let mut unixfs = vec![];
+    pb_varint(&mut unixfs, 1, 2); // Type: File
+    pb_varint(&mut unixfs, 3, bytes.len() as u64);
+    for (_, n) in &links {
+        pb_varint(&mut unixfs, 4, *n);
+    }
+    // dag-pb: Links (field 2) before Data (field 1)
+    let mut node = vec![];
+    for (c, n) in &links {
+        let mut l = vec![];
+        pb_bytes(&mut l, 1, &cid_bytes(c));
+        pb_bytes(&mut l, 2, b"");
+        pb_varint(&mut l, 3, *n);
+        pb_bytes(&mut node, 2, &l);
+    }
+    pb_bytes(&mut node, 1, &unixfs);
+    let root = Cid { codec: DAG_PB, digest: Sha256::digest(&node).into() }.to_v1();
+    blocks.insert(0, (root.clone(), node));
+    (root, blocks)
+}
+
 #[derive(Clone, Debug, Default, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Provenance {
@@ -490,6 +559,25 @@ fn short(e: &reqwest::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn unixfs_files_read_back() {
+        let dir = std::env::temp_dir().join(format!("fv-unixfs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let gw = Gateways::new(vec!["http://127.0.0.1:1".into()], Some(dir.clone()));
+        for len in [10usize, 256 * 1024, 700_000] {
+            let data: Vec<u8> = (0..len).map(|i| (i * 7 % 251) as u8).collect();
+            let (root, blocks) = unixfs_file(&data);
+            assert_eq!(blocks.len(), if len <= 256 * 1024 { 1 } else { 4 });
+            for (c, b) in &blocks {
+                gw.cache_block(&Cid::parse(c).unwrap(), b);
+            }
+            let (back, prov) = gw.get(&root).unwrap();
+            assert_eq!(back, data, "{len} bytes");
+            assert_eq!(prov.blocks.len(), blocks.len());
+        }
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn v0_and_v1_agree() {

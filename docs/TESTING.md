@@ -1,5 +1,34 @@
 # What was tested, and how to repeat it
 
+## 0.9.0: images and columns in the editor, a real full-screen window (2026-11-03)
+
+- cargo: `columns_and_images_cross_the_editor`, `qt_columns_and_images` (rich.rs),
+  `unixfs_files_read_back` (ipfs.rs), `a_drafts_image_is_published_encrypted`
+  (tests/images.rs): a draft's picture is encrypted with a fresh key, its tag kept apart,
+  stored as a UnixFS file and its reference rewritten when the draft is published.
+- Harness: modes `wysiwyg` and `slidecols`.
+- Basecamp GUI, on vpavlin's image document:
+  - "Edit a copy" shows both images and the two columns (list beside the picture) in the
+    visual editor. Markdown view shows `::: columns align-center` … `::: column` … `:::`
+    and `fvimg:` references.
+  - The Columns button inserts two columns at the cursor. The Image button opens Qt's file
+    dialog; the chosen PNG went into the right-hand column, was stored as
+    `drafts/<id>/img/<sha>.png`, and shows in the editor, the preview and on the slide.
+  - Present, then F: a separate "Presentation" window opens at screen size (inside
+    Basecamp, `Window.window` is an offscreen window, so making it full screen did
+    nothing in 0.8.x). Arrow keys move slides in it; Esc returns to the deck in Basecamp
+    on the same slide.
+  - A second visit to the shared document offers "Edit my copy" (reopens the latest
+    draft copied from it) beside "New copy", instead of making another copy each time.
+- Found and fixed during the walk: pictures added from disk stayed "Loading image…" in the
+  preview and on slides (the view needed a CID; such pictures have only a local reference
+  until published); the presentation window opened 160×160 when nothing applied full
+  screen (now sized to the screen first).
+- Rig limits (Xvfb, no window manager): full screen itself, and focus returning to Basecamp
+  after the presentation window closes (a click was needed before Esc worked again), are
+  window-manager behaviour and were not seen here. The file dialog did not take keyboard
+  focus until clicked.
+
 ## 0.8.1: images in Basecamp (2026-11-03)
 
 - On vpavlin's real dDoc with two images (one alone, one beside a list in columns), 0.8.0

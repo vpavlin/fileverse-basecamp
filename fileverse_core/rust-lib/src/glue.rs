@@ -86,11 +86,16 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn draft_save(&self, draft_id: String, title: String, markdown: String) -> String;
     /// Save a draft from the visual editor: its Qt rich-text HTML is converted to Markdown.
     fn draft_save_rich(&self, draft_id: String, title: String, html: String) -> String;
-    /// Markdown -> HTML for the visual editor: `{ html }`.
-    fn rich_html(&self, markdown: String) -> String;
+    /// Markdown -> HTML for the visual editor: `{ html, pending }`. Images show from the
+    /// view's own directory (`view_dir`); `pending` lists the images (references) still
+    /// to fetch with `image` before they appear.
+    fn rich_html(&self, markdown: String, draft_id: String, view_dir: String) -> String;
     /// Restyle the editor's text block number `index` ("p", "h1".."h3", "ul", "ol",
     /// "task", "done", "quote", "code"): `{ html }` with the whole document.
-    fn rich_block(&self, html: String, index: String, kind: String) -> String;
+    fn rich_block(&self, html: String, index: String, kind: String, draft_id: String, view_dir: String) -> String;
+    /// Put a picture (a file path or file:// URL) into a draft: kept with the draft on this
+    /// device, encrypted and uploaded only when it is published. `{ md, html }` to insert.
+    fn draft_add_image(&self, draft_id: String, path: String, view_dir: String) -> String;
     /// The style of the editor's text block number `index`: `{ kind }`.
     fn rich_kind(&self, html: String, index: String) -> String;
     /// One draft with its Markdown and preview.
@@ -646,6 +651,63 @@ impl FileverseCoreModuleImpl {
         Ok((roots, blocks))
     }
 
+    /// The images a draft refers to: `fvimg:` URLs in its Markdown, and the pictures kept
+    /// with it on this device (which may not be in the Markdown yet).
+    fn draft_images(&self, draft_id: &str, markdown: &str) -> Vec<doc::ImageRef> {
+        let mut refs: Vec<doc::ImageRef> = markdown
+            .split("](")
+            .skip(1)
+            .filter_map(|p| doc::ImageRef::from_url(p.split(')').next().unwrap_or("")))
+            .collect();
+        if draft_id.chars().all(|c| c.is_ascii_alphanumeric()) && !draft_id.is_empty() {
+            if let Some(dir) = self.state.lock().unwrap().drafts_dir() {
+                if let Ok(rd) = std::fs::read_dir(dir.join(draft_id).join("img")) {
+                    for e in rd.flatten() {
+                        let file = e.file_name().to_string_lossy().to_string();
+                        let local = format!("{draft_id}/{file}");
+                        if !refs.iter().any(|r| r.local == local) {
+                            let mime = match file.rsplit('.').next().unwrap_or("") {
+                                "jpg" => "image/jpeg",
+                                "gif" => "image/gif",
+                                "webp" => "image/webp",
+                                "svg" => "image/svg+xml",
+                                _ => "image/png",
+                            };
+                            refs.push(doc::ImageRef { local, mime: mime.into(), width: "100%".into(), ..Default::default() });
+                        }
+                    }
+                }
+            }
+        }
+        refs
+    }
+
+    /// The editor's image bridge for a draft: each image as a file in the view's cache
+    /// (a draft's own pictures are copied there now; others arrive with `image`), and each
+    /// such file back to its reference.
+    fn image_bridge(&self, _draft_id: &str, refs: Vec<doc::ImageRef>, cache: Option<PathBuf>) -> rich::Images {
+        let drafts = self.state.lock().unwrap().drafts_dir();
+        let by_name: HashMap<String, String> = refs.iter().map(|r| (image_cache_name(r), r.to_url())).collect();
+        rich::Images {
+            src_of: Box::new(move |r: &doc::ImageRef| {
+                let c = cache.as_ref()?;
+                let p = c.join(image_cache_name(r));
+                if !r.local.is_empty() && !p.exists() {
+                    let src = drafts.as_ref()?.join(local_image_path(&r.local)?);
+                    std::fs::copy(src, &p).ok()?;
+                }
+                Some(format!("file://{}", p.display()))
+            }),
+            url_of: Box::new(move |src: &str| by_name.get(src.rsplit('/').next()?).cloned()),
+        }
+    }
+
+    fn read_local_image(&self, local: &str) -> Result<Vec<u8>, String> {
+        let dir = self.state.lock().unwrap().drafts_dir().ok_or("module not ready")?;
+        let rel = local_image_path(local).ok_or("bad image reference")?;
+        std::fs::read(dir.join(rel)).map_err(|_| "this draft's picture is no longer on this device".to_string())
+    }
+
     fn load_draft(&self, id: &str) -> Result<(PathBuf, Value), String> {
         if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
             return Err("bad draft id".into());
@@ -883,23 +945,20 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         };
         self.run_job(
             move |me, _job| {
-                let node = me.node(NODE_PROBE);
-                let gw = me.gateways(node.as_ref());
-                let (mime, bytes) = viewer::open_image(&gw, &r)?;
+                let (mime, bytes) = if r.local.is_empty() {
+                    let node = me.node(NODE_PROBE);
+                    let gw = me.gateways(node.as_ref());
+                    viewer::open_image(&gw, &r)?
+                } else {
+                    let b = me.read_local_image(&r.local)?;
+                    (viewer::sniff_image(&b).to_string(), b)
+                };
                 match cache {
                     None => Ok(json!({ "ok": true, "cid": r.cid, "dataUri": format!("data:{mime};base64,{}", b64::encode(&bytes)) })),
                     Some(dir) => {
                         prune_image_cache(&dir, Duration::from_secs(24 * 3600));
-                        let ext = match mime.as_str() {
-                            "image/jpeg" => "jpg",
-                            "image/gif" => "gif",
-                            "image/webp" => "webp",
-                            "image/svg+xml" => "svg",
-                            _ => "png",
-                        };
                         // Not named by CID: the name says nothing about which image it is.
-                        let name = format!("{}.{ext}", hex::encode(&Sha256::digest(format!("{}:{}", r.cid, r.key).as_bytes())[..12]));
-                        let path = dir.join(name);
+                        let path = dir.join(image_cache_name(&doc::ImageRef { mime: mime.clone(), ..r.clone() }));
                         std::fs::write(&path, &bytes).map_err(|e| format!("could not cache the image: {e}"))?;
                         Ok(json!({ "ok": true, "cid": r.cid, "fileUrl": format!("file://{}", path.display()) }))
                     }
@@ -1189,18 +1248,75 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
     }
 
     fn draft_save_rich(&self, draft_id: String, title: String, html: String) -> String {
-        self.draft_save(draft_id, title, rich::to_md(&html))
+        let saved = self.load_draft(&draft_id).ok().and_then(|(_, d)| d["markdown"].as_str().map(str::to_string)).unwrap_or_default();
+        let refs = self.draft_images(&draft_id, &saved);
+        let md = rich::with_images(self.image_bridge(&draft_id, refs, None), || rich::to_md(&html));
+        self.draft_save(draft_id, title, md)
     }
 
-    fn rich_html(&self, markdown: String) -> String {
-        json!({ "ok": true, "html": rich::to_html(&markdown) }).to_string()
+    fn rich_html(&self, markdown: String, draft_id: String, view_dir: String) -> String {
+        let cache = if view_dir.trim().is_empty() { None } else { image_cache_dir(&view_dir).ok() };
+        let refs = self.draft_images(&draft_id, &markdown);
+        let pending: Vec<doc::ImageRef> = match &cache {
+            Some(c) => refs.iter().filter(|r| r.local.is_empty() && !c.join(image_cache_name(r)).exists()).cloned().collect(),
+            None => vec![],
+        };
+        let html = rich::with_images(self.image_bridge(&draft_id, refs, cache), || rich::to_html(&markdown));
+        json!({ "ok": true, "html": html, "pending": pending }).to_string()
     }
 
-    fn rich_block(&self, html: String, index: String, kind: String) -> String {
-        match rich::set_block(&html, index.trim().parse().unwrap_or(usize::MAX), &kind) {
+    fn rich_block(&self, html: String, index: String, kind: String, draft_id: String, view_dir: String) -> String {
+        let cache = if view_dir.trim().is_empty() { None } else { image_cache_dir(&view_dir).ok() };
+        let saved = self.load_draft(&draft_id).ok().and_then(|(_, d)| d["markdown"].as_str().map(str::to_string)).unwrap_or_default();
+        let refs = self.draft_images(&draft_id, &saved);
+        let bridge = self.image_bridge(&draft_id, refs, cache);
+        match rich::with_images(bridge, || rich::set_block(&html, index.trim().parse().unwrap_or(usize::MAX), &kind)) {
             Ok(h) => json!({ "ok": true, "html": h }).to_string(),
             Err(e) => err(e),
         }
+    }
+
+    fn draft_add_image(&self, draft_id: String, path: String, view_dir: String) -> String {
+        if self.load_draft(&draft_id).is_err() {
+            return err("no such draft");
+        }
+        let raw = path.trim().trim_start_matches("file://");
+        let raw = percent_decode(raw);
+        let bytes = match std::fs::metadata(&raw) {
+            Ok(m) if m.len() > 25 * 1024 * 1024 => return err("that picture is larger than 25 MB"),
+            Ok(_) => match std::fs::read(&raw) {
+                Ok(b) => b,
+                Err(e) => return err(format!("could not read the picture: {e}")),
+            },
+            Err(e) => return err(format!("could not read the picture: {e}")),
+        };
+        let mime = viewer::sniff_image(&bytes);
+        if !mime.starts_with("image/") {
+            return err("that file is not a picture this app shows (PNG, JPEG, GIF, WebP or SVG)");
+        }
+        let Some(dir) = self.state.lock().unwrap().drafts_dir() else { return err("module not ready") };
+        let img_dir = dir.join(&draft_id).join("img");
+        let _ = std::fs::create_dir_all(&img_dir);
+        let file = format!("{}.{}", hex::encode(&Sha256::digest(&bytes)[..12]), ext_of(mime));
+        if let Err(e) = std::fs::write(img_dir.join(&file), &bytes) {
+            return err(format!("could not keep the picture with the draft: {e}"));
+        }
+        let r = doc::ImageRef { local: format!("{draft_id}/{file}"), mime: mime.into(), width: "100%".into(), ..Default::default() };
+        let src = if view_dir.trim().is_empty() {
+            None
+        } else {
+            image_cache_dir(&view_dir).ok().and_then(|c| {
+                let p = c.join(image_cache_name(&r));
+                std::fs::write(&p, &bytes).ok().map(|_| format!("file://{}", p.display()))
+            })
+        };
+        let name = std::path::Path::new(&raw).file_stem().and_then(|n| n.to_str()).unwrap_or("").replace(['[', ']'], "");
+        json!({
+            "ok": true,
+            "md": format!("![{name}]({})", r.to_url()),
+            "html": src.map(|s| format!("<img src=\"{s}\" width=\"520\" alt=\"{name}\" />")).unwrap_or_default(),
+        })
+        .to_string()
     }
 
     fn rich_kind(&self, html: String, index: String) -> String {
@@ -1237,10 +1353,16 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             Some(s) => s,
             None => return err("this draft has no link secret"),
         };
-        let built = match publish::build(&draft_id, d["title"].as_str().unwrap_or(""), d["markdown"].as_str().unwrap_or(""), &secret, now_ms()) {
+        // the draft's own pictures are encrypted and published with it
+        let (markdown, image_blocks) = match publish::upload_local_images(d["markdown"].as_str().unwrap_or(""), |l| self.read_local_image(l)) {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        };
+        let mut built = match publish::build(&draft_id, d["title"].as_str().unwrap_or(""), &markdown, &secret, now_ms()) {
             Ok(b) => b,
             Err(e) => return err(e),
         };
+        built.blocks.extend(image_blocks);
         let link = built.link.clone();
         let link2 = link.clone();
         self.run_job(
@@ -1334,6 +1456,53 @@ fn image_cache_dir(view_dir: &str) -> Result<PathBuf, String> {
 }
 
 static IMAGE_CACHES: std::sync::Mutex<std::collections::BTreeSet<PathBuf>> = std::sync::Mutex::new(std::collections::BTreeSet::new());
+
+/// `<draft id>/<file>` -> `<draft id>/img/<file>`, refusing anything that could leave
+/// the drafts folder.
+fn local_image_path(local: &str) -> Option<PathBuf> {
+    let (id, file) = local.split_once('/')?;
+    let ok = !id.is_empty()
+        && id.chars().all(|c| c.is_ascii_alphanumeric())
+        && !file.is_empty()
+        && !file.starts_with('.')
+        && file.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-' || c == '_');
+    ok.then(|| PathBuf::from(id).join("img").join(file))
+}
+
+fn ext_of(mime: &str) -> &'static str {
+    match mime {
+        "image/jpeg" => "jpg",
+        "image/gif" => "gif",
+        "image/webp" => "webp",
+        "image/svg+xml" => "svg",
+        _ => "png",
+    }
+}
+
+/// The file an image has in the view's cache. Not named by CID: the name says nothing
+/// about which image it is.
+fn image_cache_name(r: &doc::ImageRef) -> String {
+    let id = if r.local.is_empty() { format!("{}:{}", r.cid, r.key) } else { format!("local:{}", r.local) };
+    format!("{}.{}", hex::encode(&Sha256::digest(id.as_bytes())[..12]), ext_of(&r.mime))
+}
+
+fn percent_decode(s: &str) -> String {
+    let b = s.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
+                out.push(v);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(b[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
 
 /// Decrypted images are plaintext on disk: keep them only briefly.
 fn prune_image_cache(dir: &std::path::Path, older_than: Duration) {
