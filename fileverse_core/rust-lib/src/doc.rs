@@ -130,12 +130,13 @@ pub struct Slide {
 /// beneath it, so a title is never alone on a slide. How much fits on one slide is
 /// decided by the view, which measures the real stage and breaks between blocks
 /// (list items one by one; never inside columns or tables). `kind` is a layout hint:
-/// `title` when a slide holds only headings, `image` for a lone image.
+/// `title` when a slide holds only headings, `image` for a lone image or diagram.
 pub fn slides(blocks: &[Block]) -> Vec<Slide> {
     let mut out: Vec<Slide> = vec![];
     let mut cur: Vec<usize> = vec![];
     let kind = |cur: &[usize]| -> String {
-        if cur.len() == 1 && blocks[cur[0]].t == "image" {
+        // a picture or a diagram alone gets the whole stage
+        if cur.len() == 1 && (blocks[cur[0]].t == "image" || is_diagram(&blocks[cur[0]])) {
             "image".into()
         } else if cur.iter().all(|&i| is_heading(&blocks[i])) {
             "title".into()
@@ -163,6 +164,11 @@ pub fn slides(blocks: &[Block]) -> Vec<Slide> {
     }
     flush(&mut cur, &mut out);
     out
+}
+
+/// A code block in the `mermaid` language: the view draws it as a diagram.
+pub fn is_diagram(b: &Block) -> bool {
+    b.t == "code" && b.lang.trim().eq_ignore_ascii_case("mermaid")
 }
 
 fn is_heading(b: &Block) -> bool {
@@ -830,6 +836,15 @@ mod tests {
         assert_eq!(slides_of("# A\n\n```\nx\n===\n```\n\ny\n"), 1);
         let b = &tabs(&load(&crate::md::to_yjs("# A\n\nx\n===\ny\n")).unwrap())[0].blocks;
         assert_eq!((b[1].t.as_str(), b[1].text.as_str()), ("p", "x"), "x stays a paragraph");
+    }
+
+    #[test]
+    fn a_diagram_alone_fills_its_slide() {
+        let md = "# Modules\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n===\n\n```mermaid\nflowchart LR\n  C --> D\n```\n";
+        let tab = &tabs(&load(&crate::md::to_yjs(md)).unwrap())[0];
+        let kinds: Vec<&str> = tab.slides.iter().map(|s| s.kind.as_str()).collect();
+        assert_eq!(kinds, ["content", "image"]);
+        assert!(is_diagram(&tab.blocks[1]) && tab.blocks[1].text.contains("A --> B"), "{:?}", tab.blocks[1]);
     }
 }
 

@@ -60,6 +60,11 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// which must be a `plugins/fileverse_ui` dir) the image is written to a short-lived
     /// cache there instead: `{ fileUrl }`. The cache is emptied on start and pruned daily.
     fn image(&self, image_json: String, view_dir: String) -> String;
+    /// Draw a diagram (the text of a `mermaid` code block) in the view's colours
+    /// (`colors_json`: `{ background, surface, text, textSecondary, border, primary }`).
+    /// The SVG is written to the view's image cache: `{ fileUrl, width, height }`, or an
+    /// error saying why it cannot be drawn. Returns a job.
+    fn diagram(&self, source: String, colors_json: String, view_dir: String) -> String;
     /// Whether a recently opened document has a newer version on chain than the one
     /// shown (its file record now names other blocks). Returns a job: `{ changed }`.
     fn check_update(&self, url: String) -> String;
@@ -975,6 +980,26 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         )
     }
 
+    fn diagram(&self, source: String, colors_json: String, view_dir: String) -> String {
+        let colors: crate::diagram::Colors = serde_json::from_str(&colors_json).unwrap_or_default();
+        let cache = match image_cache_dir(&view_dir) {
+            Ok(d) => d,
+            Err(e) => return err(e),
+        };
+        self.run_job(
+            move |_me, _job| {
+                let d = crate::diagram::render(&source, &colors)?;
+                prune_image_cache(&cache, Duration::from_secs(24 * 3600));
+                // named by what it shows and how: the same diagram is drawn once
+                let id = format!("{source}\n{colors_json}");
+                let path = cache.join(format!("d{}.svg", hex::encode(&Sha256::digest(id.as_bytes())[..12])));
+                std::fs::write(&path, d.svg.as_bytes()).map_err(|e| format!("could not cache the diagram: {e}"))?;
+                Ok(json!({ "ok": true, "fileUrl": format!("file://{}", path.display()), "width": d.width, "height": d.height }))
+            },
+            |_s, _v| {},
+        )
+    }
+
     fn check_update(&self, url: String) -> String {
         let entry = {
             let s = self.state.lock().unwrap();
@@ -1258,6 +1283,8 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         let saved = self.load_draft(&draft_id).ok().and_then(|(_, d)| d["markdown"].as_str().map(str::to_string)).unwrap_or_default();
         let refs = self.draft_images(&draft_id, &saved);
         let md = rich::with_images(self.image_bridge(&draft_id, refs, None), || rich::to_md(&html));
+        // the editor keeps no code languages: give them back from the draft as saved
+        let md = rich::restore_code_langs(&md, &saved);
         self.draft_save(draft_id, title, md)
     }
 

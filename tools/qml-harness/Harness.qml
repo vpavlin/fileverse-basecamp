@@ -69,9 +69,13 @@ Window {
         }).join("") }
         if (method === "rich_kind") return { ok: true, kind: "h1" }
         if (method === "image") return { ok: true, jobId: "jimg" }
+        if (method === "diagram") return { ok: true, jobId: args[0].indexOf("BROKEN") >= 0 ? "jdiagbad" : "jdiag" }
         if (method === "job") {
             var id = args[0]
             if (id === "jimg") return { ok: true, state: "done", result: { ok: true, dataUri: win.samplePng } }
+            // an SVG as the core draws it (a flowchart, Logos dark colours)
+            if (id === "jdiag") return { ok: true, state: "done", result: { ok: true, fileUrl: String(Qt.resolvedUrl("diagram.svg")), width: 736, height: 245 } }
+            if (id === "jdiagbad") return { ok: true, state: "failed", error: "not a diagram this renderer knows: parse error" }
             if (mode === "error") return { ok: true, state: "failed", error: "the link key does not open this file (wrong or truncated link?)" }
             if (id === "jlist") return { ok: true, state: "done", result: { ok: true, portal: "0x2222222222222222222222222222222222222222", files: [
                 { fileId: 3, title: "Meeting notes", kind: "ddoc", updatedAt: 1792700000000, url: "fvown://0x2222222222222222222222222222222222222222/3" },
@@ -119,6 +123,17 @@ Window {
         xhr.open("GET", Qt.resolvedUrl("doc.json"), false)
         xhr.send()
         win.docJson = JSON.parse(xhr.responseText)
+        if (mode === "diagram" || mode === "diagramonly") {
+            // an H2 with a diagram under it, then a diagram alone, then one that cannot be drawn
+            var dt = win.docJson.tabs[0], m = dt.blocks.length
+            dt.blocks.push({ t: "h2", html: "How the modules fit", text: "How the modules fit" })
+            dt.blocks.push({ t: "code", lang: "mermaid", html: "", text: "flowchart LR\n  ui --> core" })
+            dt.blocks.push({ t: "code", lang: "mermaid", html: "", text: "flowchart LR\n  ui --> core %% alone" })
+            dt.blocks.push({ t: "code", lang: "mermaid", html: "", text: "BROKEN diagram" })
+            dt.slides.push({ kind: "content", blocks: [m, m + 1] })
+            dt.slides.push({ kind: "image", blocks: [m + 2] })
+            dt.slides.push({ kind: "content", blocks: [m + 3] })
+        }
         if (mode === "slidecols") {
             // dDocs' image beside text: an H2, then columns (text | image), align-right
             var t = win.docJson.tabs[0], n = t.blocks.length
@@ -133,10 +148,12 @@ Window {
     }
 
     Timer {
-        interval: 1800; running: win.mode === "slides" || win.mode === "editslides" || win.mode === "slidecols"
+        interval: 1800; running: win.mode === "slides" || win.mode === "editslides" || win.mode === "slidecols" || win.mode === "diagram" || win.mode === "diagramonly"
         onTriggered: {
             view.item.present()
-            var to = win.mode === "slidecols" ? view.item.deck.length - 1 : win.slideAt
+            var to = win.mode === "slidecols" ? view.item.deck.length - 1
+                   : win.mode === "diagram" ? view.item.deck.length - 3
+                   : win.mode === "diagramonly" ? view.item.deck.length - 2 + win.slideAt : win.slideAt
             for (var i = 0; i < to; i++) view.item.nextSlide()
             if (win.mode === "slidecols") view.item.imageSrc({ cid: "bafkreitest" })
         }
@@ -144,7 +161,7 @@ Window {
     Timer {
         interval: 3500; running: true
         onTriggered: {
-            if (win.mode === "slides" || win.mode === "editslides" || win.mode === "slidecols") {
+            if (win.mode === "slides" || win.mode === "editslides" || win.mode === "slidecols" || win.mode === "diagram" || win.mode === "diagramonly") {
                 console.log("deck", view.item.deck.length, "slides; showing", view.item.slideIndex + 1, "kind", view.item.slide ? view.item.slide.kind : "-")
                 console.log("slides:", JSON.stringify(view.item.deck.map(function (d) { return d.blocks })))
             }

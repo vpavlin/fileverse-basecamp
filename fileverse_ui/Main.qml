@@ -1858,6 +1858,77 @@ Item {
             }
         }
     }
+    // ── diagrams: a `mermaid` code block (as dDocs stores them), drawn by the core ──
+    function isDiagram(b) { return !!b && b.t === "code" && String(b.lang || "").trim().toLowerCase() === "mermaid" }
+    readonly property string diagramColors: JSON.stringify({
+        background: String(Theme.palette.backgroundSecondary), surface: String(Theme.palette.surface),
+        text: String(Theme.palette.text), textSecondary: String(Theme.palette.textSecondary),
+        border: String(Theme.palette.border), primary: String(Theme.palette.primary),
+        font: String(Theme.typography.publicSans)
+    })
+    property var diagramCache: ({})   // source -> "loading" | { url, w, h } | { error }
+    function diagramOf(source) {
+        var c = root.diagramCache[source]
+        if (c !== undefined) return c
+        root.diagramCache[source] = "loading"
+        var done = function (v) { root.diagramCache[source] = v; root.imageTick++ }
+        Qt.callLater(function () {
+            root.quietJob("diagram", [source, root.diagramColors, root.viewDir],
+                function (r) { done(r && r.fileUrl ? { url: r.fileUrl, w: r.width, h: r.height } : { error: "no picture" }) },
+                function (e) { done({ error: e || "could not be drawn" }) })
+        })
+        return "loading"
+    }
+    Component {
+        id: diagramBlock
+        Item {
+            id: db
+            readonly property var b: parent && parent.b ? parent.b : ({ t: "code", text: "" })
+            readonly property real fs: parent && parent.fs ? parent.fs : 1
+            readonly property real fixedHeight: parent && parent.imageHeight ? parent.imageHeight : 0
+            readonly property var d: { root.imageTick; return root.diagramOf(b.text) }
+            readonly property bool ready: typeof d === "object" && !!d.url
+            readonly property bool failed: typeof d === "object" && !!d.error
+            // as drawn: no wider than the page, nor much larger than its own size
+            readonly property real shownW: ready ? Math.min(width, d.w * 1.4 * fs) : width
+            readonly property real natural: ready ? shownW * d.h / Math.max(1, d.w) : 0
+            width: parent ? parent.width : 0
+            height: failed ? fallback.height : fixedHeight > 0 ? fixedHeight : ready ? Math.min(natural, 640 * fs) : 120 * fs
+            Image {
+                anchors.fill: parent
+                visible: db.ready
+                source: db.ready ? db.d.url : ""
+                // rasterised from the SVG at the size shown (twice, for sharp text)
+                sourceSize.width: Math.max(1, Math.round(Math.min(db.width, db.shownW) * 2))
+                fillMode: Image.PreserveAspectFit
+                horizontalAlignment: Image.AlignHCenter
+                verticalAlignment: db.fixedHeight > 0 ? Image.AlignVCenter : Image.AlignTop
+                asynchronous: true
+                smooth: true
+                mipmap: true
+            }
+            Rectangle {
+                visible: !db.ready && !db.failed
+                anchors.fill: parent
+                radius: Theme.spacing.radiusLarge
+                color: Theme.palette.surfaceRaised
+                LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: Math.round(13 * db.fs); color: Theme.palette.textTertiary; text: "Drawing diagram…" }
+            }
+            // not drawable here: show its source, and why
+            Column {
+                id: fallback
+                visible: db.failed
+                width: parent.width
+                spacing: 4
+                LogosText {
+                    width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.PlainText
+                    font.pixelSize: Math.round(12 * db.fs); color: Theme.palette.textTertiary
+                    text: "Diagram not drawn here (" + (db.failed ? db.d.error : "") + "); its source:"
+                }
+                Loader { width: parent.width; property var b: db.b; property real fs: db.fs; sourceComponent: codeBlock }
+            }
+        }
+    }
     // Side by side (an image beside text). dDocs' layouts: align-right makes the first
     // column twice as wide, align-left the last one.
     Component {
@@ -1901,6 +1972,7 @@ Item {
         if (!b) return textBlock
         if (b.t === "hr" || b.t === "pagebreak") return hrBlock
         if (b.t === "table") return tableBlock
+        if (root.isDiagram(b)) return diagramBlock
         if (b.t === "code") return codeBlock
         if (b.t === "image") return imageBlock
         if (b.t === "columns") return columnsBlock
@@ -1956,7 +2028,8 @@ Item {
         return out
     }
     function slideKind(indices) {
-        if (indices.length === 1 && root.blocks[indices[0]] && root.blocks[indices[0]].t === "image") return "image"
+        var one = indices.length === 1 ? root.blocks[indices[0]] : null
+        if (one && (one.t === "image" || root.isDiagram(one))) return "image"
         return indices.every(root.isHeadingIdx) ? "title" : "content"
     }
     function buildDeck() {

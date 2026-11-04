@@ -686,7 +686,8 @@ fn blocks_to_md(blocks: &[Block]) -> String {
                 };
                 out.push_str(&format!("{pad}{marker} {tick}{inline}"));
             }
-            Block::Code(lines) => out.push_str(&format!("```\n{}\n```", lines.join("\n"))),
+            // Qt keeps no language on a code block; a Mermaid diagram says what it is
+            Block::Code(lines) => out.push_str(&format!("```{}\n{}\n```", if crate::diagram::looks_like_mermaid(&lines.join("\n")) { "mermaid" } else { "" }, lines.join("\n"))),
             Block::Hr => out.push_str("---"),
             Block::Table(rows) => {
                 let cols = rows.iter().map(|r| r.len()).max().unwrap_or(1).max(1);
@@ -744,6 +745,58 @@ fn guard_start(t: &str) -> String {
 /// Qt's HTML -> Markdown.
 pub fn to_md(html: &str) -> String {
     blocks_to_md(&blocks_from_html(html))
+}
+
+/// Code fences (` ``` ` lines) of a Markdown text: (index of the opening line, language,
+/// body).
+fn fences(md: &str) -> Vec<(usize, String, String)> {
+    let lines: Vec<&str> = md.lines().collect();
+    let mut out = vec![];
+    let mut i = 0;
+    while i < lines.len() {
+        let t = lines[i].trim_start();
+        if let Some(lang) = t.strip_prefix("```") {
+            let start = i;
+            let mut body = vec![];
+            i += 1;
+            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+                body.push(lines[i]);
+                i += 1;
+            }
+            out.push((start, lang.trim().to_string(), body.join("\n")));
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Give the code blocks of Markdown that came back from the visual editor (which keeps
+/// no languages) the languages they had in `previous`: a block with the same text gets
+/// its language; otherwise, while the number of code blocks is unchanged, the one in the
+/// same place does.
+pub fn restore_code_langs(md: &str, previous: &str) -> String {
+    let old = fences(previous);
+    let new = fences(md);
+    if old.is_empty() || new.is_empty() {
+        return md.to_string();
+    }
+    let mut lines: Vec<String> = md.lines().map(str::to_string).collect();
+    for (k, (at, lang, body)) in new.iter().enumerate() {
+        if !lang.is_empty() {
+            continue;
+        }
+        let by_text = old.iter().find(|(_, l, b)| !l.is_empty() && b.trim() == body.trim()).map(|(_, l, _)| l.clone());
+        let by_place = (old.len() == new.len()).then(|| old[k].1.clone()).filter(|l| !l.is_empty());
+        if let Some(l) = by_text.or(by_place) {
+            let indent: String = lines[*at].chars().take_while(|c| c.is_whitespace()).collect();
+            lines[*at] = format!("{indent}```{l}");
+        }
+    }
+    let mut out = lines.join("\n");
+    if md.ends_with('\n') {
+        out.push('\n');
+    }
+    out
 }
 
 // ── Markdown -> HTML for Qt ──────────────────────────────────────────────────
@@ -1383,6 +1436,25 @@ li.checked::marker { content: "\2612"; }
         assert_eq!(to_md(qt), "Deck: https://logos.co/deck\n");
         // an address Markdown would misread keeps the explicit form
         assert_eq!(to_md(r#"<p><a href="https://x.io/a_b_c">https://x.io/a_b_c</a></p>"#), "[https://x.io/a\\_b\\_c](https://x.io/a_b_c)\n");
+    }
+
+    /// Qt keeps no code language: diagrams are recognised, other languages come back
+    /// from the draft as it was.
+    #[test]
+    fn code_languages_survive_the_visual_editor() {
+        let md = "# T\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\nand\n\n```rust\nfn main() {}\n```\n";
+        // as Qt writes it back: one <pre> per code line, no language anywhere
+        let qt = "<html><body><h1>T</h1><pre>flowchart LR</pre><pre>  A --&gt; B</pre><p>and</p><pre>fn main() {}</pre></body></html>";
+        let back = to_md(qt);
+        assert!(back.contains("```mermaid\nflowchart LR\n  A --> B\n```"), "{back}");
+        assert!(back.contains("```\nfn main() {}"), "Qt lost it: {back}");
+        assert_eq!(restore_code_langs(&back, md), md);
+        // edited in the editor: same place, same number of blocks
+        let edited = back.replace("fn main() {}", "fn main() { run() }");
+        assert!(restore_code_langs(&edited, md).contains("```rust\nfn main() { run() }"));
+        // a diagram typed in the visual editor (no language at all) is still a diagram
+        let typed = to_md("<html><body><pre>sequenceDiagram</pre><pre>  A-&gt;&gt;B: hi</pre></body></html>");
+        assert!(typed.starts_with("```mermaid\nsequenceDiagram"), "{typed}");
     }
 
     #[test]

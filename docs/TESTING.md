@@ -1,5 +1,36 @@
 # What was tested, and how to repeat it
 
+## 0.10.0: diagrams (Mermaid) in documents and slides (2026-11-04)
+
+Asked by vpavlin: draw diagrams (module dependencies, data flows) in slides.
+
+- Syntax: a code block in the `mermaid` language, which is how dDocs stores diagrams
+  (`fileverse-ddocs/package/extensions/code-block`, mermaid 11), so published drafts
+  show them in Fileverse too.
+- Renderer chosen by a spike (three samples: module map, sequence, storage flow),
+  each drawn through Qt 6.9's SVG plugin (what Basecamp ships):
+  - merman 0.10.0-alpha.1: unusable through Qt (its CSS is ignored: black shapes; its
+    flowchart labels are HTML in `foreignObject`), and about 35 MB more;
+  - mermaid-rs-renderer 0.3.1 (MIT): plain SVG; about 5 MB more; Qt ignored the per-line
+    `tspan` positions (wrapped labels ran together) and the CSS-style font list. The core
+    now gives each line its own `text` and passes one font family (the view's).
+- Core `diagram(source, colors, view_dir)` (a job) writes the SVG to the view's image
+  cache in the view's colours; `doc::slides` gives a lone diagram the whole stage. The
+  view draws `mermaid` blocks as pictures, never splits them, and shows the source with
+  the reason when one cannot be drawn.
+- Found on the way: the visual editor dropped every code block's language (Qt keeps
+  none), so a diagram became plain code after Visual → Markdown. Now a block whose first
+  line names a Mermaid diagram type is written as `mermaid`, and other languages are
+  restored from the saved draft (same text, else same place).
+- cargo: `flowcharts_and_sequences_render_for_qt`, `bad_input_is_an_error_not_a_crash`,
+  `wrapped_labels_become_separate_lines`, `a_diagram_alone_fills_its_slide`,
+  `code_languages_survive_the_visual_editor`. Harness: modes `diagram`, `diagramonly N`.
+- Basecamp GUI: a new draft with a flowchart (subgraph, cylinders, a hexagon, labelled and
+  dotted edges, `<br/>` line breaks) and a sequence diagram with a note, typed in the
+  Markdown view: the live preview draws both; Visual → Markdown keeps ```` ```mermaid ````;
+  presenting shows "How the modules fit" with the flowchart under it and the sequence
+  diagram alone on a slide after `===`.
+
 ## 0.9.2: `===` page breaks and clickable links (2026-11-03)
 
 Asked by vpavlin: `===` should start a new slide, and links should be clickable.
