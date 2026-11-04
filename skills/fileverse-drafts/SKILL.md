@@ -22,12 +22,16 @@ FV=<this skill's directory>/fvdraft.py
 python3 $FV where      # the drafts directories found; the first one is used
 ```
 
-If nothing is found, the user has not opened the Fileverse app in Basecamp on this
-machine (or Basecamp keeps its data elsewhere): ask, and set `FV_DRAFTS=<dir>`. The
-directory looks like
-`~/.local/share/Logos/LogosBasecamp/module_data/fileverse_core/<hash>/drafts`.
-Drafts exist only on the machine where Basecamp runs: if the user's Basecamp is on
-another machine, this skill has to run there.
+Basecamp keeps its data in its user directory: the `--user-dir DIR` it was started
+with (then drafts are in `DIR/module_data/fileverse_core/<hash>/drafts`), or by default
+`~/.local/share/Logos/LogosBasecamp` (Linux) / `~/Library/Application
+Support/Logos/LogosBasecamp` (macOS). `where` finds the `--user-dir` of a running
+Basecamp by itself and remembers it (in `~/.cache/fvdraft/user-dirs`) for when Basecamp
+is closed. If nothing is found, the user has not opened the Fileverse app in that
+Basecamp yet, or it is not running and has not been seen: ask for its `--user-dir` and
+set `FV_BASECAMP_USER_DIR=<dir>` (or `FV_DRAFTS=<drafts dir>`). Drafts exist only on the
+machine where Basecamp runs: if the user's Basecamp is on another machine, this skill
+has to run there.
 
 ## Workflow
 

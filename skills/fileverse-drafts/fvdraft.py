@@ -22,7 +22,10 @@ Commands (all print JSON or Markdown on stdout, errors on stderr, exit 1 on erro
                                         Markdown line to put where it should appear
   fvdraft.py lint (ID | --file F)       check Markdown for things that will not show well
 
-Set FV_DRAFTS to a drafts directory to skip the search. Python 3 standard library only.
+Where: FV_DRAFTS (a drafts directory) wins; else FV_BASECAMP_USER_DIR (Basecamp's
+--user-dir; several separated by ':'), the --user-dir of a running Basecamp (remembered in
+~/.cache/fvdraft/user-dirs for when it is closed), and Basecamp's default data
+directories. Python 3 standard library only.
 """
 
 import argparse
@@ -45,13 +48,99 @@ def die(msg):
     sys.exit(1)
 
 
+REMEMBERED = os.path.join(os.path.expanduser("~"), ".cache", "fvdraft", "user-dirs")
+
+
+def user_dirs_running():
+    """The --user-dir of running Basecamp processes (Linux /proc; else ps)."""
+    out = []
+
+    def from_argv(argv, cwd=None):
+        for i, a in enumerate(argv):
+            v = None
+            if a == "--user-dir" and i + 1 < len(argv):
+                v = argv[i + 1]
+            elif a.startswith("--user-dir="):
+                v = a.split("=", 1)[1]
+            if v:
+                v = os.path.expanduser(v)
+                if not os.path.isabs(v) and cwd:
+                    v = os.path.join(cwd, v)
+                out.append(os.path.normpath(v))
+
+    if os.path.isdir("/proc"):
+        for pid in os.listdir("/proc"):
+            if not pid.isdigit():
+                continue
+            try:
+                with open(f"/proc/{pid}/cmdline", "rb") as f:
+                    argv = [x.decode(errors="replace") for x in f.read().split(b"\0") if x]
+                if not any(a.startswith("--user-dir") for a in argv):
+                    continue
+                try:
+                    cwd = os.readlink(f"/proc/{pid}/cwd")
+                except OSError:
+                    cwd = None
+                from_argv(argv, cwd)
+            except OSError:
+                continue
+    else:
+        try:
+            import subprocess
+            ps = subprocess.run(["ps", "-axo", "command"], capture_output=True, text=True, timeout=5).stdout
+            for line in ps.splitlines():
+                if "--user-dir" in line:
+                    from_argv(line.split())
+        except Exception:
+            pass
+    return out
+
+
+def remembered():
+    try:
+        with open(REMEMBERED, encoding="utf-8") as f:
+            return [l.strip() for l in f if l.strip()]
+    except OSError:
+        return []
+
+
+def remember(dirs):
+    known = remembered()
+    new = [d for d in dirs if d not in known]
+    if not new:
+        return
+    try:
+        os.makedirs(os.path.dirname(REMEMBERED), exist_ok=True)
+        with open(REMEMBERED, "a", encoding="utf-8") as f:
+            for d in new:
+                f.write(d + "\n")
+    except OSError:
+        pass
+
+
 def candidates():
+    """Drafts directories, the most recently changed first. Basecamp keeps module data
+    under its user directory: `--user-dir DIR` (then DIR/module_data/...) or, by
+    default, ~/.local/share/Logos/LogosBasecamp (Linux) / ~/Library/Application
+    Support/Logos/LogosBasecamp (macOS)."""
     home = os.path.expanduser("~")
-    pats = [
-        os.path.join(home, ".local/share/Logos/LogosBasecamp/module_data/fileverse_core/*/drafts"),
-        os.path.join(home, "Library/Application Support/Logos/LogosBasecamp/module_data/fileverse_core/*/drafts"),
+    roots = []
+    env = os.environ.get("FV_BASECAMP_USER_DIR")
+    if env:
+        roots += [os.path.expanduser(r) for r in env.split(os.pathsep) if r]
+    running = user_dirs_running()
+    remember([r for r in running if glob.glob(os.path.join(r, "module_data/fileverse_core/*/drafts"))])
+    roots += running + remembered()
+    roots += [
+        os.path.join(home, ".local/share/Logos/LogosBasecamp"),
+        os.path.join(home, "Library/Application Support/Logos/LogosBasecamp"),
     ]
-    found = [d for p in pats for d in glob.glob(p) if os.path.isdir(d)]
+    found = []
+    for r in roots:
+        for d in glob.glob(os.path.join(r, "module_data/fileverse_core/*/drafts")):
+            d = os.path.normpath(d)
+            if os.path.isdir(d) and d not in found:
+                found.append(d)
 
     def last_change(d):
         times = [os.path.getmtime(f) for f in glob.glob(os.path.join(d, "*.json"))]
@@ -68,7 +157,8 @@ def drafts_dir():
         return env
     found = candidates()
     if not found:
-        die("no Fileverse drafts directory found; open the Fileverse app in Basecamp once, or set FV_DRAFTS")
+        die("no Fileverse drafts directory found: open the Fileverse app in Basecamp once (while it runs, a --user-dir is found), "
+            "or set FV_BASECAMP_USER_DIR to Basecamp's --user-dir, or FV_DRAFTS to the drafts directory")
     return found[0]
 
 
@@ -120,8 +210,13 @@ def public(draft):
 
 
 def cmd_where(_a):
-    env = os.environ.get("FV_DRAFTS")
-    print(json.dumps({"FV_DRAFTS": env, "found": candidates()}, indent=2))
+    print(json.dumps({
+        "FV_DRAFTS": os.environ.get("FV_DRAFTS"),
+        "FV_BASECAMP_USER_DIR": os.environ.get("FV_BASECAMP_USER_DIR"),
+        "running_user_dirs": user_dirs_running(),
+        "remembered_user_dirs": remembered(),
+        "found": candidates(),
+    }, indent=2))
 
 
 def cmd_list(_a):
