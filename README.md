@@ -67,6 +67,17 @@ private IPFS lane, images, writing back to Fileverse's chain records, live colla
   that reaches Qt's StyledText is markup the core wrote (`b i u s code br`, and `a`
   limited to http/https/mailto). Links open only on click.
 
+## Agents
+
+`skills/fileverse-drafts/` is an agent skill (Claude Code `SKILL.md` format, usable by
+any agent with a shell) for writing and editing drafts that appear in this app's Drafts
+list: where drafts live, the `fvdraft.py` helper (list, show, new, save with a change
+check, add-image, lint) and the Markdown the app understands (slides, columns, pictures,
+Mermaid diagrams). It runs on the machine where Basecamp keeps its data. To install it
+for Claude Code: copy or link the directory into `~/.claude/skills/`. Agents do not
+publish; the app reloads a draft changed on disk, and asks before your unsaved edits and
+an agent's change meet.
+
 ## Build
 
 ```sh

@@ -245,14 +245,60 @@ Item {
     }
     readonly property string docCopyId: { root.snap; return root.copyIdFor(root.docUrl) }
     function openDraft(id) { root.act("draft_get", [id], "", function (r) { root.editDraft(r.draft) }) }
+    // The draft as last loaded or saved here: a save from an older version is refused by
+    // the core (an agent, or another window, wrote it meanwhile).
+    function draftBase() { return root.draft && root.draft.updatedAt ? String(root.draft.updatedAt) : "" }
+    property var outsideDraft: null       // the newer version on disk while you have unsaved edits
+    property bool savingDraft: false
     function saveDraft(then) {
-        if (!root.draft) return
+        if (!root.draft || root.outsideDraft) return
         var visual = root.visualEdit
-        root.core(visual ? "draft_save_rich" : "draft_save", [root.draft.id, titleField.text, visual ? richArea.text : mdArea.text], function (raw) {
+        root.savingDraft = true
+        root.core(visual ? "draft_save_rich" : "draft_save", [root.draft.id, titleField.text, visual ? richArea.text : mdArea.text, root.draftBase()], function (raw) {
+            root.savingDraft = false
             var r = root.j(raw)
             if (r && r.ok) { root.draft = r.draft; root.draftDirty = false; root.refresh(); if (then) then() }
+            else if (r && r.conflict) root.changedOutside(r.draft)
             else root.fail(r ? r.error : "Saving failed.")
         })
+    }
+    function changedOutside(d) {
+        if (!root.draft || !d || d.id !== root.draft.id) return
+        // our own save, seen before its reply: nothing changed outside
+        if (!root.visualEdit && d.markdown === mdArea.text && d.title === titleField.text) { root.draft = d; return }
+        if (!root.draftDirty) root.reloadDraft(d)
+        else root.outsideDraft = d
+    }
+    // Show a newer version of the open draft, keeping the cursor about where it was.
+    function reloadDraft(d) {
+        var visual = root.visualEdit, pos = visual ? richArea.cursorPosition : mdArea.cursorPosition
+        root.outsideDraft = null
+        root.draft = d; root.draftDirty = false
+        titleField.text = d.title
+        root.loadEditor(d.markdown)
+        if (visual) richArea.cursorPosition = Math.min(pos, richArea.length)
+        else mdArea.cursorPosition = Math.min(pos, mdArea.length)
+        root.say("Updated: the draft was changed outside the editor")
+    }
+    function keepMine() {
+        // overwrite the outside version with what is in the editor
+        if (!root.outsideDraft) return
+        var d = root.draft
+        d.updatedAt = root.outsideDraft.updatedAt
+        root.draft = d
+        root.outsideDraft = null
+        root.saveDraft()
+    }
+    // Each snapshot lists the drafts on disk: notice when the open one was written elsewhere.
+    function checkOutside() {
+        if (root.mode !== "edit" || !root.draft || root.outsideDraft || root.savingDraft || previewTimer.running) return
+        var ds = root.snap.drafts || []
+        for (var i = 0; i < ds.length; i++) {
+            if (ds[i].id !== root.draft.id) continue
+            if ((ds[i].updatedAt || 0) > (root.draft.updatedAt || 0))
+                root.core("draft_get", [root.draft.id], function (raw) { var r = root.j(raw); if (r && r.ok && r.draft.updatedAt > (root.draft ? root.draft.updatedAt || 0 : 0)) root.changedOutside(r.draft) })
+            return
+        }
     }
     // ── the visual editor ──
     // The TextArea edits formatted text in Qt's RichText mode; drafts stay Markdown.
@@ -336,8 +382,9 @@ Item {
         var before = rt.substring(0, rp)
         var seenR = before.substring(root.lastBreak(before) + 1)
         // visual -> markdown: save converts, and hands the Markdown back
-        root.core("draft_save_rich", [root.draft.id, titleField.text, richArea.text], function (raw) {
+        root.core("draft_save_rich", [root.draft.id, titleField.text, richArea.text, root.draftBase()], function (raw) {
             var r = root.j(raw)
+            if (r && r.conflict) { root.changedOutside(r.draft); return }
             if (!r || !r.ok) { root.fail(r ? r.error : "Saving failed."); return }
             root.draft = r.draft; root.draftDirty = false
             root.visualEdit = false
@@ -563,7 +610,7 @@ Item {
         root.snapBusy = true
         root.core("snapshot", [], function (raw) {
             var s = root.j(raw)
-            if (s && s.ok) { root.snap = s; root.missedPolls = 0; root.coreReachable = true }
+            if (s && s.ok) { root.snap = s; root.missedPolls = 0; root.coreReachable = true; root.checkOutside() }
             else if (++root.missedPolls >= 3) root.coreReachable = false
             root.snapBusy = false
             if (root.snapAgain) { root.snapAgain = false; root.refresh() }
@@ -1328,6 +1375,27 @@ Item {
                         enabled: !root.busyWith("publish")
                         text: root.busyWith("publish") ? ("Publishing… " + root.elapsed("publish") + "s") : (root.draft && root.draft.published ? "Publish again" : "Publish")
                         onClicked: root.publishDraft()
+                    }
+                }
+                // changed on disk (an agent?) while you have unsaved edits here
+                Rectangle {
+                    Layout.fillWidth: true
+                    visible: !!root.outsideDraft
+                    implicitHeight: outsideRow.implicitHeight + 16
+                    radius: Theme.spacing.radiusSmall
+                    color: Theme.colors.getColor(Theme.palette.primary, 0.16)
+                    border.color: Theme.palette.primary
+                    RowLayout {
+                        id: outsideRow
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: Theme.spacing.small
+                        LogosText {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13
+                            text: "This draft was changed outside the editor (by an agent or another window) while you were typing. Saving is paused."
+                        }
+                        LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Load their version"; onClicked: root.reloadDraft(root.outsideDraft) }
+                        LogosButton { compact: true; text: "Keep mine"; onClicked: root.keepMine() }
                     }
                 }
                 RowLayout {

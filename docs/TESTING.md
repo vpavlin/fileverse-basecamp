@@ -1,5 +1,25 @@
 # What was tested, and how to repeat it
 
+## 0.11.0: agents write drafts (skill), the app notices (2026-11-04)
+
+- `skills/fileverse-drafts/` (SKILL.md + `fvdraft.py`, Python standard library).
+  Against the GUI rig's drafts directory (`FV_DRAFTS`): `new` made "Agent deck" (file
+  mode 600, written via a temporary file inside the draft's own directory, since the
+  app lists every JSON file in the drafts directory); `add-image` stored the picture under
+  the same name the app gives it (`08c666…9a.png`) and printed an `fvimg:` reference the
+  app shows; `save --base` with a stale value was refused (exit 1), with the current one
+  accepted; `info` never prints the secret; `lint` reported all eight problems in a
+  deliberately broken document (unlabelled diagram, `loop`, `autonumber`, a self-message,
+  a web picture, `==`, unclosed columns, no title).
+- Core: `draft_save` / `draft_save_rich` take `base` (the `updatedAt` the editor loaded)
+  and refuse a save over a newer version (`{ conflict, draft }`).
+- Basecamp GUI: "Agent deck" appeared in Drafts and opened (picture beside text in
+  columns); an agent `save` while it was open and untouched showed the new line within
+  seconds; an agent `save` while typing gave the banner "changed outside the editor …
+  Saving is paused" (the file kept the agent's version); "Load their version" showed it;
+  repeated, "Keep mine" saved the editor's text over it.
+- Includes 0.10.1 (unlabelled Mermaid fences).
+
 ## 0.10.1: unlabelled Mermaid fences (2026-11-04)
 
 vpavlin's diagram showed as code: its fence had no `mermaid` label. A fence without a

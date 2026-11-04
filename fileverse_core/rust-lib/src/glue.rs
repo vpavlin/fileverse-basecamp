@@ -87,10 +87,14 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn preview(&self, markdown: String) -> String;
     /// Create a draft. `source_url` names the document it was copied from (may be empty).
     fn draft_create(&self, title: String, markdown: String, source_url: String) -> String;
-    /// Save a draft's title and Markdown. Returns it with a fresh preview.
-    fn draft_save(&self, draft_id: String, title: String, markdown: String) -> String;
+    /// Save a draft's title and Markdown. Returns it with a fresh preview. `base` is the
+    /// `updatedAt` the editor started from: if the draft has changed since (an agent or
+    /// another window wrote it), nothing is saved and `{ conflict: true, draft }` returns
+    /// the current version. An empty `base` saves regardless.
+    fn draft_save(&self, draft_id: String, title: String, markdown: String, base: String) -> String;
     /// Save a draft from the visual editor: its Qt rich-text HTML is converted to Markdown.
-    fn draft_save_rich(&self, draft_id: String, title: String, html: String) -> String;
+    /// `base` as for `draft_save`.
+    fn draft_save_rich(&self, draft_id: String, title: String, html: String, base: String) -> String;
     /// Markdown -> HTML for the visual editor: `{ html, pending }`. Images show from the
     /// view's own directory (`view_dir`); `pending` lists the images (references) still
     /// to fetch with `image` before they appear.
@@ -1264,11 +1268,18 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         json!({ "ok": true, "draft": out }).to_string()
     }
 
-    fn draft_save(&self, draft_id: String, title: String, markdown: String) -> String {
+    fn draft_save(&self, draft_id: String, title: String, markdown: String, base: String) -> String {
         let (p, mut d) = match self.load_draft(&draft_id) {
             Ok(x) => x,
             Err(e) => return err(e),
         };
+        let current = d["updatedAt"].as_u64().map(|n| n.to_string()).unwrap_or_default();
+        if !base.trim().is_empty() && base.trim() != current {
+            let mut out = d.clone();
+            out.as_object_mut().unwrap().remove("secret");
+            out["preview"] = preview_json(d["markdown"].as_str().unwrap_or(""));
+            return json!({ "ok": false, "conflict": true, "error": "this draft was changed outside the editor", "draft": out }).to_string();
+        }
         d["title"] = json!(if title.trim().is_empty() { "Untitled".to_string() } else { title });
         d["markdown"] = json!(markdown);
         d["updatedAt"] = json!(now_ms());
@@ -1279,13 +1290,13 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         json!({ "ok": true, "draft": out }).to_string()
     }
 
-    fn draft_save_rich(&self, draft_id: String, title: String, html: String) -> String {
+    fn draft_save_rich(&self, draft_id: String, title: String, html: String, base: String) -> String {
         let saved = self.load_draft(&draft_id).ok().and_then(|(_, d)| d["markdown"].as_str().map(str::to_string)).unwrap_or_default();
         let refs = self.draft_images(&draft_id, &saved);
         let md = rich::with_images(self.image_bridge(&draft_id, refs, None), || rich::to_md(&html));
         // the editor keeps no code languages: give them back from the draft as saved
         let md = rich::restore_code_langs(&md, &saved);
-        self.draft_save(draft_id, title, md)
+        self.draft_save(draft_id, title, md, base)
     }
 
     fn rich_html(&self, markdown: String, draft_id: String, view_dir: String) -> String {
