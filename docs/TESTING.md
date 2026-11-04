@@ -1,5 +1,12 @@
 # What was tested, and how to repeat it
 
+## 0.10.1: unlabelled Mermaid fences (2026-11-04)
+
+vpavlin's diagram showed as code: its fence had no `mermaid` label. A fence without a
+language whose first line names a Mermaid diagram type is now given the `mermaid`
+language when the draft is turned into a document (so Fileverse draws it too). cargo:
+`an_unlabelled_mermaid_fence_is_a_diagram`.
+
 ## 0.10.0: diagrams (Mermaid) in documents and slides (2026-11-04)
 
 Asked by vpavlin: draw diagrams (module dependencies, data flows) in slides.

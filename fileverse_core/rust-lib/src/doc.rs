@@ -839,6 +839,14 @@ mod tests {
     }
 
     #[test]
+    fn an_unlabelled_mermaid_fence_is_a_diagram() {
+        let md = "x\n\n```\nflowchart LR\n  ui --> core\n```\n\n```\nlet a = 1;\n```\n";
+        let b = &tabs(&load(&crate::md::to_yjs(md)).unwrap())[0].blocks;
+        assert!(is_diagram(&b[1]), "{:?}", b[1]);
+        assert!(!is_diagram(&b[2]) && b[2].lang.is_empty(), "{:?}", b[2]);
+    }
+
+    #[test]
     fn a_diagram_alone_fills_its_slide() {
         let md = "# Modules\n\n```mermaid\nflowchart LR\n  A --> B\n```\n\n===\n\n```mermaid\nflowchart LR\n  C --> D\n```\n";
         let tab = &tabs(&load(&crate::md::to_yjs(md)).unwrap())[0];

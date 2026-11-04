@@ -452,6 +452,11 @@ impl Builder<'_> {
             Event::End(TagEnd::CodeBlock) => {
                 let code = b.code_buf.take().unwrap_or_default();
                 let el = b.push_el("codeBlock");
+                // a fence without a language that holds a Mermaid diagram is one (dDocs
+                // draws a code block as a diagram only when its language says so)
+                if b.code_lang.trim().is_empty() && crate::diagram::looks_like_mermaid(&code) {
+                    b.code_lang = "mermaid".into();
+                }
                 if !b.code_lang.is_empty() {
                     el.insert_attribute(&mut b.txn, "language", b.code_lang.clone());
                 }
