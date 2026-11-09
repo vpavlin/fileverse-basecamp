@@ -162,6 +162,11 @@ pub struct Shared {
     cursor_pending: Option<(Option<Id>, Option<Id>)>,
     /// Someone new said hello: answer with our presence (and cursor) at this time.
     presence_reply: Option<u64>,
+    /// Operations received from others since our last ops message: not ours to send.
+    from_others: HashSet<Id>,
+    /// Heads after a burst of local edits, so that a peer who lost a message asks for it
+    /// (relays drop messages; a lost edit would otherwise only be noticed on reopening).
+    heads_after_burst: Option<u64>,
     repairs: Vec<Repair>,
     pub peers: BTreeMap<String, Peer>,
     /// The text changed (locally or from others) since the glue last saved it.
@@ -197,6 +202,8 @@ impl Shared {
             last_cursor_sent: 0,
             cursor_pending: None,
             presence_reply: None,
+            from_others: HashSet::new(),
+            heads_after_burst: None,
             repairs: vec![],
             peers: BTreeMap::new(),
             dirty: false,
@@ -398,7 +405,9 @@ impl Shared {
                     EncodableOp::Node(node) => {
                         let id = node.id();
                         ids.push(id);
-                        let _ = self.web.apply_to_with_id(self.obj, id, node);
+                        if let Err(e) = self.web.apply_to_with_id(self.obj, id, node) {
+                            eprintln!("fileverse-collab: refused op {}: {e:?}", hex::encode(&id.0[..4]));
+                        }
                     }
                     EncodableOp::Run(_) => return Err("run form in a delta".into()),
                 }
@@ -501,6 +510,8 @@ impl Collab {
         if !text.is_empty() {
             s.web.seq_mut(&s.obj).expect("seq").insert_batch(0, text.chars().take(MAX_TEXT));
         }
+        // the starting text reaches joiners by repair: it is not an edit to broadcast
+        s.published = s.web.clock();
         let hex = s.id_hex();
         self.docs.insert(hex.clone(), s);
         self.docs.get_mut(&hex).unwrap()
@@ -585,12 +596,26 @@ impl Collab {
         if !force && now < d.last_publish + PUBLISH_EVERY {
             return;
         }
-        let nodes: Vec<HashNode> = d.web.deltas_for(&d.published).into_iter().flat_map(|(_, _, n)| n).collect();
+        let nodes: Vec<HashNode> = d
+            .web
+            .deltas_for(&d.published)
+            .into_iter()
+            .flat_map(|(_, _, n)| n)
+            .filter(|n| !d.from_others.contains(&n.id()))
+            .collect();
         if nodes.is_empty() {
+            // only others' operations since the last send: nothing of ours to send
+            if !d.from_others.is_empty() {
+                d.published = d.web.clock();
+                d.from_others.clear();
+            }
             return;
         }
         d.published = d.web.clock();
+        d.from_others.clear();
         d.last_publish = now;
+        d.heads_after_burst = Some(now + 3_000);
+        eprintln!("fileverse-collab: ops out: {} ops", nodes.len());
         let frames = d.delta_frames(nodes);
         let (topic, key) = (d.ops_topic.clone(), d.key);
         for f in frames {
@@ -632,10 +657,12 @@ impl Collab {
                     self.push(topic.clone(), &key, &pt, "repair");
                 }
             }
+            // Edits made here always go out (only the open draft is edited, but never let a
+            // missed "open" keep them back); heads, presence and cursors only while open.
+            self.flush_local(&id, now, false);
             if !self.docs[&id].active {
                 continue;
             }
-            self.flush_local(&id, now, false);
             let (heads_due, want, presence_due, cursor_due) = {
                 let d = &self.docs[&id];
                 let heads_due = d.heads_sent < HEADS_AFTER.len() && now >= d.activated_at + HEADS_AFTER[d.heads_sent];
@@ -644,11 +671,18 @@ impl Collab {
                 let cursor_due = d.cursor_pending.is_some() && now >= d.last_cursor_sent + CURSOR_EVERY;
                 (heads_due, want, presence_due, cursor_due)
             };
+            let burst_due = {
+                let d = &self.docs[&id];
+                d.heads_after_burst.is_some_and(|t| now >= t && now >= d.last_publish + 3_000)
+            };
             if heads_due {
                 self.docs.get_mut(&id).unwrap().heads_sent += 1;
                 self.send_heads(&id, now);
-            } else if want {
+            } else if want || burst_due {
                 self.send_heads(&id, now);
+            }
+            if burst_due {
+                self.docs.get_mut(&id).unwrap().heads_after_burst = None;
             }
             if presence_due {
                 let d = self.docs.get_mut(&id).unwrap();
@@ -691,10 +725,18 @@ impl Collab {
                 *self.received.entry("ops").or_default() += 1;
                 let d = self.docs.get_mut(&id).unwrap();
                 let before = d.text();
-                let Ok(ids) = d.apply_delta(&pt[1..]) else { return None };
+                let ids = match d.apply_delta(&pt[1..]) {
+                    Ok(ids) => ids,
+                    Err(e) => {
+                        eprintln!("fileverse-collab: bad ops frame: {e}");
+                        return None;
+                    }
+                };
+                eprintln!("fileverse-collab: ops in: {} ops, orphans now {}, text {} -> {} chars", ids.len(), d.has_orphans(), before.chars().count(), d.text().chars().count());
                 for r in d.repairs.iter_mut() {
                     r.seen_since.extend(ids.iter().copied());
                 }
+                d.from_others.extend(ids.iter().copied());
                 if d.has_orphans() && d.active {
                     d.want_heads = true;
                 }
@@ -915,20 +957,98 @@ mod tests {
     }
 
     #[test]
-    fn background_drafts_send_nothing_of_their_own() {
+    fn background_drafts_send_nothing_but_their_edits() {
         let mut a = Collab::new("aa".into(), "A".into(), 1);
         a.share(T, "x");
         let id = hex::encode(T);
-        a.docs.get_mut(&id).unwrap().set_text(None, "xy").unwrap();
         for now in (0..300_000).step_by(100) {
             a.tick(now);
         }
-        assert!(a.take_outbox().is_empty(), "not shared actively: silent");
+        assert!(a.take_outbox().is_empty(), "idle in the background: silent");
+        // an edit made while the draft is not marked open still goes out (once), nothing else
+        a.docs.get_mut(&id).unwrap().set_text(None, "xy").unwrap();
+        for now in (300_000..600_000).step_by(100) {
+            a.tick(now);
+        }
+        let kinds: Vec<&str> = a.take_outbox().iter().map(|o| o.kind).collect();
+        assert_eq!(kinds, ["ops"]);
+        a.tick(600_000);
         a.set_active(Some(&id), 300_000);
         a.tick(300_000);
         a.tick(300_600);
         let kinds: Vec<&str> = a.take_outbox().iter().map(|o| o.kind).collect();
-        assert!(kinds.contains(&"presence") && kinds.contains(&"ops") && kinds.contains(&"heads"), "{kinds:?}");
+        // opened: presence and heads (the edit already went out)
+        assert!(kinds.contains(&"presence") && kinds.contains(&"heads") && !kinds.contains(&"ops"), "{kinds:?}");
+    }
+
+    /// vpavlin's report on 0.12.0: the sharer's edits did not reach the joiner (the sharer's
+    /// draft was never marked open). Edits must flow both ways whatever is marked open.
+    #[test]
+    fn the_sharers_edits_reach_the_joiner_even_if_not_marked_open() {
+        let mut a = Collab::new("aa".into(), "Sharer".into(), 1);
+        let mut b = Collab::new("bb".into(), "Joiner".into(), 2);
+        let id = hex::encode(T);
+        a.share(T, "start\n");
+        b.load(T, None).unwrap();
+        b.set_active(Some(&id), 0);
+        let mut peers = vec![a, b];
+        run(&mut peers, 0, 2_000);
+        assert_eq!(peers[1].docs[&id].text(), "start\n");
+        peers[0].docs.get_mut(&id).unwrap().set_text(None, "start\nSharer wrote this\n").unwrap();
+        peers[1].docs.get_mut(&id).unwrap().set_text(None, "start\nJoiner wrote that\n").unwrap();
+        run(&mut peers, 2_050, 6_000);
+        let (ta, tb) = (peers[0].docs[&id].text(), peers[1].docs[&id].text());
+        assert_eq!(ta, tb);
+        assert!(ta.contains("Sharer wrote this\n") && ta.contains("Joiner wrote that\n"), "{ta:?}");
+    }
+
+    /// Relays lose messages: an edit whose only message was lost still arrives (the heads
+    /// sent after the burst make the peer ask), and received operations are not echoed.
+    #[test]
+    fn a_lost_edit_is_recovered_and_nothing_is_echoed() {
+        let mut a = Collab::new("aa".into(), "A".into(), 1);
+        let mut b = Collab::new("bb".into(), "B".into(), 2);
+        let id = hex::encode(T);
+        a.share(T, "base\n");
+        a.set_active(Some(&id), 0);
+        b.load(T, None).unwrap();
+        b.set_active(Some(&id), 0);
+        let mut peers = vec![a, b];
+        run(&mut peers, 0, 40_000);
+        assert_eq!(peers[1].docs[&id].text(), "base\n");
+        let echoes = peers[1].sent.get("ops").copied().unwrap_or(0);
+        assert_eq!(echoes, 0, "B made no edits: it sends no ops");
+        // A types; its ops message is lost on the way
+        peers[0].docs.get_mut(&id).unwrap().set_text(None, "base\nlost line\n").unwrap();
+        let mut now = 40_050;
+        while peers[0].sent.get("ops").copied().unwrap_or(0) == 0 {
+            peers[0].tick(now);
+            now += 50;
+        }
+        let dropped = peers[0].take_outbox();
+        assert!(dropped.iter().any(|o| o.kind == "ops"));
+        run(&mut peers, now, now + 10_000);
+        assert_eq!(peers[1].docs[&id].text(), "base\nlost line\n");
+    }
+
+    /// HashSeq ids are content hashes: the same characters typed at the same place from the
+    /// same state by two people are the same operations, and merge into one copy.
+    #[test]
+    fn identical_concurrent_typing_collapses_in_hashseq() {
+        let mut a = Collab::new("aa".into(), "A".into(), 1);
+        let mut b = Collab::new("bb".into(), "B".into(), 2);
+        let id = hex::encode(T);
+        a.share(T, "start\n");
+        a.set_active(Some(&id), 0);
+        b.load(T, None).unwrap();
+        b.set_active(Some(&id), 0);
+        let mut peers = vec![a, b];
+        run(&mut peers, 0, 2_000);
+        peers[0].docs.get_mut(&id).unwrap().set_text(None, "start\nfrom the A\n").unwrap();
+        peers[1].docs.get_mut(&id).unwrap().set_text(None, "start\nfrom the B\n").unwrap();
+        run(&mut peers, 2_050, 6_000);
+        let t = peers[0].docs[&id].text();
+        assert_eq!(t.matches("from the ").count(), 1, "{t:?}");
     }
 
     #[test]

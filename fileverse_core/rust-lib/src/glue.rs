@@ -1448,6 +1448,8 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             let snap = shared.snapshot();
             let _ = std::fs::create_dir_all(rt.dir.join("collab"));
             write_private_bytes(&rt.dir.join("collab").join(format!("{id}.hs")), &snap);
+            // shared from the editor: it is the draft the user has open
+            e.set_active(Some(&id), now_ms());
             id
         };
         rt.drafts.lock().unwrap().insert(id.clone(), draft_id.clone());
@@ -1502,6 +1504,8 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 v["shared"] = json!(true);
                 v["transport"] = rt.transport.lock().unwrap().clone();
                 v["me"] = json!({ "id": me, "name": name, "color": color });
+                // joined someone's draft (Leave) or shared it from here (Stop sharing)
+                v["joined"] = json!(self.load_draft(&draft_id).ok().map(|(_, d)| d["collab"]["joined"].as_bool().unwrap_or(false)).unwrap_or(false));
                 v.to_string()
             }
             None => err("this shared draft is not loaded"),

@@ -356,14 +356,14 @@ Item {
                 root.copy(r.id, "Shared draft id")
                 root.say("Shared. Its id is copied: send it to whoever should edit with you. Anyone with it can read and write.")
                 root.collabVersion = ""
-                root.refreshCollab()
+                root.collabActivate()
             })
         })
     }
     function stopSharing() {
         if (!root.draft) return
         var id = root.draft.id
-        root.act("collab_leave", [id], "This draft is private again on this device", function () { root.collab = ({ shared: false }); root.collabVersion = "" })
+        root.act("collab_leave", [id], root.collab.joined ? "Left the shared draft: your copy is private now" : "This draft is private again on this device", function () { root.collab = ({ shared: false }); root.collabVersion = "" })
     }
     property bool joinOpen: false
     function joinShared(sharedId) {
@@ -1548,7 +1548,14 @@ Item {
                         ToolTip.text: "Synced over Logos Delivery (loam_core): " + (root.collab.transport ? (root.collab.transport.status + (root.collab.transport.error ? " · " + root.collab.transport.error : "")) : "")
                     }
                     LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared draft id") }
-                    LogosButton { visible: root.isShared; compact: true; text: "Stop sharing"; onClicked: root.stopSharing() }
+                    LogosButton {
+                        visible: root.isShared; compact: true
+                        text: root.collab.joined ? "Leave" : "Stop sharing"
+                        onClicked: root.stopSharing()
+                        HoverHandler { id: leaveHover }
+                        ToolTip.visible: leaveHover.hovered
+                        ToolTip.text: "Stop syncing this draft on this device. Its text stays here, private; the others keep their copies and can go on editing together."
+                    }
                     LogosButton {
                         visible: !root.isShared && !!root.draft
                         compact: true; text: "Share…"

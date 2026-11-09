@@ -1,5 +1,26 @@
 # What was tested, and how to repeat it
 
+## 0.12.1: shared drafts sync both ways (2026-11-09)
+
+vpavlin's test of 0.12.0: the joiner's edits reached the sharer, not the other way round.
+
+- Causes: (1) "Share…" never marked the shared draft open, and a draft not open sent none
+  of its edits (it still answered repairs, so the joiner got the starting text); (2) the
+  relay loses messages ("No send stream" in delivery_module's log), and a lost edit was only
+  noticed when someone reopened the draft (heads went out only on opening or on a gap);
+  (3) a device re-sent others' operations as its own after receiving them (twice the
+  traffic).
+- Fixes: edits always go out (heads/presence/cursors still only for the open draft);
+  sharing marks the draft open; heads 3 s after each burst of edits, so a peer that lost a
+  message asks for it; received operations are not sent again. Joiners see "Leave".
+- cargo: `the_sharers_edits_reach_the_joiner_even_if_not_marked_open`,
+  `a_lost_edit_is_recovered_and_nothing_is_echoed`, and
+  `identical_concurrent_typing_collapses_in_hashseq` (HashSeq: the same characters typed at
+  the same place from the same state by two people are the same operations).
+- Two Basecamps (t, u), logging ops in/out: a fresh share; three lines typed by u while t was
+  closed arrived when t opened the draft; then t and u typed six lines in turn: identical
+  on both, in order, carets shown.
+
 ## 0.12.0: shared drafts, edited together over Logos Delivery (2026-11-09)
 
 - Design: docs/COLLAB.md. CRDT: HashSeq (davidrusu/hashseq @ 94f5e3c); sync after Reflection
