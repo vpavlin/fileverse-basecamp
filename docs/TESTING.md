@@ -1,5 +1,26 @@
 # What was tested, and how to repeat it
 
+## 0.12.0: shared drafts, edited together over Logos Delivery (2026-11-09)
+
+- Design: docs/COLLAB.md. CRDT: HashSeq (davidrusu/hashseq @ 94f5e3c); sync after Reflection
+  over Logos (vpavlin/reflection feat/logos-delivery); transport loam_core 0.7.3 (relay).
+- cargo (collab.rs, an in-memory relay): sealing and topics; two editors typing at once
+  converge and a late joiner catches up (repair from either peer); a stale edit is rebased;
+  a draft in the background sends nothing; cursors follow inserted text; a 150,000-char draft
+  crosses in several messages.
+- Two Basecamp 0.3.2 instances on this host (rig sessions t on :92, u on :93), each with
+  fileverse_core/ui, loam_core 0.7.3 (built from vpavlin/loam-basecamp d5c72af), ble_mesh
+  0.2.1, delivery_module 0.3.0, on the Logos test network (RLN off):
+  - t: new draft, Share… ("shared · only you here", transport connected); u: Join a shared
+    draft with the id: the text arrived.
+  - u typed a line: it appeared in t with u's avatar ("2 here") and caret.
+  - Found and fixed: u did not see t (t answered presence only to "hello", but heard u's
+    cursor first; now the first message from someone new gets a presence reply), and u's
+    caret was placed by a stale text (now sent again after each save).
+  - After a restart of both: each sees the other; typing in both at the same moment (t on
+    line 1, u on line 2): identical Markdown on both, each caret where the other typed.
+  - u closed, t added a line, u reopened: the line arrived (heads → repair).
+
 ## 0.11.0: agents write drafts (skill), the app notices (2026-11-04)
 
 - `skills/fileverse-drafts/` (SKILL.md + `fvdraft.py`, Python standard library).

@@ -13,6 +13,12 @@
       url = "github:vpavlin/fileverse-basecamp/c8660fafa98807da394e896f7e5656dcfcb0154c?dir=ipfs_module";
       inputs.logos-module-builder.follows = "logos-module-builder";
     };
+    # Shared drafts: loam_core, the host's shared Logos Delivery node (relay by default from
+    # 0.7.3). Optional: used when installed; only its contract is needed here.
+    loam_core = {
+      url = "github:vpavlin/loam-basecamp/d5c72af7e07490079f26a41ac606b27cc4d6da2a?dir=core";
+      inputs.logos-module-builder.follows = "logos-module-builder";
+    };
     # The storage_module Basecamp 0.3.2 bundles.
     storage_module = {
       url = "github:logos-co/logos-storage-module/v3.0.2";

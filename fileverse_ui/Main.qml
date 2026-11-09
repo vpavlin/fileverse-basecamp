@@ -220,7 +220,9 @@ Item {
     }
     function editDraft(d) {
         root.draft = d; root.draftDirty = false; root.mode = "edit"; root.tabIndex = 0
+        root.collab = ({ shared: false }); root.collabVersion = ""; root.collabSentText = d.markdown || ""
         titleField.text = d.title; root.loadEditor(d.markdown)
+        root.collabActivate()
     }
     // The draft a document came from, if it is one of yours (a recent entry knows its
     // draft; older entries are matched by the links the draft was published under).
@@ -252,6 +254,7 @@ Item {
     property bool savingDraft: false
     function saveDraft(then) {
         if (!root.draft || root.outsideDraft) return
+        if (root.isShared) { root.saveShared(then); return }
         var visual = root.visualEdit
         root.savingDraft = true
         root.core(visual ? "draft_save_rich" : "draft_save", [root.draft.id, titleField.text, visual ? richArea.text : mdArea.text, root.draftBase()], function (raw) {
@@ -261,6 +264,142 @@ Item {
             else if (r && r.conflict) root.changedOutside(r.draft)
             else root.fail(r ? r.error : "Saving failed.")
         })
+    }
+    // ── shared drafts (collab_*): edited with others over Logos Delivery ──
+    // A draft is private until shared. A shared one saves through the core, which merges
+    // others' changes (HashSeq); the open one is polled every second for their edits,
+    // who has it open and where their cursors are.
+    property var collab: ({ shared: false })   // the last collab_state of the open draft
+    property string collabVersion: ""           // the version the editor's text is based on
+    property string collabSentText: ""          // the Markdown the editor showed at that version
+    property int editGen: 0                     // bumps on every edit: a reply for older text is not applied
+    readonly property bool isShared: !!(root.draft && root.collab && root.collab.shared)
+    readonly property var collabOnline: (root.collab.peers || []).filter(function (p) { return p.online })
+    onModeChanged: root.collabActivate()
+    function collabActivate() {
+        var id = root.mode === "edit" && root.draft ? root.draft.id : ""
+        root.core("collab_set_active", [id], function () { root.refreshCollab() })
+    }
+    function refreshCollab() {
+        if (root.mode !== "edit" || !root.draft) return
+        var id = root.draft.id
+        root.core("collab_state", [id], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok || !root.draft || root.draft.id !== id) return
+            var first = !root.collab.shared && r.shared
+            root.collab = r
+            if (!r.shared) return
+            if (first && root.collabVersion === "") {
+                // the editor shows the draft file; the shared text is the truth
+                root.collabVersion = r.version
+                if (r.text !== root.collabSentText) root.showSharedText(r.text)
+                else root.collabSentText = r.text
+                return
+            }
+            root.applyRemote(r)
+        })
+    }
+    Timer { interval: 1000; running: root.mode === "edit" && root.isShared; repeat: true; onTriggered: root.refreshCollab() }
+    // Others' edits: show them unless the user is mid-edit (then the next save merges).
+    function applyRemote(r) {
+        if (root.draftDirty || root.savingDraft || previewTimer.running) return
+        if (r.version === root.collabVersion) return
+        root.collabVersion = r.version
+        if (r.text !== root.collabSentText) root.showSharedText(r.text)
+    }
+    // Put the shared text in the editor, keeping the caret by the text before it.
+    function showSharedText(md) {
+        var visual = root.visualEdit
+        var full = visual ? richArea.getText(0, richArea.length) : mdArea.text
+        var pos = visual ? richArea.cursorPosition : mdArea.cursorPosition
+        var before = full.substring(0, pos)
+        var tail = before.substring(root.lastBreak(before) + 1)
+        root.collabSentText = md
+        root.loadEditor(md)
+        if (visual) richArea.cursorPosition = root.cursorFor(richArea.getText(0, richArea.length), tail, full.length ? pos / full.length : 0)
+        else mdArea.cursorPosition = root.cursorFor(mdArea.text, tail, full.length ? pos / full.length : 0)
+        root.draftDirty = false
+        root.updatePreview(md)
+    }
+    function updatePreview(md) {
+        var id = root.draft ? root.draft.id : ""
+        root.core("preview", [md], function (raw) {
+            var p = root.j(raw)
+            if (!p || !p.ok || !root.draft || root.draft.id !== id) return
+            var d = JSON.parse(JSON.stringify(root.draft)); d.preview = p.tabs; d.markdown = md
+            root.draft = d
+        })
+    }
+    function saveShared(then) {
+        var visual = root.visualEdit, id = root.draft.id, gen = root.editGen
+        var titleChanged = titleField.text !== root.draft.title
+        root.savingDraft = true
+        root.core(visual ? "collab_set_rich" : "collab_set_text", [id, root.collabVersion, visual ? richArea.text : mdArea.text], function (raw) {
+            root.savingDraft = false
+            var r = root.j(raw)
+            if (!r || !r.ok) { root.fail(r ? r.error : "Saving failed."); return }
+            if (!root.draft || root.draft.id !== id) return
+            root.collabVersion = r.version
+            if (gen === root.editGen) root.draftDirty = false
+            if (r.merged && gen === root.editGen) root.showSharedText(r.text)
+            else { root.collabSentText = r.text; root.updatePreview(r.text) }
+            // the title is this device's name for the draft (not shared)
+            root.sendCursor()
+            if (titleChanged) root.core("draft_save", [id, titleField.text, r.text, ""], function (raw2) { var t = root.j(raw2); if (t && t.ok && root.draft && root.draft.id === id) { var d = JSON.parse(JSON.stringify(root.draft)); d.title = t.draft.title; root.draft = d } })
+            if (then) then()
+        })
+    }
+    function shareDraft() {
+        if (!root.draft) return
+        root.saveDraft(function () {
+            root.act("collab_share", [root.draft.id], "", function (r) {
+                root.copy(r.id, "Shared draft id")
+                root.say("Shared. Its id is copied: send it to whoever should edit with you. Anyone with it can read and write.")
+                root.collabVersion = ""
+                root.refreshCollab()
+            })
+        })
+    }
+    function stopSharing() {
+        if (!root.draft) return
+        var id = root.draft.id
+        root.act("collab_leave", [id], "This draft is private again on this device", function () { root.collab = ({ shared: false }); root.collabVersion = "" })
+    }
+    property bool joinOpen: false
+    function joinShared(sharedId) {
+        root.act("collab_join", [sharedId.trim(), ""], "", function (r) { root.joinOpen = false; root.section = "drafts"; root.editDraft(r.draft) })
+    }
+    // Our cursor, as offsets into the shared Markdown (in the visual editor, found by the
+    // text before the caret).
+    Timer { id: cursorTimer; interval: 300; onTriggered: root.sendCursor() }
+    function cursorMoved() { if (root.isShared) cursorTimer.restart() }
+    function sendCursor() {
+        if (!root.isShared || !root.draft) return
+        var md = root.collabSentText, caret, anchor
+        if (!root.visualEdit) {
+            caret = mdArea.cursorPosition
+            anchor = mdArea.selectionStart === mdArea.cursorPosition ? mdArea.selectionEnd : mdArea.selectionStart
+        } else {
+            var full = richArea.getText(0, richArea.length)
+            var at = function (pos) {
+                var before = full.substring(0, pos)
+                return root.cursorFor(md, before.substring(Math.max(0, before.length - 24)).replace(/[\u2029\ufdd0\ufdd1\ufffc]/g, "\n"), full.length ? pos / full.length : 0)
+            }
+            caret = at(richArea.cursorPosition)
+            anchor = richArea.selectionStart === richArea.cursorPosition ? at(richArea.selectionEnd) : at(richArea.selectionStart)
+        }
+        root.core("collab_set_cursor", [root.draft.id, root.collabVersion, String(caret), String(anchor)], function () {})
+    }
+    // Where to draw someone's caret in the editor: in the Markdown view it is the offset;
+    // in the visual editor the place after the same text.
+    function peerCaretPos(caret) {
+        var md = root.collabSentText
+        if (caret === null || caret === undefined) return -1
+        if (!root.visualEdit) return Math.min(caret, mdArea.length)
+        var tail = md.substring(Math.max(0, caret - 24), caret).replace(/[#*_`>~\[\]]/g, "")
+        var lines = tail.split("\n"); tail = lines[lines.length - 1]
+        var plain = richArea.getText(0, richArea.length)
+        return root.cursorFor(plain, tail, md.length ? caret / md.length : 0)
     }
     function changedOutside(d) {
         if (!root.draft || !d || d.id !== root.draft.id) return
@@ -291,7 +430,7 @@ Item {
     }
     // Each snapshot lists the drafts on disk: notice when the open one was written elsewhere.
     function checkOutside() {
-        if (root.mode !== "edit" || !root.draft || root.outsideDraft || root.savingDraft || previewTimer.running) return
+        if (root.mode !== "edit" || !root.draft || root.outsideDraft || root.savingDraft || previewTimer.running || root.isShared) return
         var ds = root.snap.drafts || []
         for (var i = 0; i < ds.length; i++) {
             if (ds[i].id !== root.draft.id) continue
@@ -412,6 +551,7 @@ Item {
     }
     function editorChanged() {
         if (root.loadingEditor) return
+        root.editGen++
         root.draftDirty = true
         previewTimer.restart()
     }
@@ -965,7 +1105,14 @@ Item {
                         Layout.fillWidth: true; Layout.fillHeight: true; clip: true
                         ColumnLayout {
                             width: 248; spacing: 2
-                            LogosButton { Layout.fillWidth: true; Layout.bottomMargin: 6; compact: true; variant: LogosButton.Variant.Primary; text: "New document"; onClicked: root.newDraft("Untitled", "# Untitled\n\n", "") }
+                            LogosButton { Layout.fillWidth: true; compact: true; variant: LogosButton.Variant.Primary; text: "New document"; onClicked: root.newDraft("Untitled", "# Untitled\n\n", "") }
+                            LogosButton { Layout.fillWidth: true; Layout.bottomMargin: 6; compact: true; text: root.joinOpen ? "Cancel" : "Join a shared draft…"; onClicked: root.joinOpen = !root.joinOpen }
+                            ColumnLayout {
+                                visible: root.joinOpen
+                                Layout.fillWidth: true; Layout.bottomMargin: 6; spacing: 4
+                                Field { id: joinField; Layout.fillWidth: true; placeholderText: "Paste the id someone sent you"; onAccepted: root.joinShared(text) }
+                                LogosButton { Layout.fillWidth: true; compact: true; variant: LogosButton.Variant.Primary; text: "Join"; enabled: joinField.text.trim().length >= 64; onClicked: root.joinShared(joinField.text) }
+                            }
                             Repeater {
                                 model: root.snap.drafts || []
                                 FileRow {
@@ -1066,6 +1213,12 @@ Item {
                     anchors.margins: 16
                     spacing: Theme.spacing.small
                     LogosText { textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold; text: "Settings" }
+                    Caption { text: "YOUR NAME IN SHARED DRAFTS"; Layout.topMargin: 4 }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Field { id: collabNameField; Layout.fillWidth: true; placeholderText: (root.collab.me && root.collab.me.name) || "Shown on your cursor to others" }
+                        LogosButton { compact: true; text: "Save name"; enabled: collabNameField.text.trim() !== ""; onClicked: root.act("collab_set_name", [collabNameField.text], "Name saved", function () { collabNameField.text = ""; root.refreshCollab() }) }
+                    }
                     Caption { text: "IPFS GATEWAYS"; Layout.topMargin: 4 }
                     Hint { text: "Tried after your own node, one per line. Every block is checked against its hash, so a gateway can fail but cannot change content." }
                     ScrollView {
@@ -1367,7 +1520,43 @@ Item {
                         background: Item {}
                         onTextEdited: { root.draftDirty = true; previewTimer.restart() }
                     }
-                    Chip { text: root.draftDirty ? "editing…" : "saved on this device"; tint: root.draftDirty ? Theme.palette.warning : Theme.palette.success }
+                    Chip {
+                        visible: !root.isShared
+                        text: root.draftDirty ? "editing…" : "saved on this device"; tint: root.draftDirty ? Theme.palette.warning : Theme.palette.success
+                    }
+                    // shared: who else has it open (a dot each), and the transport
+                    Row {
+                        visible: root.isShared
+                        spacing: -6
+                        Repeater {
+                            model: root.collabOnline
+                            Rectangle {
+                                width: 24; height: 24; radius: 12; color: modelData.color; border.color: Theme.palette.background; border.width: 2
+                                LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 11; font.weight: Theme.typography.weightBold; color: "white"; text: (modelData.name || "?").charAt(0).toUpperCase() }
+                                HoverHandler { id: peerHover }
+                                ToolTip.visible: peerHover.hovered; ToolTip.text: modelData.name
+                            }
+                        }
+                    }
+                    Chip {
+                        visible: root.isShared
+                        text: !(root.collab.transport && root.collab.transport.connected) ? "shared · connecting…"
+                              : root.collabOnline.length === 0 ? "shared · only you here" : ("shared · " + (root.collabOnline.length + 1) + " here")
+                        tint: root.collab.transport && root.collab.transport.connected ? Theme.palette.success : Theme.palette.warning
+                        HoverHandler { id: shareHover }
+                        ToolTip.visible: shareHover.hovered
+                        ToolTip.text: "Synced over Logos Delivery (loam_core): " + (root.collab.transport ? (root.collab.transport.status + (root.collab.transport.error ? " · " + root.collab.transport.error : "")) : "")
+                    }
+                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared draft id") }
+                    LogosButton { visible: root.isShared; compact: true; text: "Stop sharing"; onClicked: root.stopSharing() }
+                    LogosButton {
+                        visible: !root.isShared && !!root.draft
+                        compact: true; text: "Share…"
+                        onClicked: root.shareDraft()
+                        HoverHandler { id: shareBtnHover }
+                        ToolTip.visible: shareBtnHover.hovered
+                        ToolTip.text: "Edit this draft together with others, live, over Logos Delivery. You get an id to send them; anyone with it can read and write."
+                    }
                     LogosButton { visible: root.coreSlides.length > 0; compact: true; text: "Present"; onClicked: root.present() }
                     LogosButton {
                         compact: true
@@ -1548,7 +1737,23 @@ Item {
                             placeholderTextColor: Theme.palette.textPlaceholder
                             background: Item {}
                             onTextChanged: root.editorChanged()
-                            onCursorPositionChanged: root.updateBlockKind()
+                            onCursorPositionChanged: { root.updateBlockKind(); root.cursorMoved() }
+                            // others' carets (shared drafts)
+                            Repeater {
+                                model: root.isShared ? root.collabOnline : []
+                                Item {
+                                    readonly property int at: { root.collabSentText; richArea.length; return root.peerCaretPos(modelData.caret) }
+                                    readonly property rect r: at >= 0 ? richArea.positionToRectangle(at) : Qt.rect(0, 0, 0, 0)
+                                    visible: at >= 0 && modelData.caret !== null && modelData.caret !== undefined
+                                    x: r.x; y: r.y; width: 2; height: Math.max(r.height, 14); z: 5
+                                    Rectangle { anchors.fill: parent; color: modelData.color }
+                                    Rectangle {
+                                        y: -14; width: peerName.implicitWidth + 8; height: 14; radius: 3; color: modelData.color
+                                        LogosText { id: peerName; x: 4; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; font.pixelSize: 10; color: "white"; text: modelData.name }
+                                    }
+                                }
+                            }
+
                             // Ctrl+click opens a link (a plain click puts the cursor in it to edit)
                             onReleased: function (ev) {
                                 if (!(ev.modifiers & Qt.ControlModifier)) return
@@ -1599,6 +1804,23 @@ Item {
                             padding: 14
                             background: Rectangle { color: Theme.palette.backgroundInset; radius: Theme.spacing.radiusLarge; border.color: Theme.palette.borderSubtle }
                             onTextChanged: if (activeFocus) root.editorChanged()
+                            onCursorPositionChanged: root.cursorMoved()
+                            // others' carets (shared drafts)
+                            Repeater {
+                                model: root.isShared ? root.collabOnline : []
+                                Item {
+                                    readonly property int at: { root.collabSentText; mdArea.length; return root.peerCaretPos(modelData.caret) }
+                                    readonly property rect r: at >= 0 ? mdArea.positionToRectangle(at) : Qt.rect(0, 0, 0, 0)
+                                    visible: at >= 0 && modelData.caret !== null && modelData.caret !== undefined
+                                    x: r.x; y: r.y; width: 2; height: Math.max(r.height, 14); z: 5
+                                    Rectangle { anchors.fill: parent; color: modelData.color }
+                                    Rectangle {
+                                        y: -14; width: peerName.implicitWidth + 8; height: 14; radius: 3; color: modelData.color
+                                        LogosText { id: peerName; x: 4; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; font.pixelSize: 10; color: "white"; text: modelData.name }
+                                    }
+                                }
+                            }
+
                         }
                     }
                     Rectangle {

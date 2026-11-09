@@ -69,6 +69,12 @@ Window {
         }).join("") }
         if (method === "rich_kind") return { ok: true, kind: "h1" }
         if (method === "image") return { ok: true, jobId: "jimg" }
+        if (method === "collab_state" && (mode === "shared" || mode === "sharedmd"))
+            return { ok: true, shared: true, id: "ab".repeat(32), version: "3", text: win.draft().markdown,
+                     peers: [ { id: "b0b", name: "Bob", color: "#19A979", online: true, caret: 12, anchor: 12 },
+                              { id: "a11", name: "Carol", color: "#945ECF", online: true, caret: 60, anchor: 60 } ],
+                     transport: { connected: true, status: "Connected" }, me: { id: "me", name: "vpavlin", color: "#E8743B" } }
+        if (method === "collab_set_text" || method === "collab_set_rich") return { ok: true, version: "4", text: win.draft().markdown, merged: false }
         if (method === "diagram") return { ok: true, jobId: args[0].indexOf("BROKEN") >= 0 ? "jdiagbad" : "jdiag" }
         if (method === "job") {
             var id = args[0]
@@ -111,7 +117,10 @@ Window {
             it.showSettings = (win.mode === "settings")
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
-            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg") { it.section = "drafts"; it.openDraft("abc123") }
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedmd") {
+                it.section = "drafts"; it.openDraft("abc123")
+                if (win.mode === "sharedmd") it.setVisualEdit(false)
+            }
             else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
         })
     }

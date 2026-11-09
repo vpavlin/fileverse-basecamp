@@ -113,6 +113,31 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn open_link(&self, url: String) -> String;
     /// The style of the editor's text block at `index` (as for `rich_block`): `{ kind }`.
     fn rich_kind(&self, html: String, index: String) -> String;
+    /// Share a draft for editing with others (over Logos Delivery, through loam_core):
+    /// `{ id }`, the 64-hex id to give them. It is the draft's shared secret: whoever has it
+    /// can read and write. A draft is private until shared.
+    fn collab_share(&self, draft_id: String) -> String;
+    /// Join a shared draft by its id: a new draft on this device that follows it. `{ draft }`.
+    fn collab_join(&self, shared_id: String, title: String) -> String;
+    /// A shared draft's current text and version, who else has it open and where their
+    /// cursors are (UTF-16 offsets into `text`), and the transport: `{ shared, id, version,
+    /// text, peers, transport, me }`. `{ shared: false }` for a private draft.
+    fn collab_state(&self, draft_id: String) -> String;
+    /// The user's whole Markdown for a shared draft, edited from `base_version` (from
+    /// `collab_state`); merged with others' changes. `{ version, text }`.
+    fn collab_set_text(&self, draft_id: String, base_version: String, markdown: String) -> String;
+    /// As `collab_set_text`, from the visual editor's HTML.
+    fn collab_set_rich(&self, draft_id: String, base_version: String, html: String) -> String;
+    /// Where the user's cursor is in the text of `base_version`: UTF-16 offsets of the caret
+    /// and of the selection's other end. Sent to the others of the draft (at most once a second).
+    fn collab_set_cursor(&self, draft_id: String, base_version: String, caret: String, anchor: String) -> String;
+    /// The draft the user has open ("" for none). Only it sends anything of its own
+    /// (presence, catch-up, edits): an idle shared draft costs no messages.
+    fn collab_set_active(&self, draft_id: String) -> String;
+    /// Stop sharing a draft on this device. Its text stays; it is private again.
+    fn collab_leave(&self, draft_id: String) -> String;
+    /// The name others see on this device's cursor and presence.
+    fn collab_set_name(&self, name: String) -> String;
     /// One draft with its Markdown and preview.
     fn draft_get(&self, draft_id: String) -> String;
     /// Delete a draft (published copies stay where they are).
@@ -772,6 +797,7 @@ fn preview_json(markdown: &str) -> Value {
 fn draft_summary(d: &Value) -> Value {
     json!({
         "id": d["id"], "title": d["title"], "updatedAt": d["updatedAt"], "sourceUrl": d["sourceUrl"],
+        "shared": d["collab"]["id"].as_str().map(|_| true).unwrap_or(false),
         "link": d["published"]["link"], "publishedAt": d["published"]["at"],
         "links": d["links"].as_array().cloned().unwrap_or_else(|| d["published"]["link"].as_str().map(|l| vec![json!(l)]).unwrap_or_default()),
     })
@@ -856,6 +882,15 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
     }
 
     fn snapshot(&self) -> String {
+        // shared drafts answer others' catch-up even when idle: start their runtime
+        if COLLAB.get().is_none() {
+            let any_shared = self.state.lock().unwrap().drafts_dir().and_then(|d| std::fs::read_dir(d).ok()).map(|rd| {
+                rd.flatten().any(|e| std::fs::read(e.path()).map(|b| b.windows(9).any(|w| w == b"\"collab\":")).unwrap_or(false))
+            });
+            if any_shared == Some(true) {
+                let _ = self.collab_rt();
+            }
+        }
         let s = self.state.lock().unwrap();
         let portals: Vec<Value> = s.keys.iter().map(|k| json!(k)).collect();
         let drafts: Vec<Value> = s
@@ -1389,6 +1424,174 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         json!({ "ok": true, "kind": rich::kind_at(&html, rich::At::parse(&index)) }).to_string()
     }
 
+    fn collab_share(&self, draft_id: String) -> String {
+        let rt = match self.collab_rt() {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let (p, mut d) = match self.load_draft(&draft_id) {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        };
+        if let Some(id) = d["collab"]["id"].as_str() {
+            return json!({ "ok": true, "id": id }).to_string();
+        }
+        let t: [u8; 32] = crate::crypto::random::<32>();
+        let md = d["markdown"].as_str().unwrap_or("").to_string();
+        if md.chars().count() > crate::collab::MAX_TEXT {
+            return err(format!("a shared draft holds at most {} characters", crate::collab::MAX_TEXT));
+        }
+        let id = {
+            let mut e = rt.engine.lock().unwrap();
+            let shared = e.share(t, &md);
+            let id = shared.id_hex();
+            let snap = shared.snapshot();
+            let _ = std::fs::create_dir_all(rt.dir.join("collab"));
+            write_private_bytes(&rt.dir.join("collab").join(format!("{id}.hs")), &snap);
+            id
+        };
+        rt.drafts.lock().unwrap().insert(id.clone(), draft_id.clone());
+        rt.join_topics();
+        d["collab"] = json!({ "id": id, "since": now_ms() });
+        write_private(&p, &d.to_string());
+        json!({ "ok": true, "id": id }).to_string()
+    }
+
+    fn collab_join(&self, shared_id: String, title: String) -> String {
+        let t = match crate::collab::parse_id(&shared_id) {
+            Ok(t) => t,
+            Err(e) => return err(e),
+        };
+        let rt = match self.collab_rt() {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let id = hex::encode(t);
+        if let Some(existing) = rt.drafts.lock().unwrap().get(&id).cloned() {
+            return self.draft_get(existing);
+        }
+        let dir = match self.state.lock().unwrap().drafts_dir() {
+            Some(d) => d,
+            None => return err("module not ready"),
+        };
+        if let Err(e) = rt.engine.lock().unwrap().load(t, None) {
+            return err(e);
+        }
+        let draft_id = new_id();
+        let title = if title.trim().is_empty() { "Shared draft".to_string() } else { title };
+        let d = json!({
+            "id": draft_id, "title": title, "markdown": "", "sourceUrl": "", "createdAt": now_ms(), "updatedAt": now_ms(),
+            "secret": b64::encode(&crate::crypto::random::<32>()),
+            "collab": { "id": id, "since": now_ms(), "joined": true },
+        });
+        write_private(&dir.join(format!("{draft_id}.json")), &d.to_string());
+        rt.drafts.lock().unwrap().insert(id, draft_id.clone());
+        rt.join_topics();
+        self.draft_get(draft_id)
+    }
+
+    fn collab_state(&self, draft_id: String) -> String {
+        let Some((rt, id)) = self.shared_of(&draft_id) else {
+            return json!({ "ok": true, "shared": false }).to_string();
+        };
+        let mut e = rt.engine.lock().unwrap();
+        let (me, name, color) = (e.me.clone(), e.name.clone(), e.color.clone());
+        match e.state(&id) {
+            Some(mut v) => {
+                v["ok"] = json!(true);
+                v["shared"] = json!(true);
+                v["transport"] = rt.transport.lock().unwrap().clone();
+                v["me"] = json!({ "id": me, "name": name, "color": color });
+                v.to_string()
+            }
+            None => err("this shared draft is not loaded"),
+        }
+    }
+
+    fn collab_set_text(&self, draft_id: String, base_version: String, markdown: String) -> String {
+        let Some((rt, id)) = self.shared_of(&draft_id) else { return err("this draft is not shared") };
+        let base = base_version.trim().trim_matches('"').parse::<u64>().ok();
+        let mut e = rt.engine.lock().unwrap();
+        let Some(d) = e.docs.get_mut(&id) else { return err("this shared draft is not loaded") };
+        if let Err(x) = d.set_text(base, &markdown) {
+            return err(x);
+        }
+        let version = d.current_version();
+        let text = d.text();
+        // others' edits merged in: the editor should show this text
+        let merged = text != markdown;
+        json!({ "ok": true, "version": version.to_string(), "text": text, "merged": merged }).to_string()
+    }
+
+    fn collab_set_rich(&self, draft_id: String, base_version: String, html: String) -> String {
+        let saved = self.load_draft(&draft_id).ok().and_then(|(_, d)| d["markdown"].as_str().map(str::to_string)).unwrap_or_default();
+        let refs = self.draft_images(&draft_id, &saved);
+        let md = rich::with_images(self.image_bridge(&draft_id, refs, None), || rich::to_md(&html));
+        let md = rich::restore_code_langs(&md, &saved);
+        self.collab_set_text(draft_id, base_version, md)
+    }
+
+    fn collab_set_cursor(&self, draft_id: String, base_version: String, caret: String, anchor: String) -> String {
+        let Some((rt, id)) = self.shared_of(&draft_id) else { return err("this draft is not shared") };
+        let base = base_version.trim().trim_matches('"').parse::<u64>().ok();
+        let mut e = rt.engine.lock().unwrap();
+        let Some(d) = e.docs.get_mut(&id) else { return err("this shared draft is not loaded") };
+        // UTF-16 offsets into the text of `base`, as chars
+        let text = d.text_of(base);
+        let c = crate::collab::char_offset(&text, caret.trim().parse().unwrap_or(0));
+        let a = crate::collab::char_offset(&text, anchor.trim().parse().unwrap_or(0));
+        d.set_cursor(base, c, a);
+        json!({ "ok": true }).to_string()
+    }
+
+    fn collab_set_active(&self, draft_id: String) -> String {
+        let shared = if draft_id.trim().is_empty() { None } else { self.shared_of(&draft_id) };
+        // nothing shared and nothing running: nothing to do
+        let rt = match (&shared, COLLAB.get()) {
+            (Some((rt, _)), _) => rt.clone(),
+            (None, Some(rt)) => rt.clone(),
+            (None, None) => return json!({ "ok": true }).to_string(),
+        };
+        rt.engine.lock().unwrap().set_active(shared.as_ref().map(|(_, id)| id.as_str()), now_ms());
+        json!({ "ok": true }).to_string()
+    }
+
+    fn collab_leave(&self, draft_id: String) -> String {
+        let (p, mut d) = match self.load_draft(&draft_id) {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        };
+        if let Some((rt, id)) = self.shared_of(&draft_id) {
+            rt.engine.lock().unwrap().remove(&id, now_ms());
+            rt.drafts.lock().unwrap().remove(&id);
+            let _ = std::fs::remove_file(rt.dir.join("collab").join(format!("{id}.hs")));
+        }
+        if let Some(o) = d.as_object_mut() {
+            o.remove("collab");
+        }
+        d["updatedAt"] = json!(now_ms());
+        write_private(&p, &d.to_string());
+        json!({ "ok": true }).to_string()
+    }
+
+    fn collab_set_name(&self, name: String) -> String {
+        let rt = match self.collab_rt() {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let name: String = name.trim().chars().filter(|c| !c.is_control()).take(40).collect();
+        if name.is_empty() {
+            return err("a name, please");
+        }
+        let me = {
+            let mut e = rt.engine.lock().unwrap();
+            e.name = name.clone();
+            e.me.clone()
+        };
+        write_private(&rt.dir.join("collab").join("me.json"), &json!({ "id": me, "name": name }).to_string());
+        json!({ "ok": true, "name": name }).to_string()
+    }
+
     fn draft_get(&self, draft_id: String) -> String {
         match self.load_draft(&draft_id) {
             Ok((_, mut d)) => {
@@ -1578,6 +1781,281 @@ fn prune_image_cache(dir: &std::path::Path, older_than: Duration) {
             if old {
                 let _ = std::fs::remove_file(e.path());
             }
+        }
+    }
+}
+
+// ── shared drafts: the runtime around `collab` ───────────────────────────────
+
+/// What the loam_core thread is asked to do.
+enum LoamCmd {
+    Join(String),
+    Send(String, String),
+}
+
+/// Shared drafts on this device: the engine, the loam_core thread's queue, and which
+/// local draft follows which shared id. Started on first use, or when the module finds a
+/// shared draft (so that idle drafts still answer others' catch-up requests).
+struct CollabRt {
+    engine: Mutex<crate::collab::Collab>,
+    tx: std::sync::mpsc::Sender<LoamCmd>,
+    transport: Mutex<Value>,
+    dir: PathBuf,
+    drafts_dir: PathBuf,
+    /// shared id -> draft id
+    drafts: Mutex<HashMap<String, String>>,
+    joined: Mutex<std::collections::BTreeSet<String>>,
+}
+
+static COLLAB: std::sync::OnceLock<Arc<CollabRt>> = std::sync::OnceLock::new();
+/// Don't call loam_core while the host is still loading modules.
+const LOAM_STARTUP_DELAY: Duration = Duration::from_secs(3);
+
+impl CollabRt {
+    fn join_topics(&self) {
+        let topics = self.engine.lock().unwrap().topics();
+        let mut joined = self.joined.lock().unwrap();
+        for t in topics {
+            if joined.insert(t.clone()) {
+                let _ = self.tx.send(LoamCmd::Join(t));
+            }
+        }
+    }
+
+    /// Save shared drafts that changed: the document, and its text into the draft file.
+    fn save_dirty(&self) {
+        let changed: Vec<(String, Vec<u8>, String)> = {
+            let mut e = self.engine.lock().unwrap();
+            e.docs
+                .iter_mut()
+                .filter(|(_, d)| d.dirty)
+                .map(|(id, d)| {
+                    d.dirty = false;
+                    (id.clone(), d.snapshot(), d.text())
+                })
+                .collect()
+        };
+        for (id, snap, text) in changed {
+            write_private_bytes(&self.dir.join("collab").join(format!("{id}.hs")), &snap);
+            let Some(draft_id) = self.drafts.lock().unwrap().get(&id).cloned() else { continue };
+            let p = self.drafts_dir.join(format!("{draft_id}.json"));
+            let Ok(mut d) = std::fs::read(&p).map_err(|_| ()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|_| ())) else { continue };
+            if d["markdown"].as_str() != Some(text.as_str()) {
+                d["markdown"] = json!(text);
+                d["updatedAt"] = json!(now_ms());
+                write_private(&p, &d.to_string());
+            }
+        }
+    }
+}
+
+fn write_private_bytes(path: &Path, bytes: &[u8]) {
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, bytes).is_ok() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+        }
+        let _ = std::fs::rename(&tmp, path);
+    }
+}
+
+impl FileverseCoreModuleImpl {
+    /// The running shared-drafts runtime, started if needed.
+    fn collab_rt(&self) -> Result<Arc<CollabRt>, String> {
+        if let Some(rt) = COLLAB.get() {
+            return Ok(rt.clone());
+        }
+        let (dir, drafts_dir) = {
+            let s = self.state.lock().unwrap();
+            (s.dir.clone().ok_or("module not ready")?, s.drafts_dir().ok_or("module not ready")?)
+        };
+        let cdir = dir.join("collab");
+        let _ = std::fs::create_dir_all(&cdir);
+        // who we are: a random author id, and the name others see
+        let me_path = cdir.join("me.json");
+        let me: Value = std::fs::read(&me_path).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        let (author, name) = match (me["id"].as_str(), me["name"].as_str()) {
+            (Some(a), Some(n)) => (a.to_string(), n.to_string()),
+            _ => {
+                let a = hex::encode(crate::crypto::random::<16>());
+                let n = format!("Guest {}", &a[..4]);
+                write_private(&me_path, &json!({ "id": a, "name": n }).to_string());
+                (a, n)
+            }
+        };
+        let seed = u64::from_le_bytes(crate::crypto::random::<8>());
+        let mut engine = crate::collab::Collab::new(author, name, seed);
+        // the drafts already shared
+        let mut drafts = HashMap::new();
+        if let Ok(rd) = std::fs::read_dir(&drafts_dir) {
+            for e in rd.flatten() {
+                let Ok(d) = std::fs::read(e.path()).map_err(|_| ()).and_then(|b| serde_json::from_slice::<Value>(&b).map_err(|_| ())) else { continue };
+                let (Some(id), Some(draft_id)) = (d["collab"]["id"].as_str(), d["id"].as_str()) else { continue };
+                let Ok(t) = crate::collab::parse_id(id) else { continue };
+                let snap = std::fs::read(cdir.join(format!("{id}.hs"))).ok();
+                if engine.load(t, snap.as_deref()).is_ok() {
+                    drafts.insert(id.to_string(), draft_id.to_string());
+                }
+            }
+        }
+        let (tx, rx) = std::sync::mpsc::channel();
+        let rt = Arc::new(CollabRt {
+            engine: Mutex::new(engine),
+            tx,
+            transport: Mutex::new(json!({ "status": "starting", "connected": false })),
+            dir,
+            drafts_dir,
+            drafts: Mutex::new(drafts),
+            joined: Mutex::new(Default::default()),
+        });
+        if COLLAB.set(rt.clone()).is_err() {
+            return Ok(COLLAB.get().unwrap().clone());
+        }
+        rt.join_topics();
+        spawn_collab_threads(rt.clone(), rx);
+        Ok(rt)
+    }
+
+    /// The runtime and shared id of a draft, if it is shared.
+    fn shared_of(&self, draft_id: &str) -> Option<(Arc<CollabRt>, String)> {
+        let (_, d) = self.load_draft(draft_id).ok()?;
+        let id = d["collab"]["id"].as_str()?.to_string();
+        let rt = self.collab_rt().ok()?;
+        if !rt.engine.lock().unwrap().docs.contains_key(&id) {
+            return None;
+        }
+        Some((rt, id))
+    }
+}
+
+fn spawn_collab_threads(rt: Arc<CollabRt>, rx: std::sync::mpsc::Receiver<LoamCmd>) {
+    // the clock: ticks, outbox to loam_core, saving
+    let tick_rt = rt.clone();
+    let _ = std::thread::Builder::new().name("fileverse-collab".into()).spawn(move || {
+        let mut last_save = Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(150));
+            let out = {
+                let mut e = tick_rt.engine.lock().unwrap();
+                e.tick(now_ms());
+                e.take_outbox()
+            };
+            for o in out {
+                let _ = tick_rt.tx.send(LoamCmd::Send(o.topic, b64::encode(&o.sealed)));
+            }
+            if last_save.elapsed() >= Duration::from_secs(1) {
+                last_save = Instant::now();
+                tick_rt.save_dirty();
+            }
+        }
+    });
+    // loam_core: start it, then join and send (never from the module's own thread)
+    let loam_rt = rt.clone();
+    let _ = std::thread::Builder::new().name("fileverse-loam".into()).spawn(move || {
+        std::thread::sleep(LOAM_STARTUP_DELAY);
+        run_loam(loam_rt, rx);
+    });
+    // what loam_core receives
+    let rx_rt = rt;
+    let _ = std::thread::Builder::new().name("fileverse-loam-rx".into()).spawn(move || {
+        std::thread::sleep(LOAM_STARTUP_DELAY);
+        loop {
+            let mut client = loam_core::LoamCoreClient::new();
+            match client.on_received() {
+                Ok(subscription) => {
+                    for event in subscription {
+                        if let Some(r) = loam_core::LoamCoreClient::decode_received(&event) {
+                            if let Ok(bytes) = b64::decode(&r.payload_b64) {
+                                let changed = rx_rt.engine.lock().unwrap().receive(&r.topic, &bytes, now_ms());
+                                let _ = changed;
+                            }
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+            std::thread::sleep(Duration::from_secs(2));
+        }
+    });
+}
+
+/// The loam_core side: start the host's Delivery node through loam_core, follow its status,
+/// join topics, send (queued while not connected). loam_core answers "" on success.
+fn run_loam(rt: Arc<CollabRt>, rx: std::sync::mpsc::Receiver<LoamCmd>) {
+    let mut client = loam_core::LoamCoreClient::new();
+    let ok = |r: Result<String, LogosError>| -> Result<(), String> {
+        let v = r.map_err(|e| format!("{e:?}"))?;
+        let v = v.trim().trim_matches('"');
+        if v.is_empty() { Ok(()) } else { Err(v.to_string()) }
+    };
+    let mut started = false;
+    let mut connected = false;
+    let mut joined: std::collections::BTreeSet<String> = Default::default();
+    let mut queue: Vec<(String, String)> = vec![];
+    let mut last_poll = Instant::now() - Duration::from_secs(60);
+    let mut status = String::from("starting");
+    let mut error: Option<String> = None;
+    loop {
+        if !started {
+            match client.start("{}") {
+                Ok(_) => started = true,
+                Err(e) => {
+                    status = "loam_core is not installed or not answering".into();
+                    error = Some(format!("{e:?}"));
+                }
+            }
+        }
+        if last_poll.elapsed() >= Duration::from_secs(if connected { 5 } else { 1 }) {
+            last_poll = Instant::now();
+            match client.status() {
+                Ok(s) => {
+                    let s = s.trim().trim_matches('"').to_string();
+                    let now = s.contains("Connected");
+                    if now && !connected {
+                        for t in &joined {
+                            if let Err(e) = ok(client.join(t)) {
+                                error = Some(format!("join: {e}"));
+                            }
+                        }
+                        for (t, p) in queue.drain(..) {
+                            if let Err(e) = ok(client.send_sealed(&t, &p)) {
+                                error = Some(format!("send: {e}"));
+                            }
+                        }
+                    }
+                    connected = now;
+                    status = s;
+                }
+                Err(e) => {
+                    if started {
+                        status = "loam_core is not answering".into();
+                    }
+                    error = Some(format!("{e:?}"));
+                }
+            }
+            *rt.transport.lock().unwrap() = json!({ "status": status, "connected": connected, "queued": queue.len(), "error": error });
+        }
+        match rx.recv_timeout(Duration::from_millis(300)) {
+            Ok(LoamCmd::Join(t)) => {
+                if joined.insert(t.clone()) && started {
+                    if let Err(e) = ok(client.join(&t)) {
+                        error = Some(format!("join: {e}"));
+                    }
+                }
+            }
+            Ok(LoamCmd::Send(t, p)) => {
+                if connected {
+                    if let Err(e) = ok(client.send_sealed(&t, &p)) {
+                        error = Some(format!("send: {e}"));
+                    }
+                } else if queue.len() < 2_000 {
+                    queue.push((t, p));
+                }
+            }
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return,
         }
     }
 }

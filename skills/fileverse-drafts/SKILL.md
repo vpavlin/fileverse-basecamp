@@ -134,5 +134,9 @@ open in the browser when clicked (Ctrl+click in the editor).
 - Do not publish: publishing makes the document fetchable by anyone with its link. It
   is the user's button in Basecamp.
 - Always save with `--base`, and on a refusal merge rather than overwrite.
+- **Shared drafts** (`list` shows `"shared": true`) are edited live with other people
+  inside Basecamp. Read them, but do not save them: `fvdraft.py save` refuses, because
+  a file write would not reach the others. Ask the user to make the change, or to stop
+  sharing the draft first.
 - Drafts copied from someone else's Fileverse document (`sourceUrl` set) are the user's
   own copies: editing them changes nothing in the original.

@@ -1,6 +1,6 @@
 [package]
 name = "fileverse_core"
-version = "0.11.0"
+version = "0.12.0"
 edition = "2021"
 
 # Standalone crate: the empty table keeps cargo from adopting a parent workspace.
@@ -46,6 +46,8 @@ pulldown-cmark = { version = "0.12", default-features = false }
 rand = "0.8"
 # Mermaid diagrams (code blocks in the `mermaid` language) to SVG, no browser
 mermaid-rs-renderer = { version = "0.3.1", default-features = false }
+# Shared drafts: David Rusu's BFT sequence CRDT (content-addressed ops, frontier/delta sync)
+hashseq = { git = "https://github.com/davidrusu/hashseq", rev = "94f5e3c7c692e8ca3478772521521df018899e0f" }
 
 logos-rust-sdk = { path = "../logos-rust-sdk-src", optional = true }
 
