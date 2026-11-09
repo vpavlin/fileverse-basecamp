@@ -141,6 +141,16 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// How eagerly shared drafts send: "live" (others see typing within a fraction of a
     /// second; many messages) or "economy" (every 2 s, sized for an RLN message budget).
     fn collab_set_speed(&self, speed: String) -> String;
+    /// Link a draft to a Reflection note (reflection_core, by its 64-hex id): the view then
+    /// edits the note through reflection_core and keeps the draft's text in step. "" unlinks.
+    fn reflection_link(&self, draft_id: String, note_id: String) -> String;
+    /// Call reflection_core (when installed) for a Reflection-linked draft: `method` one of
+    /// state, create_document, join_document, set_text, set_cursor, settings;
+    /// `args_json` a JSON array of strings. Returns reflection_core's answer, or an error.
+    fn reflection_call(&self, method: String, args_json: String) -> String;
+    /// The visual editor's HTML as Markdown (as `draft_save_rich` would store it), for a
+    /// draft whose text another module keeps: `{ markdown }`.
+    fn rich_md(&self, draft_id: String, html: String) -> String;
     /// One draft with its Markdown and preview.
     fn draft_get(&self, draft_id: String) -> String;
     /// Delete a draft (published copies stay where they are).
@@ -801,6 +811,7 @@ fn draft_summary(d: &Value) -> Value {
     json!({
         "id": d["id"], "title": d["title"], "updatedAt": d["updatedAt"], "sourceUrl": d["sourceUrl"],
         "shared": d["collab"]["id"].as_str().map(|_| true).unwrap_or(false),
+        "reflection": d["reflection"]["id"],
         "link": d["published"]["link"], "publishedAt": d["published"]["at"],
         "links": d["links"].as_array().cloned().unwrap_or_else(|| d["published"]["link"].as_str().map(|l| vec![json!(l)]).unwrap_or_default()),
     })
@@ -1607,6 +1618,64 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         rt.engine.lock().unwrap().speed = speed;
         rt.save_me();
         json!({ "ok": true, "speed": speed.name() }).to_string()
+    }
+
+    fn reflection_link(&self, draft_id: String, note_id: String) -> String {
+        let (p, mut d) = match self.load_draft(&draft_id) {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        };
+        let note = note_id.trim().to_lowercase();
+        if note.is_empty() {
+            if let Some(o) = d.as_object_mut() {
+                o.remove("reflection");
+            }
+        } else {
+            if note.len() != 64 || !note.chars().all(|c| c.is_ascii_hexdigit()) {
+                return err("a Reflection note id is 64 hex characters");
+            }
+            d["reflection"] = json!({ "id": note, "since": now_ms() });
+        }
+        write_private(&p, &d.to_string());
+        json!({ "ok": true }).to_string()
+    }
+
+    fn reflection_call(&self, method: String, args_json: String) -> String {
+        const ALLOWED: &[&str] = &["state", "create_document", "join_document", "set_text", "set_cursor", "settings", "set_settings"];
+        if !ALLOWED.contains(&method.as_str()) {
+            return err(format!("not a reflection_core call Fileverse makes: {method}"));
+        }
+        let args: Value = match serde_json::from_str(&args_json) {
+            Ok(v @ Value::Array(_)) => v,
+            _ => return err("arguments must be a JSON array"),
+        };
+        // Not from the module's own thread (a blocking call between modules there can
+        // deadlock): a short-lived thread makes it, this one waits for the answer.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let m = method.clone();
+        let spawned = std::thread::Builder::new().name("fileverse-reflection".into()).spawn(move || {
+            let r = logos_rust_sdk::LogosModuleSDK::new()
+                .plugin("reflection_core")
+                .call_json_with_timeout(&m, &args, Duration::from_secs(10));
+            let _ = tx.send(r);
+        });
+        if spawned.is_err() {
+            return err("could not reach reflection_core");
+        }
+        match rx.recv_timeout(Duration::from_secs(12)) {
+            Ok(Ok(Value::String(s))) => s,
+            Ok(Ok(v)) => v.to_string(),
+            Ok(Err(e)) => err(format!("reflection_core is not installed or not answering ({e:?})")),
+            Err(_) => err("reflection_core did not answer in time"),
+        }
+    }
+
+    fn rich_md(&self, draft_id: String, html: String) -> String {
+        let saved = self.load_draft(&draft_id).ok().and_then(|(_, d)| d["markdown"].as_str().map(str::to_string)).unwrap_or_default();
+        let refs = self.draft_images(&draft_id, &saved);
+        let md = rich::with_images(self.image_bridge(&draft_id, refs, None), || rich::to_md(&html));
+        let md = rich::restore_code_langs(&md, &saved);
+        json!({ "ok": true, "markdown": md }).to_string()
     }
 
     fn draft_get(&self, draft_id: String) -> String {

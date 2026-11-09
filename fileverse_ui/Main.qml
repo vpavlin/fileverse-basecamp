@@ -276,19 +276,116 @@ Item {
     readonly property bool isShared: !!(root.draft && root.collab && root.collab.shared)
     readonly property var collabOnline: (root.collab.peers || []).filter(function (p) { return p.online })
     onModeChanged: root.collabActivate()
+    // ── Reflection notes: a draft linked to one is edited through reflection_core (Loro,
+    // Logos Delivery or p2panda), the same note Reflection's own apps edit ──
+    readonly property string noteId: root.draft && root.draft.reflection && root.draft.reflection.id ? String(root.draft.reflection.id) : ""
+    readonly property bool viaReflection: root.noteId !== ""
+    property bool reflectionAvailable: false
+    property var reflNotes: []
+    property bool reflActive: false          // we told reflection_core a note of ours is open
+    // through our core (which Basecamp loads with reflection_core when it is installed)
+    function refl(method, args, cb) { root.core("reflection_call", [method, JSON.stringify(args || [])], cb) }
+    // Is reflection_core installed, and which notes does it have? (Asks for no open note:
+    // only when none of ours is open.)
+    function probeReflection(cb) {
+        root.refl("state", [""], function (raw) {
+            var r = root.j(raw)
+            root.reflectionAvailable = !!(r && r.ok)
+            root.reflNotes = r && r.docs ? r.docs : []
+            root.reflActive = false
+            if (cb) cb(r)
+        })
+    }
+    function colorOf(key) {
+        var palette = ["#E8743B", "#19A979", "#945ECF", "#13A4B4", "#ED4A7B", "#6C8893", "#D6BA00", "#5899DA"], h = 0
+        key = String(key || "")
+        for (var i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) % 1000003
+        return palette[h % palette.length]
+    }
+    // Fileverse writes an empty line as a `&nbsp;` paragraph; Reflection shows Markdown as
+    // typed, so on the note that line is a single space (looks empty, and Markdown keeps
+    // it out of the paragraphs around it). Not a no-break space: Reflection's editor reads
+    // one back as a space, its text then never matches the note's again, and it stops
+    // showing other people's edits. Any line of only blanks comes back as an empty line.
+    // `lineSwap` turns lines matching `from` (a string or a RegExp) into `to` and maps
+    // offsets across.
+    function lineSwap(s, from, to) {
+        var lines = String(s || "").split("\n"), out = [], segs = [], src = 0, dst = 0, fence = false
+        for (var i = 0; i < lines.length; i++) {
+            var l = lines[i]
+            if (/^ {0,3}(```|~~~)/.test(l)) fence = !fence   // code blocks keep their lines as they are
+            else if (!fence && (typeof from === "string" ? l === from : from.test(l))) { segs.push([src, l.length, dst, to.length]); l = to }
+            out.push(l); src += lines[i].length + 1; dst += l.length + 1
+        }
+        return { text: out.join("\n"), at: function (off) {
+            var delta = 0
+            for (var k = 0; k < segs.length; k++) {
+                var g = segs[k]
+                if (off >= g[0] + g[1]) { delta = g[2] + g[3] - g[0] - g[1]; continue }
+                if (off > g[0]) { var rel = off - g[0]; return g[2] + (rel >= g[1] ? g[3] : Math.min(rel, g[3])) }
+                break
+            }
+            return off + delta
+        } }
+    }
+    function toNote(md) { return root.lineSwap(md, "&nbsp;", " ") }
+    function fromNote(text) { return root.lineSwap(text, /^[ \t\u00a0]+$/, "&nbsp;") }
+    // reflection_core's state of the open note, in collab_state's shape
+    function fromReflection(r) {
+        var c = r && r.current
+        if (!c) return { shared: false, engine: "reflection", missing: true }
+        var cursors = c.cursors || [], online = c.online || [], seen = {}, peers = [], md = root.fromNote(c.text || "")
+        online.concat(cursors.map(function (x) { return x.author })).forEach(function (a) {
+            if (!a || seen[a]) return
+            seen[a] = true
+            var cur = cursors.filter(function (x) { return x.author === a })[0]
+            peers.push({ id: a, name: String(a).substring(0, 6), color: root.colorOf(a), online: true,
+                         caret: cur ? md.at(cur.pos) : null, anchor: cur ? md.at(cur.anchor) : null })
+        })
+        return { ok: true, shared: true, engine: "reflection", id: c.id, name: c.name || "", version: String(c.version), text: md.text,
+                 peers: peers, transport: r.transport, joined: true,
+                 me: { id: r.me, name: "you", speed: "live", shareCursor: !!(r.settings && r.settings.shareCursor) } }
+    }
     function collabActivate() {
-        var id = root.mode === "edit" && root.draft ? root.draft.id : ""
-        root.core("collab_set_active", [id], function () { root.refreshCollab() })
+        var editing = root.mode === "edit" && root.draft
+        var id = editing ? root.draft.id : ""
+        // a Reflection note was open here and no longer is: reflection_core may go quiet
+        if (root.reflActive && !(editing && root.viaReflection)) { root.refl("state", [""], function () {}); root.reflActive = false }
+        root.core("collab_set_active", [editing && !root.viaReflection ? id : ""], function () { root.refreshCollab() })
+    }
+    function collabStateOf(id, cb) {
+        if (root.viaReflection) {
+            var note = root.noteId
+            root.reflActive = true
+            root.refl("state", [note], function (raw) {
+                var r = root.j(raw)
+                if (!r || !r.ok) { cb({ ok: true, shared: false, engine: "reflection", missing: true }); return }
+                // the open note's poll also lists the notes (the join panel needs no probe then)
+                root.reflectionAvailable = true
+                if (r.docs) root.reflNotes = r.docs
+                cb(root.fromReflection(r))
+            })
+        } else root.core("collab_state", [id], function (raw) { cb(root.j(raw)) })
+    }
+    // the draft file follows the shared text (slides, preview, publishing, agents read it)
+    function mirrorDraft(md) {
+        if (!root.draft || root.draft.markdown === md) return
+        var id = root.draft.id
+        root.core("draft_save", [id, titleField.text, md, ""], function () {})
     }
     function refreshCollab() {
         if (root.mode !== "edit" || !root.draft) return
         var id = root.draft.id
-        root.core("collab_state", [id], function (raw) {
-            var r = root.j(raw)
+        root.collabStateOf(id, function (r) {
             if (!r || !r.ok || !root.draft || root.draft.id !== id) return
             var first = !root.collab.shared && r.shared
             root.collab = r
             if (!r.shared) return
+            // a draft made for a note takes the note's name (Reflection names it by its heading)
+            if (r.name && r.name !== titleField.text && /^(Untitled|Reflection note)?$/.test(titleField.text)) {
+                titleField.text = r.name
+                root.core("draft_save", [id, r.name, root.draft.markdown, ""], function () {})
+            }
             if (first && root.collabVersion === "") {
                 // the editor shows the draft file; the shared text is the truth
                 root.collabVersion = r.version
@@ -305,6 +402,9 @@ Item {
     function applyRemote(r) {
         if (root.draftDirty || root.savingDraft || previewTimer.running) return
         if (r.version === root.collabVersion) return
+        // a reply to a poll sent before our last save can arrive after it: only a newer
+        // version than the editor's may replace the editor's text (else typed keys vanish)
+        if (root.collabVersion !== "" && Number(r.version) <= Number(root.collabVersion)) return
         root.collabVersion = r.version
         if (r.text !== root.collabSentText) root.showSharedText(r.text)
     }
@@ -321,6 +421,7 @@ Item {
         else mdArea.cursorPosition = root.cursorFor(mdArea.text, tail, full.length ? pos / full.length : 0)
         root.draftDirty = false
         root.updatePreview(md)
+        if (root.viaReflection) root.mirrorDraft(md)
     }
     function updatePreview(md) {
         var id = root.draft ? root.draft.id : ""
@@ -337,9 +438,8 @@ Item {
         var visual = root.visualEdit, id = root.draft.id, gen = root.editGen
         var titleChanged = titleField.text !== root.draft.title
         root.savingDraft = true
-        root.core(visual ? "collab_set_rich" : "collab_set_text", [id, root.collabVersion, visual ? richArea.text : mdArea.text], function (raw) {
+        root.sharedSetText(visual, function (r) {
             root.savingDraft = false
-            var r = root.j(raw)
             if (!r || !r.ok) { root.fail(r ? r.error : "Saving failed."); return }
             if (!root.draft || root.draft.id !== id) return
             if (gen === root.editGen) {
@@ -347,7 +447,7 @@ Item {
                 root.collabVersion = r.version
                 root.draftDirty = false
                 if (r.merged) root.showSharedText(r.text)
-                else { root.collabSentText = r.text; root.updatePreview(r.text) }
+                else { root.collabSentText = r.text; root.updatePreview(r.text); if (root.viaReflection) root.mirrorDraft(r.text) }
             } else {
                 // typed on: the editor builds on what was sent (others' changes show at the
                 // next pause), and the rest goes out shortly
@@ -361,8 +461,83 @@ Item {
             if (then) then()
         })
     }
+    // Send the editor's text to the draft's engine: `{ ok, version, text, merged, editVersion, submitted }`.
+    function sharedSetText(visual, cb) {
+        var id = root.draft.id
+        if (!root.viaReflection) {
+            root.core(visual ? "collab_set_rich" : "collab_set_text", [id, root.collabVersion, visual ? richArea.text : mdArea.text], function (raw) { cb(root.j(raw)) })
+            return
+        }
+        var md = visual ? ((root.coreSync("rich_md", [id, richArea.text]) || {}).markdown) : mdArea.text
+        if (md === undefined || md === null) { cb({ ok: false, error: "Could not convert the editor's text." }); return }
+        var note = root.toNote(md).text
+        root.refl("set_text", [root.noteId, root.collabVersion, note], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok || !r.current) { cb({ ok: false, error: (r && r.error) || "reflection_core did not answer" }); return }
+            var c = r.current
+            cb({ ok: true, version: String(c.version), text: root.fromNote(c.text).text, merged: c.text !== note,
+                 editVersion: String(c.editVersion !== undefined ? c.editVersion : c.version), submitted: md })
+        })
+    }
+    // "Share…": with Fileverse (HashSeq), or as a Reflection note when reflection_core is here
+    property bool shareOpen: false
+    function shareClicked() {
+        if (!root.draft) return
+        root.probeReflection(function () {
+            if (root.reflectionAvailable) root.shareOpen = !root.shareOpen
+            else root.shareDraft()
+        })
+    }
+    function shareAsNote() {
+        if (!root.draft) return
+        root.shareOpen = false
+        var draftId = root.draft.id, title = titleField.text || root.draft.title || "Untitled"
+        root.saveDraft(function () {
+            var md = root.draft.markdown
+            root.refl("create_document", [title], function (raw) {
+                var r = root.j(raw)
+                if (!r || !r.ok) { root.fail((r && r.error) || "reflection_core could not create a note"); return }
+                var note = r.id
+                root.refl("set_text", [note, String(r.current.version), root.toNote(md).text], function () {
+                    root.core("reflection_link", [draftId, note], function () {
+                        if (!root.draft || root.draft.id !== draftId) return
+                        var d = JSON.parse(JSON.stringify(root.draft)); d.reflection = { id: note }; root.draft = d
+                        root.collab = ({ shared: false }); root.collabVersion = ""; root.collabSentText = md
+                        root.copy(note, "Reflection note id")
+                        root.say("Shared as a Reflection note. Its id is copied: open it in Reflection or join it in Fileverse.")
+                        root.collabActivate()
+                    })
+                })
+            })
+        })
+    }
+    // Open a Reflection note as a draft: the draft linked to it, or a new one.
+    function openNote(n) {
+        root.joinOpen = false
+        var ds = root.snap.drafts || []
+        for (var i = 0; i < ds.length; i++) if (ds[i].reflection === n.id) { root.section = "drafts"; root.openDraft(ds[i].id); return }
+        root.refl("state", [n.id], function (raw) {
+            var r = root.j(raw), c = r && r.current
+            var text = root.fromNote(c ? (c.text || "") : "").text
+            root.act("draft_create", [n.name || "Reflection note", text, ""], "", function (cr) {
+                root.core("reflection_link", [cr.draft.id, n.id], function () {
+                    var d = cr.draft; d.reflection = { id: n.id }
+                    root.section = "drafts"
+                    root.editDraft(d)
+                })
+            })
+        })
+    }
+    function joinNote(id) {
+        root.refl("join_document", [String(id).trim()], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok) { root.fail((r && r.error) || "reflection_core could not join that note"); return }
+            root.openNote({ id: r.id, name: r.current && r.current.name ? r.current.name : "Reflection note" })
+        })
+    }
     function shareDraft() {
         if (!root.draft) return
+        root.shareOpen = false
         root.saveDraft(function () {
             root.act("collab_share", [root.draft.id], "", function (r) {
                 root.copy(r.id, "Shared draft id")
@@ -375,6 +550,13 @@ Item {
     function stopSharing() {
         if (!root.draft) return
         var id = root.draft.id
+        if (root.viaReflection) {
+            root.act("reflection_link", [id, ""], "Unlinked: the draft is private; the note stays in Reflection", function () {
+                var d = JSON.parse(JSON.stringify(root.draft)); delete d.reflection; root.draft = d
+                root.collabActivate(); root.collab = ({ shared: false }); root.collabVersion = ""
+            })
+            return
+        }
         root.act("collab_leave", [id], root.collab.joined ? "Left the shared draft: your copy is private now" : "This draft is private again on this device", function () { root.collab = ({ shared: false }); root.collabVersion = "" })
     }
     property bool joinOpen: false
@@ -447,7 +629,11 @@ Item {
             var other = richArea.selectionStart === richArea.cursorPosition ? richArea.selectionEnd : richArea.selectionStart
             anchor = other === richArea.cursorPosition ? caret : root.richToMd(md, other)
         }
-        root.core("collab_set_cursor", [root.draft.id, root.collabVersion, String(caret), String(anchor)], function () {})
+        if (root.viaReflection) {
+            var nm = root.toNote(md)
+            root.refl("set_cursor", [root.noteId, root.collabVersion, String(nm.at(caret)), String(nm.at(anchor))], function () {})
+        }
+        else root.core("collab_set_cursor", [root.draft.id, root.collabVersion, String(caret), String(anchor)], function () {})
     }
     // Where to draw someone's caret: offsets come against the shared text as the core has
     // it now (collab.text).
@@ -1165,12 +1351,24 @@ Item {
                         ColumnLayout {
                             width: 248; spacing: 2
                             LogosButton { Layout.fillWidth: true; compact: true; variant: LogosButton.Variant.Primary; text: "New document"; onClicked: root.newDraft("Untitled", "# Untitled\n\n", "") }
-                            LogosButton { Layout.fillWidth: true; Layout.bottomMargin: 6; compact: true; text: root.joinOpen ? "Cancel" : "Join a shared draft…"; onClicked: root.joinOpen = !root.joinOpen }
+                            LogosButton { Layout.fillWidth: true; Layout.bottomMargin: 6; compact: true; text: root.joinOpen ? "Cancel" : "Join a shared draft…"; onClicked: { root.joinOpen = !root.joinOpen; if (root.joinOpen && !(root.mode === "edit" && root.viaReflection)) root.probeReflection() } }
                             ColumnLayout {
                                 visible: root.joinOpen
                                 Layout.fillWidth: true; Layout.bottomMargin: 6; spacing: 4
                                 Field { id: joinField; Layout.fillWidth: true; placeholderText: "Paste the id someone sent you"; onAccepted: root.joinShared(text) }
                                 LogosButton { Layout.fillWidth: true; compact: true; variant: LogosButton.Variant.Primary; text: "Join"; enabled: joinField.text.trim().length >= 64; onClicked: root.joinShared(joinField.text) }
+                                LogosButton { visible: root.reflectionAvailable; Layout.fillWidth: true; compact: true; text: "Join as a Reflection note"; enabled: joinField.text.trim().length >= 64; onClicked: root.joinNote(joinField.text) }
+                                Caption { visible: root.reflectionAvailable && root.reflNotes.length > 0; text: "REFLECTION NOTES"; Layout.topMargin: 6 }
+                                Repeater {
+                                    model: root.reflectionAvailable ? root.reflNotes : []
+                                    FileRow {
+                                        compact: true
+                                        Layout.fillWidth: true
+                                        title: modelData.name || "Untitled note"
+                                        sub: "Reflection" + (modelData.online > 0 ? " · " + modelData.online + " online" : "")
+                                        onClicked: root.openNote(modelData)
+                                    }
+                                }
                             }
                             Repeater {
                                 model: root.snap.drafts || []
@@ -1605,26 +1803,40 @@ Item {
                     }
                     Chip {
                         visible: root.isShared
-                        text: !(root.collab.transport && root.collab.transport.connected) ? "shared · connecting…"
-                              : root.collabOnline.length === 0 ? "shared · only you here" : ("shared · " + (root.collabOnline.length + 1) + " here")
+                        text: (root.viaReflection ? "Reflection note" : "shared")
+                              + (!(root.collab.transport && root.collab.transport.connected) && !root.viaReflection ? " · connecting…"
+                                 : root.collabOnline.length === 0 ? " · only you here" : (" · " + (root.collabOnline.length + 1) + " here"))
                         tint: root.collab.transport && root.collab.transport.connected ? Theme.palette.success : Theme.palette.warning
                         HoverHandler { id: shareHover }
                         ToolTip.visible: shareHover.hovered
                         ToolTip.text: "Synced over Logos Delivery (loam_core): " + (root.collab.transport ? (root.collab.transport.status + (root.collab.transport.error ? " · " + root.collab.transport.error : "")) : "")
                     }
-                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared draft id") }
+                    Chip { visible: root.viaReflection && !root.isShared; text: "Reflection note · reflection_core not answering"; tint: Theme.palette.warning }
+                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, root.viaReflection ? "Reflection note id" : "Shared draft id") }
+                    LogosButton {
+                        // reflection_core sends this device's cursor only when the user says so
+                        // (one setting for every note, also Reflection's "Share my cursor")
+                        readonly property bool on: !!(root.collab.me && root.collab.me.shareCursor)
+                        visible: root.isShared && root.viaReflection; compact: true
+                        text: on ? "Hide my cursor" : "Share my cursor"
+                        onClicked: root.refl("set_settings", [JSON.stringify({ shareCursor: !on })], function () { root.refreshCollab(); if (!on) root.sendCursor() })
+                        HoverHandler { id: cursorHover }
+                        ToolTip.visible: cursorHover.hovered
+                        ToolTip.text: on ? "The others on Reflection notes see where you are in the text. Same setting as Reflection's \"Share my cursor\"."
+                                         : "Show the others on Reflection notes where you are in the text. Same setting as Reflection's \"Share my cursor\"."
+                    }
                     LogosButton {
                         visible: root.isShared; compact: true
-                        text: root.collab.joined ? "Leave" : "Stop sharing"
+                        text: root.viaReflection ? "Unlink note" : root.collab.joined ? "Leave" : "Stop sharing"
                         onClicked: root.stopSharing()
                         HoverHandler { id: leaveHover }
                         ToolTip.visible: leaveHover.hovered
                         ToolTip.text: "Stop syncing this draft on this device. Its text stays here, private; the others keep their copies and can go on editing together."
                     }
                     LogosButton {
-                        visible: !root.isShared && !!root.draft
+                        visible: !root.isShared && !!root.draft && !root.viaReflection
                         compact: true; text: "Share…"
-                        onClicked: root.shareDraft()
+                        onClicked: root.shareClicked()
                         HoverHandler { id: shareBtnHover }
                         ToolTip.visible: shareBtnHover.hovered
                         ToolTip.text: "Edit this draft together with others, live, over Logos Delivery. You get an id to send them; anyone with it can read and write."
@@ -1636,6 +1848,27 @@ Item {
                         enabled: !root.busyWith("publish")
                         text: root.busyWith("publish") ? ("Publishing… " + root.elapsed("publish") + "s") : (root.draft && root.draft.published ? "Publish again" : "Publish")
                         onClicked: root.publishDraft()
+                    }
+                }
+                // Share…: how (when reflection_core is installed)
+                Rectangle {
+                    Layout.fillWidth: true
+                    visible: root.shareOpen && !root.isShared
+                    implicitHeight: shareRow.implicitHeight + 16
+                    radius: Theme.spacing.radiusSmall
+                    color: Theme.palette.surfaceRaised
+                    border.color: Theme.palette.borderSubtle
+                    RowLayout {
+                        id: shareRow
+                        anchors.fill: parent; anchors.margins: 8
+                        spacing: Theme.spacing.small
+                        LogosText {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13
+                            text: "Edit together: with Fileverse (built in, over Logos Delivery), or as a Reflection note (reflection_core: also editable in the Reflection apps, over Logos Delivery or p2panda)."
+                        }
+                        LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Share with Fileverse"; onClicked: root.shareDraft() }
+                        LogosButton { compact: true; text: "Share as a Reflection note"; onClicked: root.shareAsNote() }
+                        LogosButton { compact: true; text: "Cancel"; onClicked: root.shareOpen = false }
                     }
                 }
                 // changed on disk (an agent?) while you have unsaved edits here

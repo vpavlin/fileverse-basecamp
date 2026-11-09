@@ -478,7 +478,7 @@ dependencies = [
 
 [[package]]
 name = "fileverse_core"
-version = "0.12.2"
+version = "0.13.0"
 dependencies = [
  "aes",
  "aes-gcm",

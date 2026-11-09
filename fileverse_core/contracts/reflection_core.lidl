@@ -1,0 +1,15 @@
+module reflection_core {
+  version "0.5.0"
+  depends []
+
+  method state(doc_id: tstr) -> tstr description "The list of notes, transport status, and the open note when `doc_id` is not empty."
+  method create_document(title: tstr) -> tstr description "A new note whose first line is `title`. Returns its id and content."
+  method join_document(doc_id: tstr) -> tstr description "Open a note someone shared, by its id (64 hex characters)."
+  method set_text(doc_id: tstr, base_version: tstr, text: tstr) -> tstr description "The user's text for a note, edited starting from `base_version` (from `state`)."
+  method remove_document(doc_id: tstr) -> tstr description "Stop syncing a note and forget it on this device."
+  method stats() -> tstr description "Debug: messages this device sent and received over Logos Delivery, per RLN epoch and per\nnote, with the budget the engine plans for."
+  method set_cursor(doc_id: tstr, base_version: tstr, position: tstr, anchor: tstr) -> tstr description "Where the user's cursor is: UTF-16 offsets `position` and selection `anchor` into the\ntext of `base_version`. Sent to the others only if cursor sharing is on."
+  method settings() -> tstr description "Settings: `budget` (pretend messages per RLN epoch, null for no limit), `shareCursor`."
+  method set_settings(changes: tstr) -> tstr description "Change settings, given as a JSON object with any of the keys of `settings`."
+  method bridge_note(doc_id: tstr, on: tstr) -> tstr description "p2panda mode: ask (\"true\") to carry a note over Logos Delivery as well (pending until the\nuser confirms it in the p2panda view), or stop (\"false\")."
+}

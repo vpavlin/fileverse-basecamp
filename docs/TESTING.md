@@ -1,5 +1,39 @@
 # What was tested, and how to repeat it
 
+## 0.13.0: drafts as Reflection notes, through reflection_core (2026-11-09)
+
+"Share…" offers, when reflection_core is installed, "As a Reflection note": the draft's text
+goes into a new note of reflection_core and the draft stays linked to it; the join panel
+joins a note by id or opens one from the REFLECTION NOTES list. Fileverse calls
+reflection_core only through fileverse_core (`reflection_call`, a fixed list of methods),
+over Basecamp's module calls; nothing of Reflection (GPL) is linked in. Shared with
+Fileverse (HashSeq) stays as it was.
+
+- Basecamp loads a module only for a caller that declared it, and the builder wants a LIDL
+  contract for every declared dependency: fileverse_core lists reflection_core as an optional
+  dependency with its contract vendored (`contracts/reflection_core.lidl`,
+  `dependency_overrides`).
+- Empty lines: Fileverse's `&nbsp;` paragraphs go onto the note as a line holding one space
+  and come back as empty lines (any line of only blanks, outside code blocks), with cursor
+  offsets mapped across. First tried with a no-break space: Reflection's editor reads one
+  back as a plain space, its text never matches the note's again, and it stops showing
+  remote edits (found in the two Basecamps: u's Reflection kept "Fil" of a line t's
+  Fileverse had finished, while u's reflection_core had the whole line).
+- A reply to a poll sent before a save could replace newer text in the editor: only a newer
+  version than the editor's is applied now.
+- A draft made for a note takes the note's name (Reflection names notes by their first line).
+- "Share my cursor" for Reflection notes: reflection_core sends a cursor only when this
+  device's setting is on (the same setting as Reflection's own switch, off by default).
+- Two Basecamps (t: Fileverse, u: the Reflection app, then Fileverse too): a note shared
+  from t's Fileverse, joined in u; typing in t's Fileverse shows in u's Reflection and the
+  other way round, a word replaced mid-line, a line added at the end, both typing at the
+  same time (converged, nothing lost), the empty line kept on both; u's Reflection caret
+  shown in t's Fileverse at the right place; with "Share my cursor" on in t, t's caret in
+  u's Reflection at the right place. A note made in u's Reflection joined by id in t's
+  Fileverse (text and name arrive); "Unlink note" leaves a private draft. The join panel
+  lists the Reflection notes also while one is open (filled from the open note's poll).
+  Shared with Fileverse (HashSeq) again on a new share, joined in u, typed both ways.
+
 ## 0.12.2: live sync speed, cursors, empty lines, sending while typing (2026-11-09)
 
 vpavlin on 0.12.1: text arrives slowly, cursors jump (moving one seemed to move the other's),
