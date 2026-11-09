@@ -657,9 +657,6 @@ fn blocks_to_md(blocks: &[Block]) -> String {
             Block::Item { list, .. } => Some(*list),
             _ => None,
         };
-        if matches!(b, Block::Empty) {
-            continue;
-        }
         let same_list = list.is_some() && list == prev_list;
         if !out.is_empty() {
             out.push_str(if same_list { "\n" } else { "\n\n" });
@@ -718,7 +715,9 @@ fn blocks_to_md(blocks: &[Block]) -> String {
                 }
                 out.push_str(":::");
             }
-            Block::Empty => {}
+            // An empty line the user made: Markdown has none, so a paragraph of one
+            // non-breaking space (to_html turns it back into an empty paragraph).
+            Block::Empty => out.push_str(EMPTY_LINE),
         }
         prev_list = list;
     }
@@ -741,6 +740,11 @@ fn guard_start(t: &str) -> String {
         t.to_string()
     }
 }
+
+/// How an empty line from the editor is written in Markdown.
+pub const EMPTY_LINE: &str = "&nbsp;";
+/// An empty paragraph as Qt writes it (and keeps it).
+const QT_EMPTY_P: &str = "<p style=\"-qt-paragraph-type:empty;\"><br /></p>";
 
 /// Qt's HTML -> Markdown.
 pub fn to_md(html: &str) -> String {
@@ -835,7 +839,9 @@ pub fn to_html(md: &str) -> String {
         }
     }
     out.push_str("</body></html>");
-    out
+    // a paragraph of only a non-breaking space (`&nbsp;`, an empty line) is an empty
+    // paragraph in the editor: no hidden character to type around
+    out.replace("<p>\u{a0}</p>", QT_EMPTY_P)
 }
 
 /// One run of plain Markdown as HTML (no wrapper). `img_width`: how wide images show.
@@ -1218,7 +1224,7 @@ fn to_html_blocks(blocks: &[Block]) -> String {
     for b in blocks {
         if matches!(b, Block::Empty) {
             flush(&mut run, &mut html);
-            html.push_str("<p></p>");
+            html.push_str(QT_EMPTY_P);
         } else {
             run.push(b.clone());
         }
@@ -1274,7 +1280,7 @@ li.checked::marker { content: "\2612"; }
         let md = to_md(QT_HTML);
         assert_eq!(
             md,
-            "# Title\n\nSome **bold**, *it*, ~~gone~~, `code` and [link](https://x.io).\n\n- one\n- two\n    - nested\n\n1. first\n\n- [ ] task\n- [x] done\n\n> quote\n\n```\nline1\nline2\n```\n\n| a | b |\n| --- | --- |\n| 1 \\< 2 & x\\*y | 2 |\n\nend\n"
+            "# Title\n\nSome **bold**, *it*, ~~gone~~, `code` and [link](https://x.io).\n\n- one\n- two\n    - nested\n\n1. first\n\n- [ ] task\n- [x] done\n\n> quote\n\n```\nline1\nline2\n```\n\n| a | b |\n| --- | --- |\n| 1 \\< 2 & x\\*y | 2 |\n\n&nbsp;\n\nend\n"
         );
     }
 
@@ -1455,6 +1461,23 @@ li.checked::marker { content: "\2612"; }
         // a diagram typed in the visual editor (no language at all) is still a diagram
         let typed = to_md("<html><body><pre>sequenceDiagram</pre><pre>  A-&gt;&gt;B: hi</pre></body></html>");
         assert!(typed.starts_with("```mermaid\nsequenceDiagram"), "{typed}");
+    }
+
+    /// Empty lines made in the editor survive as `&nbsp;` paragraphs and come back empty
+    /// (vpavlin: two empty lines were missing on the other side of a shared draft).
+    #[test]
+    fn empty_lines_survive_the_round_trip() {
+        let qt = r#"<html><body><p>A</p><p style="-qt-paragraph-type:empty; margin-top:0px;"><br /></p><p style="-qt-paragraph-type:empty;"><br /></p><p>B</p></body></html>"#;
+        let md = to_md(qt);
+        assert_eq!(md, "A\n\n&nbsp;\n\n&nbsp;\n\nB\n");
+        let html = to_html(&md);
+        assert_eq!(html.matches(QT_EMPTY_P).count(), 2, "{html}");
+        assert!(!html.contains('\u{a0}'), "no hidden character in the editor: {html}");
+        assert_eq!(to_md(&html), md);
+        // and Fileverse/preview: empty-looking paragraphs, not slide content
+        let doc = crate::doc::load(&crate::md::to_yjs(&md)).unwrap();
+        let tab = &crate::doc::tabs(&doc)[0];
+        assert_eq!(tab.slides.len(), 1);
     }
 
     #[test]

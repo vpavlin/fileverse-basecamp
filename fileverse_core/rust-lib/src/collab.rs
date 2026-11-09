@@ -18,7 +18,7 @@
 //!
 //! Only the draft the user has open ("active") publishes anything of its own: heads 0.5, 5
 //! and 30 s after opening, presence every 120 s, local edits merged into at most one ops
-//! message every [`PUBLISH_EVERY`]. A draft in the background answers repairs and nothing
+//! message every [`PUBLISH_EVERY`] (or a few times a second in [`Speed::Live`]). A draft in the background answers repairs and nothing
 //! else (Reflection ADR 0008, the RLN message budget).
 //!
 //! This module is transport-free: it reads frames given to [`Collab::receive`], and leaves
@@ -40,8 +40,36 @@ use sha2::{Digest, Sha256};
 pub const PROTOCOL: &str = "fileverse-collab-v1";
 /// The longest sealed message (Waku carries about 150 KB).
 pub const MAX_MESSAGE: usize = 120 * 1024;
-/// Local edits of the open draft go out at most this often (milliseconds).
+/// Local edits of the open draft go out at most this often (milliseconds), in the
+/// economical speed; live typing uses [`Speed::Live`].
 pub const PUBLISH_EVERY: u64 = 2_000;
+
+/// How eagerly the open draft sends: `Live` shows others' typing within a fraction of a
+/// second (many messages: fine without RLN), `Economy` keeps to an RLN-sized budget.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Speed {
+    Live,
+    Economy,
+}
+
+impl Speed {
+    pub fn parse(s: &str) -> Speed {
+        if s.trim().eq_ignore_ascii_case("economy") { Speed::Economy } else { Speed::Live }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Speed::Live => "live",
+            Speed::Economy => "economy",
+        }
+    }
+    /// (edits at most every, cursor at most every, heads after a burst), milliseconds
+    fn timing(self) -> (u64, u64, u64) {
+        match self {
+            Speed::Live => (300, 250, 1_500),
+            Speed::Economy => (PUBLISH_EVERY, CURSOR_EVERY, 3_000),
+        }
+    }
+}
 /// Presence ping while a draft is open (milliseconds); a peer silent for twice this is offline.
 pub const PRESENCE_EVERY: u64 = 120_000;
 /// Heads after a draft becomes active (milliseconds after).
@@ -258,10 +286,12 @@ impl Shared {
     }
 
     /// Apply the user's whole text, edited from version `base`. Returns whether anything
-    /// changed. An edit made on an older version is rebased: its inserts attach to the
-    /// elements they followed then, its removals name the elements, so concurrent changes
-    /// by others are kept.
-    pub fn set_text(&mut self, base: Option<u64>, text: &str) -> Result<bool, String> {
+    /// changed, and the **edit version**: a version whose text is exactly `text` (the user's
+    /// text, without others' changes merged meanwhile), so that an editor that kept typing
+    /// can send its next text based on it. An edit made on an older version is rebased: its
+    /// inserts attach to the elements they followed then, its removals name the elements,
+    /// so concurrent changes by others are kept.
+    pub fn set_text(&mut self, base: Option<u64>, text: &str) -> Result<(bool, u64), String> {
         if text.chars().count() > MAX_TEXT {
             return Err(format!("a shared draft holds at most {MAX_TEXT} characters"));
         }
@@ -272,7 +302,12 @@ impl Shared {
             _ => (current.clone(), None),
         };
         if base_text == text {
-            return Ok(false);
+            // nothing new from the user: their text is that version
+            let n = match base_v {
+                Some(v) => v.n,
+                None => self.record_version(),
+            };
+            return Ok((false, n));
         }
         let old: Vec<char> = base_text.chars().collect();
         let new: Vec<char> = text.chars().collect();
@@ -287,6 +322,9 @@ impl Shared {
                 if !inserted.is_empty() {
                     seq.insert_batch(start, inserted);
                 }
+                self.dirty = true;
+                // nothing concurrent: the current text is the user's text
+                return Ok((true, self.record_version()));
             }
             Some(ids) => {
                 if old_end > start {
@@ -296,21 +334,31 @@ impl Shared {
                     self.web.apply_to(self.obj, node).map_err(|e| format!("{e:?}"))?;
                 }
                 if !inserted.is_empty() {
+                    // Fugue's rule, as HashSeq's own inserts: after the left neighbour if
+                    // nothing follows it yet, else before the right neighbour (both as the
+                    // edited version had them), so the text lands between them
+                    let right = ids.get(old_end).copied();
                     let at = if start > 0 {
-                        Anchor::After(ids[start - 1])
-                    } else if let Some(first) = ids.first() {
-                        Anchor::Before(*first)
+                        let left = ids[start - 1];
+                        let followed = self.seq().afters(&left).next().is_some();
+                        match (followed, right) {
+                            (true, Some(r)) => Anchor::Before(r),
+                            _ => Anchor::After(left),
+                        }
+                    } else if let Some(first) = right.or(ids.first().copied()) {
+                        Anchor::Before(first)
                     } else {
                         // the text was empty then: insert where an empty text starts now
                         let seq = self.web.seq_mut(&self.obj).expect("seq");
                         seq.insert_batch(0, inserted);
                         self.dirty = true;
-                        return Ok(true);
+                        return Ok((true, self.record_version()));
                     };
                     let mut named = BTreeSet::new();
                     named.insert(*at.id());
                     let pins = self.pins_except(&named);
                     let mut prev: Option<Id> = None;
+                    let mut new_ids: Vec<Id> = vec![];
                     for ch in inserted {
                         let node = match prev {
                             None => HashNode { pins: pins.clone(), op: Op::Insert { at: at.clone(), payload: Payload::Char(ch) } },
@@ -319,12 +367,30 @@ impl Shared {
                         let id = node.id();
                         self.web.apply_to_with_id(self.obj, id, node).map_err(|e| format!("{e:?}"))?;
                         prev = Some(id);
+                        new_ids.push(id);
                     }
+                    self.dirty = true;
+                    return Ok((true, self.record_edit_version(&ids, start, old_end, new_ids, text)));
                 }
+                self.dirty = true;
+                return Ok((true, self.record_edit_version(&ids, start, old_end, vec![], text)));
             }
         }
-        self.dirty = true;
-        Ok(true)
+    }
+
+    /// Remember the user's text after a rebased edit as its own version: the base's
+    /// elements with the edited span replaced by the inserted ones.
+    fn record_edit_version(&mut self, base_ids: &[Id], start: usize, old_end: usize, inserted: Vec<Id>, text: &str) -> u64 {
+        let mut ids = base_ids[..start].to_vec();
+        ids.extend(inserted);
+        ids.extend_from_slice(&base_ids[old_end..]);
+        let n = self.next_version;
+        self.next_version += 1;
+        self.versions.push_back(Version { n, ids, text: text.to_string() });
+        while self.versions.len() > 64 {
+            self.versions.pop_front();
+        }
+        n
     }
 
     /// The tips an op pins: every current tip it does not already name.
@@ -487,13 +553,14 @@ pub struct Collab {
     rng: u64,
     pub sent: BTreeMap<&'static str, u64>,
     pub received: BTreeMap<&'static str, u64>,
+    pub speed: Speed,
 }
 
 impl Collab {
     /// `me`: this device's author id (hex), stable across restarts.
     pub fn new(me: String, name: String, seed: u64) -> Collab {
         let color = color_of(&me);
-        Collab { me, name, color, docs: BTreeMap::new(), outbox: vec![], rng: seed | 1, sent: BTreeMap::new(), received: BTreeMap::new() }
+        Collab { me, name, color, docs: BTreeMap::new(), outbox: vec![], rng: seed | 1, sent: BTreeMap::new(), received: BTreeMap::new(), speed: Speed::Live }
     }
 
     fn rand(&mut self, lo: u64, hi: u64) -> u64 {
@@ -592,8 +659,9 @@ impl Collab {
 
     /// Send what local edits added since the last ops message.
     fn flush_local(&mut self, id: &str, now: u64, force: bool) {
+        let (every, _, burst) = self.speed.timing();
         let Some(d) = self.docs.get_mut(id) else { return };
-        if !force && now < d.last_publish + PUBLISH_EVERY {
+        if !force && now < d.last_publish + every {
             return;
         }
         let nodes: Vec<HashNode> = d
@@ -614,7 +682,7 @@ impl Collab {
         d.published = d.web.clock();
         d.from_others.clear();
         d.last_publish = now;
-        d.heads_after_burst = Some(now + 3_000);
+        d.heads_after_burst = Some(now + burst);
         eprintln!("fileverse-collab: ops out: {} ops", nodes.len());
         let frames = d.delta_frames(nodes);
         let (topic, key) = (d.ops_topic.clone(), d.key);
@@ -663,17 +731,18 @@ impl Collab {
             if !self.docs[&id].active {
                 continue;
             }
+            let (_, cursor_every, burst) = self.speed.timing();
             let (heads_due, want, presence_due, cursor_due) = {
                 let d = &self.docs[&id];
                 let heads_due = d.heads_sent < HEADS_AFTER.len() && now >= d.activated_at + HEADS_AFTER[d.heads_sent];
                 let want = d.want_heads && now >= d.last_heads + 500;
                 let presence_due = now >= d.last_presence + PRESENCE_EVERY || d.presence_reply.is_some_and(|t| now >= t);
-                let cursor_due = d.cursor_pending.is_some() && now >= d.last_cursor_sent + CURSOR_EVERY;
+                let cursor_due = d.cursor_pending.is_some() && now >= d.last_cursor_sent + cursor_every;
                 (heads_due, want, presence_due, cursor_due)
             };
             let burst_due = {
                 let d = &self.docs[&id];
-                d.heads_after_burst.is_some_and(|t| now >= t && now >= d.last_publish + 3_000)
+                d.heads_after_burst.is_some_and(|t| now >= t && now >= d.last_publish + burst)
             };
             if heads_due {
                 self.docs.get_mut(&id).unwrap().heads_sent += 1;
@@ -952,8 +1021,27 @@ mod tests {
         assert_eq!(d.text(), "zero one 2 three");
         // and inserted at the very start, from version 1
         d.set_text(Some(v1), ">one two three").unwrap();
-        // ">" was typed before "one" in the version the view had: it stays before "one"
-        assert_eq!(d.text(), "zero >one 2 three");
+        // ">" and "zero " went in at the same place without seeing each other: either
+        // order is a correct merge (HashSeq orders them by id)
+        let t = d.text();
+        assert!(t == ">zero one 2 three" || t == "zero >one 2 three", "{t}");
+    }
+
+    /// The editor kept typing while its last text was being merged with others' changes:
+    /// its next text, based on the edit version, adds only the new typing.
+    #[test]
+    fn typing_on_while_others_change_the_text_loses_nothing() {
+        let mut a = Collab::new("aa".into(), "A".into(), 1);
+        let d = a.share(T, "hello\n");
+        let v1 = d.current_version();
+        // someone else adds a line at the end
+        d.set_text(None, "hello\nfrom B\n").unwrap();
+        // the editor (still on v1) sends "hello world"
+        let (_, ev) = d.set_text(Some(v1), "hello world\n").unwrap();
+        assert_eq!(d.text(), "hello world\nfrom B\n");
+        // it kept typing: "hello world!" based on the edit version, not on the merged one
+        let (_, _) = d.set_text(Some(ev), "hello world!\n").unwrap();
+        assert_eq!(d.text(), "hello world!\nfrom B\n", "B's line kept, nothing doubled");
     }
 
     #[test]
@@ -1007,6 +1095,7 @@ mod tests {
     #[test]
     fn a_lost_edit_is_recovered_and_nothing_is_echoed() {
         let mut a = Collab::new("aa".into(), "A".into(), 1);
+        a.speed = Speed::Economy;
         let mut b = Collab::new("bb".into(), "B".into(), 2);
         let id = hex::encode(T);
         a.share(T, "base\n");

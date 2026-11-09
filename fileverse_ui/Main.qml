@@ -299,7 +299,8 @@ Item {
             root.applyRemote(r)
         })
     }
-    Timer { interval: 1000; running: root.mode === "edit" && root.isShared; repeat: true; onTriggered: root.refreshCollab() }
+    readonly property bool collabLive: !(root.collab.me && root.collab.me.speed === "economy")
+    Timer { interval: root.collabLive ? 300 : 1000; running: root.mode === "edit" && root.isShared; repeat: true; onTriggered: root.refreshCollab() }
     // Others' edits: show them unless the user is mid-edit (then the next save merges).
     function applyRemote(r) {
         if (root.draftDirty || root.savingDraft || previewTimer.running) return
@@ -331,6 +332,8 @@ Item {
         })
     }
     function saveShared(then) {
+        // one save at a time; typing during it is sent right after
+        if (root.savingDraft) { previewTimer.start(); return }
         var visual = root.visualEdit, id = root.draft.id, gen = root.editGen
         var titleChanged = titleField.text !== root.draft.title
         root.savingDraft = true
@@ -339,10 +342,19 @@ Item {
             var r = root.j(raw)
             if (!r || !r.ok) { root.fail(r ? r.error : "Saving failed."); return }
             if (!root.draft || root.draft.id !== id) return
-            root.collabVersion = r.version
-            if (gen === root.editGen) root.draftDirty = false
-            if (r.merged && gen === root.editGen) root.showSharedText(r.text)
-            else { root.collabSentText = r.text; root.updatePreview(r.text) }
+            if (gen === root.editGen) {
+                // nothing typed meanwhile: show the merged text
+                root.collabVersion = r.version
+                root.draftDirty = false
+                if (r.merged) root.showSharedText(r.text)
+                else { root.collabSentText = r.text; root.updatePreview(r.text) }
+            } else {
+                // typed on: the editor builds on what was sent (others' changes show at the
+                // next pause), and the rest goes out shortly
+                root.collabVersion = r.editVersion
+                root.collabSentText = r.submitted
+                if (!previewTimer.running) previewTimer.start()
+            }
             // the title is this device's name for the draft (not shared)
             root.sendCursor()
             if (titleChanged) root.core("draft_save", [id, titleField.text, r.text, ""], function (raw2) { var t = root.j(raw2); if (t && t.ok && root.draft && root.draft.id === id) { var d = JSON.parse(JSON.stringify(root.draft)); d.title = t.draft.title; root.draft = d } })
@@ -371,8 +383,59 @@ Item {
     }
     // Our cursor, as offsets into the shared Markdown (in the visual editor, found by the
     // text before the caret).
-    Timer { id: cursorTimer; interval: 300; onTriggered: root.sendCursor() }
+    Timer { id: cursorTimer; interval: root.collabLive ? 120 : 300; onTriggered: root.sendCursor() }
     function cursorMoved() { if (root.isShared) cursorTimer.restart() }
+    // Markdown -> the text the visual editor shows: block markers, emphasis marks, escapes
+    // and link targets removed, paragraphs as one line break. `map[i]` is the Markdown
+    // offset of visible character i (and map[text.length] the end).
+    function visibleMap(md) {
+        var out = [], map = [], lines = String(md).split("\n"), off = 0, fence = false
+        for (var li = 0; li < lines.length; li++) {
+            var t = lines[li], start = off
+            off += t.length + 1
+            if (/^\s*```/.test(t)) { fence = !fence; continue }
+            var i = 0
+            if (!fence) {
+                // an empty line made in the editor (`&nbsp;`): an empty paragraph there
+                if (t.trim() === "&nbsp;") { if (out.length) { out.push("\n"); map.push(start) } continue }
+                if (/^\s*$/.test(t) || /^\s*:::/.test(t) || /^\s*(---|===+)\s*$/.test(t)) continue
+                var m = t.match(/^\s*(#{1,6}\s+|>\s?|[-*+]\s+(\[[ xX]\]\s+)?|\d+[.)]\s+)?/)
+                i = m ? m[0].length : 0
+            }
+            if (out.length) { out.push("\n"); map.push(start) }
+            while (i < t.length) {
+                var c = t.charAt(i)
+                if (!fence) {
+                    if (c === "\\" && i + 1 < t.length) { out.push(t.charAt(i + 1)); map.push(start + i + 1); i += 2; continue }
+                    if (c === "*" || c === "`" || c === "~") { i++; continue }
+                    if (c === "!" && t.charAt(i + 1) === "[") { var e = t.indexOf(")", i); if (e > 0) { out.push("\ufffc"); map.push(start + i); i = e + 1; continue } }
+                    if (c === "]" && t.charAt(i + 1) === "(") { var e2 = t.indexOf(")", i); if (e2 > 0) { i = e2 + 1; continue } }
+                    if (c === "[" && t.indexOf("](", i) > 0) { i++; continue }
+                }
+                out.push(c); map.push(start + i); i++
+            }
+        }
+        map.push(String(md).length)
+        return { text: out.join(""), map: map }
+    }
+    // The visual editor's text with every block break as one line break (same length).
+    function richPlain() { return richArea.getText(0, richArea.length).replace(/[\u2029\ufdd0\ufdd1]/g, "\n") }
+    // A Markdown offset -> where that place is in the visual editor (by the visible text
+    // just before it).
+    function mdToRich(md, mdOffset) {
+        var vm = root.visibleMap(md), v = 0
+        while (v < vm.text.length && vm.map[v] < mdOffset) v++
+        var plain = root.richPlain()
+        if (v === 0) return 0
+        return root.cursorFor(plain, vm.text.substring(Math.max(0, v - 20), v), vm.text.length ? v / vm.text.length : 0)
+    }
+    // A place in the visual editor -> its Markdown offset.
+    function richToMd(md, pos) {
+        var vm = root.visibleMap(md), plain = root.richPlain()
+        if (pos <= 0) return vm.map[0] || 0
+        var v = root.cursorFor(vm.text, plain.substring(Math.max(0, pos - 20), pos), plain.length ? pos / plain.length : 0)
+        return vm.map[Math.min(v, vm.map.length - 1)]
+    }
     function sendCursor() {
         if (!root.isShared || !root.draft) return
         var md = root.collabSentText, caret, anchor
@@ -380,26 +443,19 @@ Item {
             caret = mdArea.cursorPosition
             anchor = mdArea.selectionStart === mdArea.cursorPosition ? mdArea.selectionEnd : mdArea.selectionStart
         } else {
-            var full = richArea.getText(0, richArea.length)
-            var at = function (pos) {
-                var before = full.substring(0, pos)
-                return root.cursorFor(md, before.substring(Math.max(0, before.length - 24)).replace(/[\u2029\ufdd0\ufdd1\ufffc]/g, "\n"), full.length ? pos / full.length : 0)
-            }
-            caret = at(richArea.cursorPosition)
-            anchor = richArea.selectionStart === richArea.cursorPosition ? at(richArea.selectionEnd) : at(richArea.selectionStart)
+            caret = root.richToMd(md, richArea.cursorPosition)
+            var other = richArea.selectionStart === richArea.cursorPosition ? richArea.selectionEnd : richArea.selectionStart
+            anchor = other === richArea.cursorPosition ? caret : root.richToMd(md, other)
         }
         root.core("collab_set_cursor", [root.draft.id, root.collabVersion, String(caret), String(anchor)], function () {})
     }
-    // Where to draw someone's caret in the editor: in the Markdown view it is the offset;
-    // in the visual editor the place after the same text.
+    // Where to draw someone's caret: offsets come against the shared text as the core has
+    // it now (collab.text).
     function peerCaretPos(caret) {
-        var md = root.collabSentText
         if (caret === null || caret === undefined) return -1
+        var md = root.collab.text !== undefined ? root.collab.text : root.collabSentText
         if (!root.visualEdit) return Math.min(caret, mdArea.length)
-        var tail = md.substring(Math.max(0, caret - 24), caret).replace(/[#*_`>~\[\]]/g, "")
-        var lines = tail.split("\n"); tail = lines[lines.length - 1]
-        var plain = richArea.getText(0, richArea.length)
-        return root.cursorFor(plain, tail, md.length ? caret / md.length : 0)
+        return root.mdToRich(md, caret)
     }
     function changedOutside(d) {
         if (!root.draft || !d || d.id !== root.draft.id) return
@@ -553,7 +609,9 @@ Item {
         if (root.loadingEditor) return
         root.editGen++
         root.draftDirty = true
-        previewTimer.restart()
+        // a shared draft sends while you type (every timer period), not only when you pause
+        if (root.isShared) { if (!previewTimer.running) previewTimer.start() }
+        else previewTimer.restart()
     }
     // Which text block the cursor is in, counted as Qt counts them (paragraph
     // separators; table cells are separated by other characters).
@@ -741,7 +799,8 @@ Item {
     Timer { interval: 700; running: root.busy; repeat: true; onTriggered: root.pollJobs() }
     Timer { id: toastTimer; interval: 3500; onTriggered: root.toast = "" }
     // Live preview + autosave while typing (local-first: a draft is saved on this device as you go).
-    Timer { id: previewTimer; interval: 700; onTriggered: root.saveDraft() }
+    // a shared draft in live speed saves (and so sends) sooner after a keystroke
+    Timer { id: previewTimer; interval: root.isShared && root.collabLive ? 200 : 700; onTriggered: root.saveDraft() }
 
     property bool snapBusy: false
     property bool snapAgain: false
@@ -1218,6 +1277,12 @@ Item {
                         Layout.fillWidth: true
                         Field { id: collabNameField; Layout.fillWidth: true; placeholderText: (root.collab.me && root.collab.me.name) || "Shown on your cursor to others" }
                         LogosButton { compact: true; text: "Save name"; enabled: collabNameField.text.trim() !== ""; onClicked: root.act("collab_set_name", [collabNameField.text], "Name saved", function () { collabNameField.text = ""; root.refreshCollab() }) }
+                    }
+                    Caption { text: "SHARED DRAFTS: SYNC SPEED"; Layout.topMargin: 4 }
+                    Hint { text: "Live: others see your typing within a fraction of a second (many messages over Logos Delivery). Economy: every 2 seconds, sized for an RLN message budget." }
+                    RowLayout {
+                        LogosButton { compact: true; text: "Live"; variant: root.collabLive ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; onClicked: root.act("collab_set_speed", ["live"], "Shared drafts: live", function () { root.refreshCollab() }) }
+                        LogosButton { compact: true; text: "Economy"; variant: !root.collabLive ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; onClicked: root.act("collab_set_speed", ["economy"], "Shared drafts: economy", function () { root.refreshCollab() }) }
                     }
                     Caption { text: "IPFS GATEWAYS"; Layout.topMargin: 4 }
                     Hint { text: "Tried after your own node, one per line. Every block is checked against its hash, so a gateway can fail but cannot change content." }
@@ -1749,7 +1814,7 @@ Item {
                             Repeater {
                                 model: root.isShared ? root.collabOnline : []
                                 Item {
-                                    readonly property int at: { root.collabSentText; richArea.length; return root.peerCaretPos(modelData.caret) }
+                                    readonly property int at: { root.collab; richArea.length; return root.peerCaretPos(modelData.caret) }
                                     readonly property rect r: at >= 0 ? richArea.positionToRectangle(at) : Qt.rect(0, 0, 0, 0)
                                     visible: at >= 0 && modelData.caret !== null && modelData.caret !== undefined
                                     x: r.x; y: r.y; width: 2; height: Math.max(r.height, 14); z: 5
@@ -1816,7 +1881,7 @@ Item {
                             Repeater {
                                 model: root.isShared ? root.collabOnline : []
                                 Item {
-                                    readonly property int at: { root.collabSentText; mdArea.length; return root.peerCaretPos(modelData.caret) }
+                                    readonly property int at: { root.collab; mdArea.length; return root.peerCaretPos(modelData.caret) }
                                     readonly property rect r: at >= 0 ? mdArea.positionToRectangle(at) : Qt.rect(0, 0, 0, 0)
                                     visible: at >= 0 && modelData.caret !== null && modelData.caret !== undefined
                                     x: r.x; y: r.y; width: 2; height: Math.max(r.height, 14); z: 5

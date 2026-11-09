@@ -1,5 +1,29 @@
 # What was tested, and how to repeat it
 
+## 0.12.2: live sync speed, cursors, empty lines, sending while typing (2026-11-09)
+
+vpavlin on 0.12.1: text arrives slowly, cursors jump (moving one seemed to move the other's),
+empty lines are missing on the other side, and nothing is sent while you keep typing.
+
+- Speed: "Sync speed" in Settings, Live (default: save 0.2 s after a keystroke and every
+  0.2 s while typing, send within 0.3 s, poll 0.3 s, cursors 4/s) or Economy (2 s, RLN
+  budget).
+- Cursors: the view mapped visual-editor positions to Markdown by the text before the caret
+  with brackets stripped, so escaped text (`\[t typing\]`) never matched and carets fell
+  back to a proportional guess. Now through a visible-text map (markers, emphasis, escapes,
+  link targets removed), against the core's current text.
+- Empty lines: Markdown has none, so the editor's empty paragraphs were dropped (and a caret
+  on one landed in the next line). Written as `&nbsp;` paragraphs now, shown as empty
+  paragraphs again (no hidden character), skipped by slides. cargo:
+  `empty_lines_survive_the_round_trip`.
+- Typing on during a save: the core returns the edit version (exactly the text sent); the
+  next text builds on it. Found with `typing_on_while_others_change_the_text_loses_nothing`:
+  a rebased insert anchored "after the left neighbour" landed after others' new line;
+  rebased inserts now follow Fugue's rule as HashSeq's own inserts do.
+- Two Basecamps: two empty lines and a line typed without pause in t: u showed the empty
+  lines, the line growing while t typed (t's caret at its end), and all of it after 11 s
+  (the relay dropped some of the small messages; the heads after the burst repaired them).
+
 ## 0.12.1: shared drafts sync both ways (2026-11-09)
 
 vpavlin's test of 0.12.0: the joiner's edits reached the sharer, not the other way round.

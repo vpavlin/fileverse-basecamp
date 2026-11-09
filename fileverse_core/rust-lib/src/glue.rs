@@ -138,6 +138,9 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn collab_leave(&self, draft_id: String) -> String;
     /// The name others see on this device's cursor and presence.
     fn collab_set_name(&self, name: String) -> String;
+    /// How eagerly shared drafts send: "live" (others see typing within a fraction of a
+    /// second; many messages) or "economy" (every 2 s, sized for an RLN message budget).
+    fn collab_set_speed(&self, speed: String) -> String;
     /// One draft with its Markdown and preview.
     fn draft_get(&self, draft_id: String) -> String;
     /// Delete a draft (published copies stay where they are).
@@ -1497,13 +1500,13 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             return json!({ "ok": true, "shared": false }).to_string();
         };
         let mut e = rt.engine.lock().unwrap();
-        let (me, name, color) = (e.me.clone(), e.name.clone(), e.color.clone());
+        let (me, name, color, speed) = (e.me.clone(), e.name.clone(), e.color.clone(), e.speed.name());
         match e.state(&id) {
             Some(mut v) => {
                 v["ok"] = json!(true);
                 v["shared"] = json!(true);
                 v["transport"] = rt.transport.lock().unwrap().clone();
-                v["me"] = json!({ "id": me, "name": name, "color": color });
+                v["me"] = json!({ "id": me, "name": name, "color": color, "speed": speed });
                 // joined someone's draft (Leave) or shared it from here (Stop sharing)
                 v["joined"] = json!(self.load_draft(&draft_id).ok().map(|(_, d)| d["collab"]["joined"].as_bool().unwrap_or(false)).unwrap_or(false));
                 v.to_string()
@@ -1517,14 +1520,17 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         let base = base_version.trim().trim_matches('"').parse::<u64>().ok();
         let mut e = rt.engine.lock().unwrap();
         let Some(d) = e.docs.get_mut(&id) else { return err("this shared draft is not loaded") };
-        if let Err(x) = d.set_text(base, &markdown) {
-            return err(x);
-        }
+        let edit_version = match d.set_text(base, &markdown) {
+            Ok((_, ev)) => ev,
+            Err(x) => return err(x),
+        };
         let version = d.current_version();
         let text = d.text();
         // others' edits merged in: the editor should show this text
         let merged = text != markdown;
-        json!({ "ok": true, "version": version.to_string(), "text": text, "merged": merged }).to_string()
+        // `editVersion`/`submitted`: what to base the next text on if the user typed on
+        json!({ "ok": true, "version": version.to_string(), "text": text, "merged": merged,
+                "editVersion": edit_version.to_string(), "submitted": markdown }).to_string()
     }
 
     fn collab_set_rich(&self, draft_id: String, base_version: String, html: String) -> String {
@@ -1587,13 +1593,20 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         if name.is_empty() {
             return err("a name, please");
         }
-        let me = {
-            let mut e = rt.engine.lock().unwrap();
-            e.name = name.clone();
-            e.me.clone()
-        };
-        write_private(&rt.dir.join("collab").join("me.json"), &json!({ "id": me, "name": name }).to_string());
+        rt.engine.lock().unwrap().name = name.clone();
+        rt.save_me();
         json!({ "ok": true, "name": name }).to_string()
+    }
+
+    fn collab_set_speed(&self, speed: String) -> String {
+        let rt = match self.collab_rt() {
+            Ok(r) => r,
+            Err(e) => return err(e),
+        };
+        let speed = crate::collab::Speed::parse(&speed);
+        rt.engine.lock().unwrap().speed = speed;
+        rt.save_me();
+        json!({ "ok": true, "speed": speed.name() }).to_string()
     }
 
     fn draft_get(&self, draft_id: String) -> String {
@@ -1816,6 +1829,14 @@ static COLLAB: std::sync::OnceLock<Arc<CollabRt>> = std::sync::OnceLock::new();
 const LOAM_STARTUP_DELAY: Duration = Duration::from_secs(3);
 
 impl CollabRt {
+    /// Who we are and how we send, kept for the next start.
+    fn save_me(&self) {
+        let e = self.engine.lock().unwrap();
+        let v = json!({ "id": e.me, "name": e.name, "speed": e.speed.name() });
+        drop(e);
+        write_private(&self.dir.join("collab").join("me.json"), &v.to_string());
+    }
+
     fn join_topics(&self) {
         let topics = self.engine.lock().unwrap().topics();
         let mut joined = self.joined.lock().unwrap();
@@ -1891,6 +1912,7 @@ impl FileverseCoreModuleImpl {
         };
         let seed = u64::from_le_bytes(crate::crypto::random::<8>());
         let mut engine = crate::collab::Collab::new(author, name, seed);
+        engine.speed = crate::collab::Speed::parse(me["speed"].as_str().unwrap_or("live"));
         // the drafts already shared
         let mut drafts = HashMap::new();
         if let Ok(rd) = std::fs::read_dir(&drafts_dir) {
