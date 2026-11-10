@@ -1,5 +1,45 @@
 # What was tested, and how to repeat it
 
+## 0.14.3: editor UX pass, three people on one document (2026-11-10)
+
+vpavlin asked for a thorough editor test (formatting, Tab leaving the editor, double Enter
+not ending a list) and a test with three people. Scripted with xdotool in Basecamps t, u, v
+(tools/gui-tests: edtest.py drives the editor and reads the saved Markdown back after each
+case; cases1.py, cases2.py: 66 + 9 cases; collab3.py: three-person rounds, frames of every
+screen). Found and fixed:
+
+- Typed shortcuts (`# `, `- `, `1. `, `[] `, `> `) failed on a line the editor had restyled
+  while empty, e.g. after Enter at the end of a heading: it holds a zero-width space.
+- Double Enter did not end a list, task list or quote (new empty items kept coming); now an
+  empty item ends the list (a nested one goes up one level), an empty quote line ends the
+  quote, an empty last line of a code block leaves it. An empty line in a quote is a quote
+  line for the core (`an_empty_line_in_a_quote_is_the_quotes`).
+- Tab left the editor (and later keys went nowhere): Basecamp hosts the view in a
+  QQuickWidget, which hands Tab to QML only when an item after the focused one can take
+  focus. An invisible tab stop after the editor keeps it in; Tab nests a list item and
+  Shift+Tab lifts it (core: `indent` / `outdent`, `tab_nests_list_items_and_shift_tab_lifts_them`),
+  Tab in code indents (no-break spaces, written as spaces: `code_keeps_its_indentation_in_the_editor`),
+  elsewhere it does nothing; in the Markdown editor Tab inserts four spaces.
+- Ctrl+K did nothing: Basecamp binds it (search); the editor takes it (shortcut override).
+- Tab or Enter in the title went to the buttons; now into the text.
+- Ctrl+B / Ctrl+I with nothing selected did nothing; now they switch the style of what is
+  typed next, on and off.
+- Enter followed at once by typing could put the first letter before the line break: the
+  Enter handler asked the core for the block kind synchronously, which let the next key in
+  first. It uses the kind the editor keeps up to date now.
+
+Still as before (noted, not changed): typed `**bold**` stays text; Ctrl+Z undoes everything
+typed since the last formatting step; Shift+Enter is a space in Markdown.
+
+Three people (t, u, v on Logos; recording in reports/, not in the repo): join, text on both
+joiners after 9 s; each in turn; all three at once in different lines (identical after 12 s,
+every sentence intact); all three at once at the same place (identical after 17 s, each
+person's letters together). One lag: v got t's last line of round 1 only with the next edits
+(over 2 min), on the transport side. On "both", one Basecamp's p2panda_core.open timed out
+under load and reflection_core then could not publish that note on Logos either (reported to
+jimmy-crib/vpavlin). Early runs were garbled by X key auto-repeat on the loaded test machine
+(`xset r off` fixes the rig).
+
 ## 0.14.2: Reflection 0.6 networks (2026-11-10)
 
 reflection_core 0.6.0 (jimmy-crib/vpavlin, same day) publishes on Logos, p2panda or both by its

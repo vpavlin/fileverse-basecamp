@@ -423,7 +423,8 @@ fn blocks_from_toks(toks: &[Tok]) -> Vec<Block> {
                 i = next;
                 let empty = css.contains("-qt-paragraph-type:empty") || plain.trim().is_empty();
                 if name == "pre" {
-                    code_run.push(plain.trim_end_matches('\n').to_string());
+                    // the editor indents code with no-break spaces (Qt collapses inserted spaces)
+                    code_run.push(plain.trim_end_matches('\n').replace('\u{a0}', " "));
                     continue;
                 }
                 flush_code(&mut code_run, &mut blocks);
@@ -443,9 +444,13 @@ fn blocks_from_toks(toks: &[Tok]) -> Vec<Block> {
                         let level: u8 = h[1..].parse().unwrap_or(1);
                         if empty { Block::Empty } else { Block::Heading(level.min(3), buf.markdown(false)) }
                     }
+                    // Qt turns <blockquote> into a paragraph indented on both sides; an empty
+                    // line in a quote (Enter in a quote) is still the quote's, so that a second
+                    // Enter there can end the quote
+                    _ if quote_depth > 0 || (css.contains("margin-left:40px") && css.contains("margin-right:40px")) => {
+                        if empty { Block::Quote(ZWSP.to_string()) } else { Block::Quote(buf.markdown(true)) }
+                    }
                     _ if empty => Block::Empty,
-                    // Qt turns <blockquote> into a paragraph indented on both sides
-                    _ if quote_depth > 0 || (css.contains("margin-left:40px") && css.contains("margin-right:40px")) => Block::Quote(buf.markdown(true)),
                     _ => Block::Para(buf.markdown(true)),
                 };
                 blocks.push(block);
@@ -1131,7 +1136,8 @@ pub fn kind_at(html: &str, at: impl Into<At>) -> String {
 }
 
 /// Change the kind of the text block at `index` and return the document as HTML
-/// for Qt. `kind` is "p", "h1", "h2", "h3", "ul", "ol", "task", "done", "quote" or "code".
+/// for Qt. `kind` is "p", "h1", "h2", "h3", "ul", "ol", "task", "done", "quote" or "code",
+/// or "indent" / "outdent" for a list item (Tab / Shift+Tab).
 /// Blocks inside columns can be restyled; table cells cannot.
 pub fn set_block(html: &str, at: impl Into<At>, kind: &str) -> Result<String, String> {
     let mut blocks = blocks_from_html(html);
@@ -1161,6 +1167,27 @@ fn restyle(blocks: &mut Vec<Block>, i: usize, line: usize, kind: &str) -> Result
         }
     };
     let old = blocks[i].clone();
+    // Tab / Shift+Tab in a list: one level deeper (at most one below the item above) or
+    // shallower (out of the list from the top level)
+    if kind == "indent" || kind == "outdent" {
+        let Block::Item { list, ordered, depth, task, inline } = old else {
+            return Err("only list items can be indented".into());
+        };
+        let inline = if inline.trim().is_empty() { ZWSP.to_string() } else { inline };
+        let above = i.checked_sub(1).and_then(|p| match blocks.get(p) {
+            Some(Block::Item { depth, .. }) => Some(*depth),
+            _ => None,
+        });
+        blocks[i] = if kind == "indent" {
+            let deepest = above.map(|d| d + 1).unwrap_or(0);
+            Block::Item { list, ordered, depth: (depth + 1).min(deepest).max(depth), task, inline }
+        } else if depth > 0 {
+            Block::Item { list, ordered, depth: depth - 1, task, inline }
+        } else {
+            Block::Para(inline)
+        };
+        return Ok(());
+    }
     let (depth, list) = match &old {
         Block::Item { depth, list, .. } => (*depth, *list),
         // a new list unless it joins the one just above
@@ -1385,6 +1412,43 @@ li.checked::marker { content: "\2612"; }
     /// tests/fixtures/qt_columns.html (captured from a TextArea in RichText mode) is
     /// `Test pres⏎A little image test▸This i cool:)⏎Yay!▸[image: pic]◂⏎Test▸Hello world how are you ?▸Right text◂⏎fdfd`
     /// (⏎ U+2029, ▸ U+FDD0, ◂ U+FDD1), and the one that starts with columns `▸L▸R◂`.
+    #[test]
+    fn code_keeps_its_indentation_in_the_editor() {
+        // as Qt writes a code block: one <pre> per line, spaces kept
+        let p = |t: &str| format!("<pre style=\" margin-top:0px; margin-bottom:0px;\"><span style=\" font-family:'monospace';\">{t}</span></pre>");
+        let qt = format!("<html><body>{}{}{}{}</body></html>", p("fn a() {"), p("    b();"), p("        c();"), p("}"));
+        assert_eq!(to_md(&qt).trim(), "```\nfn a() {\n    b();\n        c();\n}\n```");
+        let qt2 = format!("<html><body>{}{}</body></html>", p("x"), p("&nbsp;&nbsp;&nbsp;&nbsp;y"));
+        assert_eq!(to_md(&qt2).trim(), "```\nx\n    y\n```");
+    }
+
+    #[test]
+    fn an_empty_line_in_a_quote_is_the_quotes() {
+        let qt = "<html><body><p style=\" margin-top:12px; margin-bottom:12px; margin-left:40px; margin-right:40px;\">q</p>\
+                  <p style=\"-qt-paragraph-type:empty; margin-top:12px; margin-bottom:12px; margin-left:40px; margin-right:40px;\"><br /></p></body></html>";
+        assert_eq!(kind_at(qt, 1usize), "quote");
+        // Enter there again: the line becomes plain text and the quote ends
+        let md = to_md(&set_block(qt, 1usize, "p").unwrap());
+        assert_eq!(md.trim_end(), "> q\n\n&nbsp;");
+    }
+
+    #[test]
+    fn tab_nests_list_items_and_shift_tab_lifts_them() {
+        let html = to_html("- one\n- two\n- three\n");
+        let once = set_block(&html, 1usize, "indent").unwrap();
+        assert_eq!(to_md(&once).trim(), "- one\n    - two\n- three");
+        // at most one level below the item above
+        let twice = set_block(&once, 1usize, "indent").unwrap();
+        assert_eq!(to_md(&twice).trim(), "- one\n    - two\n- three");
+        let back = set_block(&once, 1usize, "outdent").unwrap();
+        assert_eq!(to_md(&back).trim(), "- one\n- two\n- three");
+        // the first item cannot go deeper; out of the list from the top level
+        assert_eq!(to_md(&set_block(&html, 0usize, "indent").unwrap()).trim(), "- one\n- two\n- three");
+        let out = to_md(&set_block(&html, 2usize, "outdent").unwrap());
+        assert_eq!(out.trim(), "- one\n- two\n\nthree");
+        assert!(set_block(&to_html("text\n"), 0usize, "indent").is_err());
+    }
+
     #[test]
     fn blocks_inside_columns_are_found_and_restyled() {
         let qt = include_str!("../tests/fixtures/qt_columns.html");

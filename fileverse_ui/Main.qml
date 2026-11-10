@@ -836,6 +836,21 @@ Item {
             flags += (i + 1 >= full.length || root.pieceBreak.test(full.charAt(i + 1))) ? "1" : "0"
         return flags ? n + ":" + flags : String(n)
     }
+    // The text of the cursor's block (without the break characters around it).
+    function blockText() {
+        var full = richArea.getText(0, richArea.length), c = richArea.cursorPosition
+        var s = root.lastBreak(full.substring(0, c)) + 1
+        var m = full.substring(c).search(root.pieceBreak)
+        return full.substring(s, m < 0 ? full.length : c + m)
+    }
+    function isBlank(t) { return String(t).replace(/[\u200b\ufeff\u00a0\s]/g, "") === "" }
+    // The kind of the block after the cursor's ("" at the end).
+    function kindAfter() {
+        var parts = String(root.blockIndex()).split(":")
+        var next = (Number(parts[0]) + 1) + (parts.length > 1 ? ":" + parts[1] : "")
+        var r = root.coreSync("rich_kind", [richArea.text, next])
+        return r && r.ok ? String(r.kind) : ""
+    }
     function lastBreak(p) {
         return Math.max(p.lastIndexOf("\u2029"), p.lastIndexOf("\ufdd0"), p.lastIndexOf("\ufdd1"))
     }
@@ -871,7 +886,8 @@ Item {
         richArea.cursorPosition = pos
         richArea.forceActiveFocus()
         root.editorChanged()
-        root.blockKind = kind
+        if (kind === "indent" || kind === "outdent") root.refreshBlockKind()
+        else root.blockKind = kind
     }
     // Qt draws links in a fixed dark blue; give them the theme's colour.
     function tintLinks(html) {
@@ -890,8 +906,47 @@ Item {
     }
     function toggleBlock(kind) { root.setBlock(root.blockKind === kind ? "p" : kind) }
     function toggleTask() { root.setBlock(root.blockKind === "task" ? "done" : "task") }
+    // Tab nests a list item, Shift+Tab lifts it; in code Tab indents; elsewhere nothing
+    // (never out of the editor)
+    function editorTab(back) {
+        if (/^(ul|ol|task|done)$/.test(root.blockKind)) root.setBlock(back ? "outdent" : "indent")
+        // (no-break spaces: inserted plain spaces would collapse; the core writes them as spaces)
+        else if (root.blockKind === "code" && !back) richArea.insert(richArea.cursorPosition, "\u00a0\u00a0\u00a0\u00a0")
+    }
+    function focusEditor() {
+        var a = root.visualEdit ? richArea : mdArea
+        a.forceActiveFocus()
+        a.cursorPosition = 0
+    }
+    property var pendingFont: null      // Ctrl+B/I with nothing selected: { prop, value, pos }
+    function applyPendingFont() {
+        var p = root.pendingFont
+        if (!p) return
+        var c = richArea.cursorPosition
+        if (c <= p.pos || c > p.pos + 8) { if (c !== p.pos) root.pendingFont = null; return }
+        root.pendingFont = null
+        richArea.select(p.pos, c)
+        var f = richArea.cursorSelection.font
+        f[p.prop] = p.value
+        richArea.cursorSelection.font = f
+        richArea.cursorPosition = c
+    }
     function toggleFont(prop) {
-        if (richArea.selectionStart === richArea.selectionEnd) { root.say("Select some text first"); return }
+        // with nothing selected: the style of the text typed next, the opposite of the
+        // character before the cursor (Qt reports the block's style for an empty selection)
+        if (richArea.selectionStart === richArea.selectionEnd) {
+            var pos = richArea.cursorPosition, on = false
+            if (root.pendingFont && root.pendingFont.pos === pos && root.pendingFont.prop === prop) on = root.pendingFont.value
+            else if (pos > 0) {
+                richArea.select(pos - 1, pos)
+                on = !!richArea.cursorSelection.font[prop]
+                richArea.cursorPosition = pos
+            }
+            // Qt types with the style of the character before: style the next typed one,
+            // and what follows takes it on
+            root.pendingFont = { prop: prop, value: !on, pos: pos }
+            return
+        }
         var f = richArea.cursorSelection.font
         f[prop] = !f[prop]
         richArea.cursorSelection.font = f
@@ -931,10 +986,13 @@ Item {
         if (root.blockKind === "code" || root.blockKind === "table") return false
         var pos = richArea.cursorPosition
         var p = root.textBefore(pos)
-        var typed = p.substring(root.lastBreak(p) + 1)
+        var raw = p.substring(root.lastBreak(p) + 1)
+        // a line the editor restyled while empty holds a zero-width space (Qt drops empty
+        // headings): "- " typed there is still "- "
+        var typed = raw.replace(/[\u200b\ufeff]/g, "")
         var map = { "#": "h1", "##": "h2", "###": "h3", "-": "ul", "*": "ul", "1.": "ol", "[]": "task", ">": "quote", "```": "code" }
         if (!(typed in map)) return false
-        richArea.remove(pos - typed.length, pos)
+        richArea.remove(pos - raw.length, pos)
         root.setBlock(map[typed])
         return true
     }
@@ -1851,6 +1909,10 @@ Item {
                         placeholderText: "Title"
                         background: Item {}
                         onTextEdited: { root.draftDirty = true; previewTimer.restart() }
+                        // Tab or Enter in the title goes on into the text (not to the buttons)
+                        Keys.onTabPressed: function (e) { root.focusEditor(); e.accepted = true }
+                        Keys.onReturnPressed: function (e) { root.focusEditor(); e.accepted = true }
+                        Keys.onEnterPressed: function (e) { root.focusEditor(); e.accepted = true }
                     }
                     Chip {
                         visible: !root.isShared
@@ -2090,7 +2152,7 @@ Item {
                             placeholderText: "Start writing… (# heading, - list, [] task, > quote)"
                             placeholderTextColor: Theme.palette.textPlaceholder
                             background: Item {}
-                            onTextChanged: root.editorChanged()
+                            onTextChanged: { root.applyPendingFont(); root.editorChanged() }
                             onCursorPositionChanged: { root.updateBlockKind(); root.cursorMoved() }
                             // others' carets (shared drafts)
                             Repeater {
@@ -2119,16 +2181,40 @@ Item {
                             ToolTip.visible: richArea.hoveredLink !== ""
                             ToolTip.delay: 600
                             ToolTip.text: "Ctrl+click to open the link"
+                            // Basecamp binds Ctrl+K (its search), and Tab moves the focus: take them
+                            // while the editor has focus
+                            Keys.onShortcutOverride: function (e) {
+                                if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_K || e.key === Qt.Key_B || e.key === Qt.Key_I)) e.accepted = true
+                                if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true
+                            }
+                            Keys.onTabPressed: function (e) { root.editorTab(false); e.accepted = true }
+                            Keys.onBacktabPressed: function (e) { root.editorTab(true); e.accepted = true }
                             Keys.onPressed: function (e) {
                                 var ctrl = e.modifiers & Qt.ControlModifier
                                 if (ctrl && e.key === Qt.Key_B) { root.toggleFont("bold"); e.accepted = true }
                                 else if (ctrl && e.key === Qt.Key_I) { root.toggleFont("italic"); e.accepted = true }
                                 else if (ctrl && e.key === Qt.Key_K) { root.askLink(); e.accepted = true }
                                 else if (!ctrl && e.key === Qt.Key_Space && root.typedShortcut()) e.accepted = true
+                                // Tab nests a list item, Shift+Tab lifts it; in code it indents. It
+                                // never moves the focus out of the editor.
+                                else if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) {
+                                    root.editorTab(e.key === Qt.Key_Backtab || (e.modifiers & Qt.ShiftModifier))
+                                    e.accepted = true
+                                }
+                                // Enter on an empty list item or quote line ends the list or quote; on
+                                // an empty last line of a code block it leaves the code block
+                                // (the block kind the editor keeps up to date, not a fresh ask of the
+                                // core: a call here lets the next typed key in before this Enter)
+                                else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && !(e.modifiers & Qt.ShiftModifier)
+                                         && root.isBlank(root.blockText())
+                                         && (/^(ul|ol|task|done|quote)$/.test(root.blockKind) || (root.blockKind === "code" && root.kindAfter() !== "code"))) {
+                                    // a nested item goes up one level, a top-level one leaves the list
+                                    root.setBlock(/^(ul|ol|task|done)$/.test(root.blockKind) ? "outdent" : "p")
+                                    e.accepted = true
+                                }
                                 // Enter at the end of a heading starts normal text, as in Fileverse
                                 else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
                                     // decided before Qt splits the block: is this a heading, and are we at its end?
-                                    root.refreshBlockKind()
                                     var p = richArea.getText(0, richArea.length), c = richArea.cursorPosition
                                     var atEnd = c === p.length || root.pieceBreak.test(p.charAt(c))
                                     if (/^h[1-3]$/.test(root.blockKind) && atEnd) Qt.callLater(function () { root.setBlock("p") })
@@ -2158,6 +2244,15 @@ Item {
                             padding: 14
                             background: Rectangle { color: Theme.palette.backgroundInset; radius: Theme.spacing.radiusLarge; border.color: Theme.palette.borderSubtle }
                             onTextChanged: if (activeFocus) root.editorChanged()
+                            // Tab indents (nested lists are four spaces), never leaves the editor
+                            Keys.onShortcutOverride: function (e) { if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true }
+                            Keys.onTabPressed: function (e) { mdArea.insert(mdArea.cursorPosition, "    "); e.accepted = true }
+                            Keys.onBacktabPressed: function (e) {
+                                var t = mdArea.text, c = mdArea.cursorPosition, s0 = t.lastIndexOf("\n", c - 1) + 1
+                                var n = 0; while (n < 4 && t.charAt(s0 + n) === " ") n++
+                                if (n) mdArea.remove(s0, s0 + n)
+                                e.accepted = true
+                            }
                             onCursorPositionChanged: root.cursorMoved()
                             // others' carets (shared drafts)
                             Repeater {
@@ -2879,5 +2974,17 @@ Item {
             LogosIcon { Layout.preferredWidth: 14; Layout.preferredHeight: 14; source: LogosIcons.check; color: Theme.palette.success }
             LogosText { id: toastText; Layout.maximumWidth: root.width - 160; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13; text: root.toast }
         }
+    }
+
+    // Basecamp hosts this view in a QQuickWidget, which hands Tab to the view only when
+    // some item after the focused one can take focus; otherwise the focus leaves the view
+    // and the editor never sees the key. This invisible stop keeps Tab in the view, where
+    // the editors use it (lists nest, code indents); if it ever gets the focus it gives it
+    // back to the editor.
+    Item {
+        id: tabStop
+        width: 0; height: 0
+        activeFocusOnTab: true
+        onActiveFocusChanged: if (activeFocus && root.mode === "edit") (root.visualEdit ? richArea : mdArea).forceActiveFocus()
     }
 }
