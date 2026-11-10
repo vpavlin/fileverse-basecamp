@@ -1,5 +1,19 @@
 # What was tested, and how to repeat it
 
+## 0.14.2: Reflection 0.6 networks (2026-11-10)
+
+reflection_core 0.6.0 (jimmy-crib/vpavlin, same day) publishes on Logos, p2panda or both by its
+`networks` setting, with no per-note bridge. fileverse_core requires reflection_core ~0.6.0 (LIDL
+refreshed from its package; only doc comments changed); the chip shows the networks the running
+node uses (`state().networks`) and its tooltip each network's status (`networkStatus`).
+
+- Two Basecamps with reflection_core 0.6.0, p2panda_core 0.2.0 and the Reflection view 0.6.0
+  (sha256 checked against the public catalogue): Settings showed Logos / p2panda / Both; Both
+  in each (reflection_core's settings.json: `"networks": "both"`); a new document shared in t
+  ("shared · Logos + p2panda"), joined in u (text, name, "2 here"), typed both ways, both carets;
+  tooltip "Logos: connected, 29 peers · p2panda: connected, 1 peers in the last 5 min".
+  This is the "two Basecamps both on both" case jimmy-crib had not run.
+
 ## 0.14.1 (view): "Local" and one My files list (2026-11-10)
 
 vpavlin: "Drafts" was confusing. The section is "Local" now (documents kept on this device;

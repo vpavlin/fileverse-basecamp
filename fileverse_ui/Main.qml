@@ -346,11 +346,22 @@ Item {
     // "p2panda", "both"), or, before it had one, its sync mode.
     property var reflSettings: null             // reflection_core's settings, from its last state
     function networksOf(r) {
+        // what the running node uses (reflection_core 0.6: `networks`, briefly behind the
+        // setting while it switches), else the setting, else 0.5's sync mode
+        if (r && r.networks) return String(r.networks)
         var st = r && r.settings
         if (st && st.networks) return String(st.networks)
         return r && r.syncMode === "p2panda" ? "p2panda" : "logos"
     }
     readonly property bool networksSettable: !!(root.reflSettings && root.reflSettings.networks !== undefined)
+    // "Logos: connected, 4 peers · p2panda: 2 peers" from reflection_core 0.6's networkStatus
+    function networkStatusText(ns) {
+        if (!ns) return ""
+        var out = []
+        if (ns.logos && ns.logos.used) out.push("Logos: " + (ns.logos.connected ? "connected" : (ns.logos.status || "not connected")) + (ns.logos.peers !== undefined ? ", " + ns.logos.peers + " peers" : ""))
+        if (ns.p2panda && ns.p2panda.used) out.push("p2panda: " + (ns.p2panda.error ? ns.p2panda.error : (ns.p2panda.connected ? "connected" : "not connected")) + (ns.p2panda.peers !== undefined ? ", " + ns.p2panda.peers + " peers in the last 5 min" : ""))
+        return out.join(" · ")
+    }
     function networksLabel(n) { return n === "both" ? "Logos + p2panda" : n === "p2panda" ? "p2panda" : "Logos" }
     function fromReflection(r) {
         var c = r && r.current
@@ -363,7 +374,7 @@ Item {
             peers.push({ id: a, name: String(a).substring(0, 6), color: root.colorOf(a), online: true,
                          caret: cur ? md.at(cur.pos) : null, anchor: cur ? md.at(cur.anchor) : null })
         })
-        return { ok: true, shared: true, engine: "reflection", id: c.id, name: c.name || "", networks: root.networksOf(r), version: String(c.version), text: md.text,
+        return { ok: true, shared: true, engine: "reflection", id: c.id, name: c.name || "", networks: root.networksOf(r), networkStatus: r.networkStatus || null, version: String(c.version), text: md.text,
                  peers: peers, transport: r.transport, joined: true,
                  me: { id: r.me, name: "you", speed: "live", shareCursor: !!(r.settings && r.settings.shareCursor) } }
     }
@@ -1867,7 +1878,8 @@ Item {
                         HoverHandler { id: shareHover }
                         ToolTip.visible: shareHover.hovered
                         ToolTip.text: "A Reflection note: also opens in the Reflection apps. Published by reflection_core on " + root.networksLabel(root.collab.networks) + " (Settings in Fileverse or Reflection)."
-                                      + (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : "")
+                                      + (root.networkStatusText(root.collab.networkStatus) !== "" ? " " + root.networkStatusText(root.collab.networkStatus)
+                                         : (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : ""))
                     }
                     Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
                     LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared document id") }
