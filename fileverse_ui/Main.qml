@@ -187,10 +187,17 @@ Item {
     }
     function refreshNode() { root.core("node_status", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.node = r }) }
     function refreshStorage() { root.core("storage_status", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.storage = r }) }
+    // My files: the portal's files (when a backup key was imported) and the local documents
+    function showFiles() {
+        var ps = root.snap.portals || []
+        var known = ps.some(function (x) { return x.portal === root.portal })
+        root.showPortal(known ? root.portal : (ps.length ? ps[0].portal : ""))
+    }
     function showPortal(p) {
         var changed = root.portal !== p
         root.portal = p; root.portalError = ""; root.mode = "portal"
         if (changed) { root.portalFiles = []; root.portalBackup = ({}); root.portalListedAt = null }
+        if (p === "") return
         // The last listing is kept on this device: show it at once, refresh only when old.
         root.core("portal_files", [p], function (raw) {
             var r = root.j(raw)
@@ -551,7 +558,7 @@ Item {
         if (!root.draft) return
         var id = root.draft.id
         if (root.viaReflection) {
-            root.act("reflection_link", [id, ""], "Stopped sharing: the draft is private here; the note stays in Reflection", function () {
+            root.act("reflection_link", [id, ""], "Stopped sharing: the document is private here; the note stays in Reflection", function () {
                 var d = JSON.parse(JSON.stringify(root.draft)); delete d.reflection; root.draft = d
                 root.collabActivate(); root.collab = ({ shared: false }); root.collabVersion = ""
             })
@@ -658,7 +665,7 @@ Item {
         root.loadEditor(d.markdown)
         if (visual) richArea.cursorPosition = Math.min(pos, richArea.length)
         else mdArea.cursorPosition = Math.min(pos, mdArea.length)
-        root.say("Updated: the draft was changed outside the editor")
+        root.say("Updated: the document was changed outside the editor")
     }
     function keepMine() {
         // overwrite the outside version with what is in the editor
@@ -1230,10 +1237,26 @@ Item {
         return c
     }
     property string portalFilter: ""
+    property string filesKind: "all"            // My files: all, fileverse, local, shared
     readonly property var shownPortalFiles: {
-        var q = root.portalFilter.trim().toLowerCase()
-        if (q === "") return root.portalFiles
-        return root.portalFiles.filter(function (f) { return String(f.title || "").toLowerCase().indexOf(q) >= 0 || String(f.fileId) === q })
+        var q = root.portalFilter.trim().toLowerCase(), k = root.filesKind
+        var fv = (k === "all" || k === "fileverse") ? root.portalFiles.map(function (f) { return Object.assign({ src: "fileverse" }, f) }) : []
+        var loc = (k === "fileverse") ? [] : (root.snap.drafts || []).filter(function (d) { return k !== "shared" || d.shared })
+                                              .map(function (d) { return Object.assign({ src: "local" }, d) })
+        var all = fv.concat(loc).filter(function (f) {
+            return q === "" || String(f.title || "").toLowerCase().indexOf(q) >= 0 || (f.src === "fileverse" && String(f.fileId) === q)
+        })
+        all.sort(function (a, b) { return (b.updatedAt || 0) - (a.updatedAt || 0) })
+        return all
+    }
+    function fileChips(f) {
+        if (f.src === "local") {
+            var c = [["Local", Theme.palette.textSecondary]]
+            if (f.shared) c.push(["Shared", Theme.palette.success])
+            if (f.link) c.push(["Published", Theme.palette.info])
+            return c
+        }
+        return [["Fileverse", Theme.palette.primary]].concat(root.backupChips(root.portalBackup[String(f.fileId)]))
     }
 
     Rectangle { anchors.fill: parent; color: Theme.palette.background }
@@ -1276,8 +1299,8 @@ Item {
                 }
 
                 NavItem { label: "Recent"; icon: LogosIcons.list; count: (root.snap.recent || []).length; active: root.section === "recent"; onClicked: root.section = "recent" }
-                NavItem { label: "My files"; icon: LogosIcons.pages; count: (root.snap.portals || []).length; active: root.section === "files"; onClicked: root.section = "files" }
-                NavItem { label: "Drafts"; icon: LogosIcons.copy; count: (root.snap.drafts || []).length; active: root.section === "drafts"; onClicked: root.section = "drafts" }
+                NavItem { label: "My files"; icon: LogosIcons.pages; count: root.portalFiles.length + (root.snap.drafts || []).length; active: root.section === "files"; onClicked: { root.section = "files"; root.showFiles() } }
+                NavItem { label: "Local"; icon: LogosIcons.copy; count: (root.snap.drafts || []).length; active: root.section === "drafts"; onClicked: root.section = "drafts" }
 
                 Rectangle { Layout.fillWidth: true; Layout.topMargin: 6; Layout.bottomMargin: 6; height: 1; color: Theme.palette.borderHairline }
 
@@ -1297,7 +1320,7 @@ Item {
                                     compact: true
                                     kind: modelData.kind || "ddoc"; layout: modelData.layout || ""
                                     title: modelData.title || "Untitled"
-                                    sub: (root.draftIdFor(modelData.url) ? "Your draft" : modelData.layout === "logos" ? "Published here" : (modelData.url.indexOf("fvown://") === 0 ? "My files" : "Shared link"))
+                                    sub: (root.draftIdFor(modelData.url) ? "Local" : modelData.layout === "logos" ? "Published here" : (modelData.url.indexOf("fvown://") === 0 ? "My files" : "Shared link"))
                                          + (modelData.openedAt ? " · " + root.ago(modelData.openedAt) : "")
                                          + (modelData.kept && modelData.keptOn === root.node.peerId ? " · IPFS" : "") + (modelData.inStorage ? " · Storage" : "")
                                     active: root.mode === "doc" && root.docUrl === modelData.url
@@ -1350,7 +1373,7 @@ Item {
                         ColumnLayout {
                             width: 248; spacing: 2
                             LogosButton { Layout.fillWidth: true; compact: true; variant: LogosButton.Variant.Primary; text: "New document"; onClicked: root.newDraft("Untitled", "# Untitled\n\n", "") }
-                            LogosButton { Layout.fillWidth: true; Layout.bottomMargin: 6; compact: true; text: root.joinOpen ? "Cancel" : "Join a shared draft…"; onClicked: { root.joinOpen = !root.joinOpen; if (root.joinOpen && !(root.mode === "edit" && root.viaReflection)) root.probeReflection() } }
+                            LogosButton { Layout.fillWidth: true; Layout.bottomMargin: 6; compact: true; text: root.joinOpen ? "Cancel" : "Join a shared document…"; onClicked: { root.joinOpen = !root.joinOpen; if (root.joinOpen && !(root.mode === "edit" && root.viaReflection)) root.probeReflection() } }
                             ColumnLayout {
                                 visible: root.joinOpen
                                 Layout.fillWidth: true; Layout.bottomMargin: 6; spacing: 4
@@ -1374,11 +1397,11 @@ Item {
                                     compact: true
                                     kind: "ddoc"; layout: "logos"
                                     title: modelData.title || "Untitled"
-                                    sub: (modelData.link ? "Published " + root.ago(modelData.publishedAt) : "Draft · " + root.ago(modelData.updatedAt))
+                                    sub: (modelData.shared ? "Shared · " : "") + (modelData.link ? "Published " + root.ago(modelData.publishedAt) : "Edited " + root.ago(modelData.updatedAt))
                                     active: root.mode === "edit" && root.draft && root.draft.id === modelData.id
                                     removable: true
                                     onClicked: root.openDraft(modelData.id)
-                                    onRemoved: root.act("draft_delete", [modelData.id], "Draft deleted", function () { if (root.draft && root.draft.id === modelData.id) { root.draft = null; root.mode = "home" } })
+                                    onRemoved: root.act("draft_delete", [modelData.id], "Deleted from this device", function () { if (root.draft && root.draft.id === modelData.id) { root.draft = null; root.mode = "home" } })
                                 }
                             }
                         }
@@ -1468,11 +1491,11 @@ Item {
                     anchors.margins: 16
                     spacing: Theme.spacing.small
                     LogosText { textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold; text: "Settings" }
-                    Caption { text: "SHARED DRAFTS: NETWORKS"; Layout.topMargin: 4 }
+                    Caption { text: "SHARED DOCUMENTS: NETWORKS"; Layout.topMargin: 4 }
                     Hint {
                         text: root.networksSettable
-                              ? "Where shared drafts are published (Reflection's engine, reflection_core, publishes them; the same setting as in Reflection). Logos: Logos Delivery. p2panda: the p2panda network of Reflection's other apps. Both: everyone on either can join, and edits are passed between the two."
-                              : "Shared drafts are published by Reflection's engine (reflection_core), now on " + root.networksLabel(root.reflSyncMode === "p2panda" ? "p2panda" : "logos") + ". Choosing Logos, p2panda or both here needs a newer reflection_core."
+                              ? "Where shared documents are published (Reflection's engine, reflection_core, publishes them; the same setting as in Reflection). Logos: Logos Delivery. p2panda: the p2panda network of Reflection's other apps. Both: everyone on either can join, and edits are passed between the two."
+                              : "Shared documents are published by Reflection's engine (reflection_core), now on " + root.networksLabel(root.reflSyncMode === "p2panda" ? "p2panda" : "logos") + ". Choosing Logos, p2panda or both here needs a newer reflection_core."
                     }
                     RowLayout {
                         visible: root.networksSettable
@@ -1483,7 +1506,7 @@ Item {
                                 variant: root.reflSettings && root.reflSettings.networks === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
                                 onClicked: root.refl("set_settings", [JSON.stringify({ networks: modelData.k })], function (raw) {
                                     var r = root.j(raw)
-                                    if (r && r.ok) { if (r.settings) root.reflSettings = r.settings; root.say("Shared drafts: " + root.networksLabel(modelData.k)); root.refreshCollab() }
+                                    if (r && r.ok) { if (r.settings) root.reflSettings = r.settings; root.say("Shared documents: " + root.networksLabel(modelData.k)); root.refreshCollab() }
                                     else root.fail((r && r.error) || "reflection_core did not take the setting")
                                 })
                             }
@@ -1623,26 +1646,37 @@ Item {
                         RowLayout {
                             spacing: 6
                             Chip {
+                                visible: root.portal !== ""
                                 text: root.shortId(root.portal)
                                 tint: Theme.palette.textSecondary
                                 MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.copy(root.portal, "Portal address") }
                             }
                             Hint {
                                 Layout.fillWidth: false
-                                text: root.portalError !== "" && root.portalFiles.length === 0 ? "Could not read this portal."
-                                      : (root.portalFiles.length + " files · " + Object.keys(root.portalBackup).length + " backed up"
+                                text: root.portal === "" ? ((root.snap.drafts || []).length + " local documents")
+                                      : root.portalError !== "" && root.portalFiles.length === 0 ? "Could not read this portal."
+                                      : (root.portalFiles.length + " from Fileverse · " + (root.snap.drafts || []).length + " local · "
+                                         + Object.keys(root.portalBackup).length + " backed up"
                                          + (root.portalListedAt ? " · listed " + root.ago(root.portalListedAt) : ""))
                             }
                         }
                     }
                     Item { Layout.fillWidth: true }
                     LogosButton {
+                        visible: root.portal === ""
+                        compact: true
+                        text: "Import your Fileverse files…"
+                        onClicked: root.mode = "import"
+                    }
+                    LogosButton {
+                        visible: root.portal !== ""
                         compact: true
                         enabled: !root.busyWith("list")
                         text: root.busyWith("list") ? ("Refreshing… " + (root.progressOf("list") || root.elapsed("list") + "s")) : "Refresh"
                         onClicked: root.refreshPortal()
                     }
                     LogosButton {
+                        visible: root.portal !== ""
                         compact: true
                         variant: LogosButton.Variant.Primary
                         enabled: !root.busyWith("backup") && root.portalFiles.length > 0
@@ -1650,11 +1684,22 @@ Item {
                         onClicked: root.backupPortal()
                     }
                 }
-                Field {
+                RowLayout {
                     Layout.fillWidth: true
-                    visible: root.portalFiles.length > 6
-                    placeholderText: "Filter by title or number"
-                    onTextChanged: root.portalFilter = text
+                    spacing: 6
+                    Repeater {
+                        model: [{ k: "all", t: "All" }, { k: "fileverse", t: "Fileverse" }, { k: "local", t: "Local" }, { k: "shared", t: "Shared" }]
+                        LogosButton {
+                            compact: true; text: modelData.t
+                            variant: root.filesKind === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                            onClicked: root.filesKind = modelData.k
+                        }
+                    }
+                    Field {
+                        Layout.fillWidth: true
+                        placeholderText: "Filter by title or number"
+                        onTextChanged: root.portalFilter = text
+                    }
                 }
                 Card {
                     Layout.fillWidth: true
@@ -1668,16 +1713,21 @@ Item {
                         ScrollBar.vertical: ScrollBar {}
                         delegate: FileRow {
                             width: ListView.view.width
-                            readonly property var bk: root.portalBackup[String(modelData.fileId)]
-                            kind: modelData.kind || "ddoc"
+                            readonly property bool local: modelData.src === "local"
+                            kind: local ? "ddoc" : (modelData.kind || "ddoc")
+                            layout: local ? "logos" : ""
                             dim: !!modelData.error
                             title: modelData.title || (modelData.error ? "Cannot open" : "Untitled")
-                            sub: "#" + modelData.fileId + (modelData.kind === "dsheet" ? " · Sheet" : " · Doc")
+                            sub: local ? ("Edited " + root.ago(modelData.updatedAt) + (modelData.link ? " · published " + root.ago(modelData.publishedAt) : ""))
+                                 : ("#" + modelData.fileId + (modelData.kind === "dsheet" ? " · Sheet" : " · Doc")
                                  + (modelData.updatedAt ? " · " + root.ago(modelData.updatedAt) : "")
                                  + (modelData.titleFromText ? " · title from text" : "")
-                                 + (modelData.error ? " · " + modelData.error : "")
-                            chips: root.backupChips(bk)
-                            onClicked: if (!modelData.error) root.open(modelData.url)
+                                 + (modelData.error ? " · " + modelData.error : ""))
+                            chips: root.fileChips(modelData)
+                            onClicked: {
+                                if (local) { root.section = "drafts"; root.openDraft(modelData.id) }
+                                else if (!modelData.error) root.open(modelData.url)
+                            }
                         }
                     }
                     Hint {
@@ -1685,10 +1735,11 @@ Item {
                         width: parent.width - 60
                         horizontalAlignment: Text.AlignHCenter
                         visible: root.shownPortalFiles.length === 0
-                        text: root.busyWith("list") ? "Reading the portal on Gnosis…" : (root.portalFilter !== "" ? "No file matches." : "No files listed yet. Press Refresh.")
+                        text: root.busyWith("list") ? "Reading the portal on Gnosis…" : (root.portalFilter !== "" || root.filesKind !== "all" ? "No file matches."
+                              : root.portal === "" ? "Nothing here yet: write a document (Local), or import your Fileverse files." : "No files listed yet. Press Refresh.")
                     }
                 }
-                Hint { text: "Back up everything keeps every file's encrypted blocks on this device, pins them on your IPFS node and copies them into Logos Storage, so they stay readable without Fileverse." }
+                Hint { visible: root.portal !== ""; text: "Back up everything keeps every Fileverse file's encrypted blocks on this device, pins them on your IPFS node and copies them into Logos Storage, so they stay readable without Fileverse." }
             }
 
             // document header
@@ -1819,7 +1870,7 @@ Item {
                                       + (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : "")
                     }
                     Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
-                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared draft id") }
+                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared document id") }
                     LogosButton {
                         // reflection_core sends this device's cursor only when the user says so
                         // (one setting for every note, also Reflection's "Share my cursor")
@@ -1838,7 +1889,7 @@ Item {
                         onClicked: root.stopSharing()
                         HoverHandler { id: leaveHover }
                         ToolTip.visible: leaveHover.hovered
-                        ToolTip.text: "Stop syncing this draft on this device. Its text stays here, private; the others keep their copies and can go on editing together (the note stays in Reflection)."
+                        ToolTip.text: "Stop syncing this document on this device. Its text stays here, private; the others keep their copies and can go on editing together (the note stays in Reflection)."
                     }
                     LogosButton {
                         visible: !root.isShared && !!root.draft && !root.viaReflection
@@ -1846,7 +1897,7 @@ Item {
                         onClicked: root.shareClicked()
                         HoverHandler { id: shareBtnHover }
                         ToolTip.visible: shareBtnHover.hovered
-                        ToolTip.text: "Edit this draft together with others, live. You get an id to send them; anyone with it can read and write. It also opens in the Reflection apps."
+                        ToolTip.text: "Edit this document together with others, live. You get an id to send them; anyone with it can read and write. It also opens in the Reflection apps."
                     }
                     LogosButton { visible: root.coreSlides.length > 0; compact: true; text: "Present"; onClicked: root.present() }
                     LogosButton {
@@ -1872,7 +1923,7 @@ Item {
                         spacing: Theme.spacing.small
                         LogosText {
                             Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13
-                            text: "This draft was changed outside the editor (by an agent or another window) while you were typing. Saving is paused."
+                            text: "This document was changed outside the editor (by an agent or another window) while you were typing. Saving is paused."
                         }
                         LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Load their version"; onClicked: root.reloadDraft(root.outsideDraft) }
                         LogosButton { compact: true; text: "Keep mine"; onClicked: root.keepMine() }
@@ -1923,7 +1974,7 @@ Item {
                                 ["❝ Quote", "quote", "Quote (>)", function () { root.toggleBlock("quote") }],
                                 ["{ } Code", "code", "Code block", function () { root.toggleBlock("code") }],
                                 ["|", "", "", null],
-                                ["🖼 Image", "", "Insert a picture (kept with the draft; encrypted when published)", function () { imageDialog.open() }],
+                                ["🖼 Image", "", "Insert a picture (kept with the document; encrypted when published)", function () { imageDialog.open() }],
                                 ["▥ Columns", "", "Two columns side by side, e.g. an image beside text", function () { root.insertColumns() }],
                                 ["|", "", "", null],
                                 ["↶", "", "Undo (Ctrl+Z)", function () { richArea.undo() }],

@@ -1,5 +1,17 @@
 # What was tested, and how to repeat it
 
+## 0.14.1 (view): "Local" and one My files list (2026-11-10)
+
+vpavlin: "Drafts" was confusing. The section is "Local" now (documents kept on this device;
+"draft" is gone from the view's wording), and My files lists the portal's Fileverse files and
+the local documents together, newest first, each with a chip (Fileverse, Local, plus Shared
+or Published, and the backup chips), with All / Fileverse / Local / Shared and the title
+filter. Without an imported backup key it shows the local documents and "Import your
+Fileverse files…". A local row opens in the editor, a Fileverse row as before.
+
+- Harness: portal (merged list with both kinds), localfiles (no portal), edit (Local sidebar).
+- Basecamp t: My files with 19 local documents, Shared chips on the Reflection-linked ones.
+
 ## 0.14.0: shared drafts are Reflection notes only (2026-11-10)
 
 vpavlin: one format, so anyone with Fileverse can join anything shared from Fileverse. HashSeq

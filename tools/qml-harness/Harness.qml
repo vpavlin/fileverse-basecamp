@@ -56,7 +56,7 @@ Window {
                       { url: "fvbc://ipfs/b#key=k", layout: "logos", title: "Logos plan", kind: "ddoc" },
                       { url: "fvown://0x2222222222222222222222222222222222222222/1", portal: "0x2222222222222222222222222222222222222222", fileId: 1, title: "Budget <b>2026</b>", kind: "dsheet" } ],
             portals: [ { portal: "0x2222222222222222222222222222222222222222", kind: "ec", source: "docs.fileverse.io", hasPq: false }, { portal: "0x3333333333333333333333333333333333333333", kind: "legacy", source: "docs.fileverse.io" } ],
-            drafts: [ { id: "abc123", title: "Logos plan", updatedAt: 1792700000000, link: "fvbc://x", publishedAt: 1792700000000 }, { id: "d2", title: "Notes", updatedAt: 1792690000000 } ] }
+            drafts: [ { id: "abc123", title: "Logos plan", updatedAt: 1792700000000, link: "fvbc://x", publishedAt: 1792700000000 }, { id: "d2", title: "Notes", updatedAt: 1792690000000, shared: true, reflection: "ab" } ] }
         if (method === "node_status") return { ok: true, reachable: true, source: "ipfs_module", peers: 43, pins: 12, repoSize: 52428800, api: "http://127.0.0.1:40263", gateway: "http://127.0.0.1:34231", peerId: "12D3KooWHeYVZC3hgJsXByFqD2tnVPdbhEfHt8rzJbXh5" }
         if (method === "storage_status") return { ok: true, available: true, peerId: "16Uiu2…" }
         if (method === "draft_get" || method === "draft_save" || method === "draft_save_rich" || method === "draft_create") return { ok: true, draft: win.draft() }
@@ -124,6 +124,7 @@ Window {
             it.showDetails = (win.mode === "doc")
             it.showSettings = (win.mode === "settings")
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
+            else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
             else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedmd") {
                 it.section = "drafts"; it.openDraft("abc123")
