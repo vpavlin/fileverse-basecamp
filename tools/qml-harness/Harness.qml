@@ -29,7 +29,8 @@ Window {
 
     function draft() {
         var md = "# Logos plan\n\nWe go **self-sovereign**: [Logos](https://logos.co).\n\n## Steps\n\n- IPFS node module\n- Logos Storage\n  - copy blocks\n\n1. edit\n2. publish\n\n> no servers\n\n```\nfvbc://ipfs/bafk…\n```\n\n| what | where |\n|---|---|\n| blocks | IPFS + Storage |\n"
-        return { id: "abc123", title: "Logos plan", markdown: md, sourceUrl: "", preview: win.previewOf(), published: mode === "edit" ? { link: "fvbc://ipfs/bafkreiexample#key=k", at: 1792700000000 } : null }
+        return { id: "abc123", title: "Logos plan", markdown: md, sourceUrl: "", preview: win.previewOf(), published: mode === "edit" ? { link: "fvbc://ipfs/bafkreiexample#key=k", at: 1792700000000 } : null,
+                 reflection: (mode === "shared" || mode === "sharedmd") ? { id: "ab".repeat(32) } : undefined }
     }
     function previewOf() {
         var b = [
@@ -69,12 +70,19 @@ Window {
         }).join("") }
         if (method === "rich_kind") return { ok: true, kind: "h1" }
         if (method === "image") return { ok: true, jobId: "jimg" }
-        if (method === "collab_state" && (mode === "shared" || mode === "sharedmd"))
-            return { ok: true, shared: true, id: "ab".repeat(32), version: "3", text: win.draft().markdown,
-                     peers: [ { id: "b0b", name: "Bob", color: "#19A979", online: true, caret: 12, anchor: 12 },
-                              { id: "a11", name: "Carol", color: "#945ECF", online: true, caret: 60, anchor: 60 } ],
-                     transport: { connected: true, status: "Connected" }, me: { id: "me", name: "vpavlin", color: "#E8743B" } }
-        if (method === "collab_set_text" || method === "collab_set_rich") return { ok: true, version: "4", text: win.draft().markdown, merged: false }
+        // reflection_core, as fileverse_core passes it through (reflection_call)
+        if (method === "reflection_call") {
+            var rm = args[0], ra = JSON.parse(args[1] || "[]")
+            var cur = { id: "ab".repeat(32), name: "Logos plan", text: win.draft().markdown, version: 3, online: ["b0b", "a11"],
+                        cursors: [ { author: "b0b", pos: 12, anchor: 12 }, { author: "a11", pos: 60, anchor: 60 } ] }
+            var st = { ok: true, me: "me", transport: { status: "Logos: Connected" }, syncMode: "logos",
+                       settings: { shareCursor: true, networks: mode === "sharedold" ? undefined : "both" },
+                       docs: [ { id: "ab".repeat(32), name: "Logos plan", online: 2 } ] }
+            if (rm === "state") { if (ra[0]) st.current = cur; return st }
+            if (rm === "set_text") { cur.version = 4; cur.editVersion = 4; return { ok: true, current: cur } }
+            if (rm === "set_settings") return { ok: true, settings: st.settings }
+            return { ok: true }
+        }
         if (method === "diagram") return { ok: true, jobId: args[0].indexOf("BROKEN") >= 0 ? "jdiagbad" : "jdiag" }
         if (method === "job") {
             var id = args[0]

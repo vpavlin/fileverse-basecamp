@@ -1,5 +1,24 @@
 # What was tested, and how to repeat it
 
+## 0.14.0: shared drafts are Reflection notes only (2026-11-10)
+
+vpavlin: one format, so anyone with Fileverse can join anything shared from Fileverse. HashSeq
+removed (engine, loam_core link, Name and Sync speed settings); reflection_core is a required
+dependency; "Share…" makes the draft a Reflection note at once; one Join field; the header chip
+shows the networks ("shared · Logos · 2 here"); Settings has "Shared drafts: networks"
+(Logos / p2panda / Both) once reflection_core has a `networks` setting, and says which network
+it runs on until then. Drafts shared with HashSeq are private drafts now. The fvdraft skill
+treats Reflection-linked drafts as shared. flake.lock: 17 MB to 0.5 MB without loam_core's input.
+
+- cargo: 63 engine tests pass without the collab module.
+- Harness: shared (chip, carets, no choice panel), settings (the Networks choice with a
+  reflection_core that reports `networks`).
+- Two Basecamps: a new draft in t, Share (one click: "shared · Logos · only you here"); in u,
+  Join with its id: the text and name arrived, "2 here"; typing both ways and both carets;
+  Settings in t: "now on Logos", no choice (reflection_core 0.5.0 has no `networks`).
+- Also checked the day before: Fileverse loads when reflection_core is missing (0.13.0).
+  Not checked: that Basecamp's package manager installs reflection_core with Fileverse.
+
 ## 0.13.0: drafts as Reflection notes, through reflection_core (2026-11-09)
 
 "Share…" offers, when reflection_core is installed, "As a Reflection note": the draft's text

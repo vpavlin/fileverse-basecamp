@@ -229,7 +229,7 @@ def cmd_list(_a):
         except (OSError, ValueError):
             continue
         out.append({"id": x.get("id"), "title": x.get("title"), "updatedAt": x.get("updatedAt"),
-                    "published": bool(x.get("published")), "shared": bool(x.get("collab")),
+                    "published": bool(x.get("published")), "shared": bool(x.get("reflection")),
                     "sourceUrl": x.get("sourceUrl") or None})
     out.sort(key=lambda x: x.get("updatedAt") or 0, reverse=True)
     print(json.dumps(out, indent=2, ensure_ascii=False))
@@ -264,7 +264,7 @@ def cmd_new(a):
 def cmd_save(a):
     d = drafts_dir()
     draft = load(d, a.id)
-    if draft.get("collab"):
+    if draft.get("reflection"):
         die(f"draft {a.id} is shared with others (edited together in Basecamp): writing its file would not "
             "reach them and would be overwritten; ask the user to make the change, or to stop sharing it")
     if a.base is not None and str(draft.get("updatedAt")) != str(a.base):

@@ -38,6 +38,11 @@ What it does (0.7.0):
   Fileverse v3 format (Yjs content, GCM, secretbox link lock), pins it on your IPFS node and
   copies it into Logos Storage, and gives a `fvbc://ipfs/<manifest>#key=…` link that any
   Basecamp with this app opens. There is no chain record; ddocs.new cannot open these links.
+- **Edit together**: "Share…" turns a draft into a Reflection note (through Reflection's
+  engine, `reflection_core`, a required dependency) and copies its id; others join it with
+  "Join a shared draft…" in Fileverse, or open it in the Reflection apps. Live text,
+  presence and cursors, published on Logos Delivery, p2panda or both (Settings). See
+  [docs/COLLAB.md](docs/COLLAB.md).
 - **Keep on my IPFS** pins a document's blocks on your node (`ipfs_module`, or a Kubo you set).
 - **Copy to Logos Storage** uploads each block to `storage_module`; when IPFS has nothing,
   blocks are read back from Storage and hash-checked like any other source.
@@ -47,7 +52,7 @@ What it does (0.7.0):
 Tested: see [docs/TESTING.md](docs/TESTING.md).
 
 Not yet: comments, version history, private (gate) shares, workspace files on Fileverse's
-private IPFS lane, images, writing back to Fileverse's chain records, live collaboration. See
+private IPFS lane, images, writing back to Fileverse's chain records, pictures in shared drafts. See
 [docs/PLAN.md](docs/PLAN.md).
 
 ## Trust model

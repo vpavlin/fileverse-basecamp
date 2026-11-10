@@ -11,7 +11,6 @@ pub mod abi;
 pub mod b64;
 pub mod backup;
 pub mod chain;
-pub mod collab;
 pub mod crypto;
 pub mod diagram;
 pub mod doc;

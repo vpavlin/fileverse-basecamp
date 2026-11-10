@@ -1,5 +1,19 @@
 # Collaborative editing over Logos Delivery: analysis and plan
 
+**Since 0.14.0 (2026-11-10): shared drafts are Reflection notes only.** vpavlin's decision:
+one format, so that anyone with Fileverse can join anything shared from Fileverse, and the
+same note opens in the Reflection apps. Fileverse's own HashSeq engine (0.12.0 to 0.13.0)
+is removed ("a good experiment, but not perfect": identical concurrent typing collapses,
+history only grows); drafts shared that way are private drafts now. reflection_core is a
+required dependency; Fileverse never publishes anything itself. Which networks a note goes
+out on (Logos Delivery, p2panda, or both) is reflection_core's `networks` setting, which
+Fileverse's Settings show and set; reflection_core publishes to one or both itself, with no
+per-note bridge approvals (requested from reflection-basecamp the same day). Until a
+reflection_core with `networks` is out, Fileverse shows the network reflection_core runs on
+(Logos by default) and hides the choice.
+
+The rest of this document is the analysis behind 0.12.0 and 0.13.0, kept as written.
+
 Status: implemented in 0.12.0 with HashSeq (vpavlin chose HashSeq first, Loro as the fallback; private drafts, shared only on request; cursors from the start; text only). Proposal written 2026-11-09. Sources read: vpavlin/reflection `feat/logos-delivery`
 @ e25cf05 (docs/logos/spec.md, ADR 0001-0008, logos-p2panda), vpavlin/reflection-basecamp
 @ 1f86daa (reflection_core), fileverse/collaboration-server (Fileverse's RTC), and

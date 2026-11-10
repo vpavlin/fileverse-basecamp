@@ -86,6 +86,9 @@ Item {
     property int sheetIndex: 0
     property bool showDetails: false
     property bool showSettings: false
+    // the networks setting is reflection_core's: read it when Settings opens (not while a
+    // note is open: asking for no note would make reflection_core treat it as closed)
+    onShowSettingsChanged: if (root.showSettings && !(root.mode === "edit" && root.viaReflection)) root.probeReflection()
     property var node: ({ reachable: false })
     property var storage: ({ available: false })
     property string portal: ""
@@ -265,11 +268,10 @@ Item {
             else root.fail(r ? r.error : "Saving failed.")
         })
     }
-    // ── shared drafts (collab_*): edited with others over Logos Delivery ──
-    // A draft is private until shared. A shared one saves through the core, which merges
-    // others' changes (HashSeq); the open one is polled every second for their edits,
-    // who has it open and where their cursors are.
-    property var collab: ({ shared: false })   // the last collab_state of the open draft
+    // ── shared drafts: a draft is private until shared; a shared draft is a Reflection
+    // note, edited through reflection_core (which publishes it on the networks set in
+    // Settings). The open one is polled for others' edits, presence and cursors.
+    property var collab: ({ shared: false })   // the open note's state (see fromReflection)
     property string collabVersion: ""           // the version the editor's text is based on
     property string collabSentText: ""          // the Markdown the editor showed at that version
     property int editGen: 0                     // bumps on every edit: a reply for older text is not applied
@@ -282,7 +284,8 @@ Item {
     readonly property bool viaReflection: root.noteId !== ""
     property bool reflectionAvailable: false
     property var reflNotes: []
-    property bool reflActive: false          // we told reflection_core a note of ours is open
+    property bool reflActive: false
+    property string reflSyncMode: ""          // we told reflection_core a note of ours is open
     // through our core (which Basecamp loads with reflection_core when it is installed)
     function refl(method, args, cb) { root.core("reflection_call", [method, JSON.stringify(args || [])], cb) }
     // Is reflection_core installed, and which notes does it have? (Asks for no open note:
@@ -292,6 +295,7 @@ Item {
             var r = root.j(raw)
             root.reflectionAvailable = !!(r && r.ok)
             root.reflNotes = r && r.docs ? r.docs : []
+            if (r && r.settings) { root.reflSettings = r.settings; root.reflSyncMode = r.syncMode || "" }
             root.reflActive = false
             if (cb) cb(r)
         })
@@ -331,6 +335,16 @@ Item {
     function toNote(md) { return root.lineSwap(md, "&nbsp;", " ") }
     function fromNote(text) { return root.lineSwap(text, /^[ \t\u00a0]+$/, "&nbsp;") }
     // reflection_core's state of the open note, in collab_state's shape
+    // Which networks reflection_core publishes on: its `networks` setting ("logos",
+    // "p2panda", "both"), or, before it had one, its sync mode.
+    property var reflSettings: null             // reflection_core's settings, from its last state
+    function networksOf(r) {
+        var st = r && r.settings
+        if (st && st.networks) return String(st.networks)
+        return r && r.syncMode === "p2panda" ? "p2panda" : "logos"
+    }
+    readonly property bool networksSettable: !!(root.reflSettings && root.reflSettings.networks !== undefined)
+    function networksLabel(n) { return n === "both" ? "Logos + p2panda" : n === "p2panda" ? "p2panda" : "Logos" }
     function fromReflection(r) {
         var c = r && r.current
         if (!c) return { shared: false, engine: "reflection", missing: true }
@@ -342,7 +356,7 @@ Item {
             peers.push({ id: a, name: String(a).substring(0, 6), color: root.colorOf(a), online: true,
                          caret: cur ? md.at(cur.pos) : null, anchor: cur ? md.at(cur.anchor) : null })
         })
-        return { ok: true, shared: true, engine: "reflection", id: c.id, name: c.name || "", version: String(c.version), text: md.text,
+        return { ok: true, shared: true, engine: "reflection", id: c.id, name: c.name || "", networks: root.networksOf(r), version: String(c.version), text: md.text,
                  peers: peers, transport: r.transport, joined: true,
                  me: { id: r.me, name: "you", speed: "live", shareCursor: !!(r.settings && r.settings.shareCursor) } }
     }
@@ -351,7 +365,8 @@ Item {
         var id = editing ? root.draft.id : ""
         // a Reflection note was open here and no longer is: reflection_core may go quiet
         if (root.reflActive && !(editing && root.viaReflection)) { root.refl("state", [""], function () {}); root.reflActive = false }
-        root.core("collab_set_active", [editing && !root.viaReflection ? id : ""], function () { root.refreshCollab() })
+        if (!(editing && root.viaReflection)) root.collab = ({ shared: false })
+        root.refreshCollab()
     }
     function collabStateOf(id, cb) {
         if (root.viaReflection) {
@@ -363,9 +378,10 @@ Item {
                 // the open note's poll also lists the notes (the join panel needs no probe then)
                 root.reflectionAvailable = true
                 if (r.docs) root.reflNotes = r.docs
+                if (r.settings) { root.reflSettings = r.settings; root.reflSyncMode = r.syncMode || "" }
                 cb(root.fromReflection(r))
             })
-        } else root.core("collab_state", [id], function (raw) { cb(root.j(raw)) })
+        } else cb({ ok: true, shared: false })
     }
     // the draft file follows the shared text (slides, preview, publishing, agents read it)
     function mirrorDraft(md) {
@@ -396,7 +412,7 @@ Item {
             root.applyRemote(r)
         })
     }
-    readonly property bool collabLive: !(root.collab.me && root.collab.me.speed === "economy")
+    readonly property bool collabLive: true
     Timer { interval: root.collabLive ? 300 : 1000; running: root.mode === "edit" && root.isShared; repeat: true; onTriggered: root.refreshCollab() }
     // Others' edits: show them unless the user is mid-edit (then the next save merges).
     function applyRemote(r) {
@@ -464,10 +480,6 @@ Item {
     // Send the editor's text to the draft's engine: `{ ok, version, text, merged, editVersion, submitted }`.
     function sharedSetText(visual, cb) {
         var id = root.draft.id
-        if (!root.viaReflection) {
-            root.core(visual ? "collab_set_rich" : "collab_set_text", [id, root.collabVersion, visual ? richArea.text : mdArea.text], function (raw) { cb(root.j(raw)) })
-            return
-        }
         var md = visual ? ((root.coreSync("rich_md", [id, richArea.text]) || {}).markdown) : mdArea.text
         if (md === undefined || md === null) { cb({ ok: false, error: "Could not convert the editor's text." }); return }
         var note = root.toNote(md).text
@@ -484,8 +496,8 @@ Item {
     function shareClicked() {
         if (!root.draft) return
         root.probeReflection(function () {
-            if (root.reflectionAvailable) root.shareOpen = !root.shareOpen
-            else root.shareDraft()
+            if (root.reflectionAvailable) root.shareAsNote()
+            else root.fail("Sharing goes through Reflection's engine (reflection_core), which is not answering. Is it installed?")
         })
     }
     function shareAsNote() {
@@ -504,7 +516,7 @@ Item {
                         var d = JSON.parse(JSON.stringify(root.draft)); d.reflection = { id: note }; root.draft = d
                         root.collab = ({ shared: false }); root.collabVersion = ""; root.collabSentText = md
                         root.copy(note, "Reflection note id")
-                        root.say("Shared as a Reflection note. Its id is copied: open it in Reflection or join it in Fileverse.")
+                        root.say("Shared. Its id is copied: send it to whoever should edit with you (Fileverse, or the Reflection apps). Anyone with it can read and write.")
                         root.collabActivate()
                     })
                 })
@@ -535,33 +547,22 @@ Item {
             root.openNote({ id: r.id, name: r.current && r.current.name ? r.current.name : "Reflection note" })
         })
     }
-    function shareDraft() {
-        if (!root.draft) return
-        root.shareOpen = false
-        root.saveDraft(function () {
-            root.act("collab_share", [root.draft.id], "", function (r) {
-                root.copy(r.id, "Shared draft id")
-                root.say("Shared. Its id is copied: send it to whoever should edit with you. Anyone with it can read and write.")
-                root.collabVersion = ""
-                root.collabActivate()
-            })
-        })
-    }
     function stopSharing() {
         if (!root.draft) return
         var id = root.draft.id
         if (root.viaReflection) {
-            root.act("reflection_link", [id, ""], "Unlinked: the draft is private; the note stays in Reflection", function () {
+            root.act("reflection_link", [id, ""], "Stopped sharing: the draft is private here; the note stays in Reflection", function () {
                 var d = JSON.parse(JSON.stringify(root.draft)); delete d.reflection; root.draft = d
                 root.collabActivate(); root.collab = ({ shared: false }); root.collabVersion = ""
             })
-            return
         }
-        root.act("collab_leave", [id], root.collab.joined ? "Left the shared draft: your copy is private now" : "This draft is private again on this device", function () { root.collab = ({ shared: false }); root.collabVersion = "" })
     }
     property bool joinOpen: false
     function joinShared(sharedId) {
-        root.act("collab_join", [sharedId.trim(), ""], "", function (r) { root.joinOpen = false; root.section = "drafts"; root.editDraft(r.draft) })
+        root.probeReflection(function () {
+            if (root.reflectionAvailable) root.joinNote(sharedId)
+            else root.fail("Joining goes through Reflection's engine (reflection_core), which is not answering. Is it installed?")
+        })
     }
     // Our cursor, as offsets into the shared Markdown (in the visual editor, found by the
     // text before the caret).
@@ -629,11 +630,9 @@ Item {
             var other = richArea.selectionStart === richArea.cursorPosition ? richArea.selectionEnd : richArea.selectionStart
             anchor = other === richArea.cursorPosition ? caret : root.richToMd(md, other)
         }
-        if (root.viaReflection) {
-            var nm = root.toNote(md)
-            root.refl("set_cursor", [root.noteId, root.collabVersion, String(nm.at(caret)), String(nm.at(anchor))], function () {})
-        }
-        else root.core("collab_set_cursor", [root.draft.id, root.collabVersion, String(caret), String(anchor)], function () {})
+        if (!root.viaReflection) return
+        var nm = root.toNote(md)
+        root.refl("set_cursor", [root.noteId, root.collabVersion, String(nm.at(caret)), String(nm.at(anchor))], function () {})
     }
     // Where to draw someone's caret: offsets come against the shared text as the core has
     // it now (collab.text).
@@ -1357,8 +1356,7 @@ Item {
                                 Layout.fillWidth: true; Layout.bottomMargin: 6; spacing: 4
                                 Field { id: joinField; Layout.fillWidth: true; placeholderText: "Paste the id someone sent you"; onAccepted: root.joinShared(text) }
                                 LogosButton { Layout.fillWidth: true; compact: true; variant: LogosButton.Variant.Primary; text: "Join"; enabled: joinField.text.trim().length >= 64; onClicked: root.joinShared(joinField.text) }
-                                LogosButton { visible: root.reflectionAvailable; Layout.fillWidth: true; compact: true; text: "Join as a Reflection note"; enabled: joinField.text.trim().length >= 64; onClicked: root.joinNote(joinField.text) }
-                                Caption { visible: root.reflectionAvailable && root.reflNotes.length > 0; text: "REFLECTION NOTES"; Layout.topMargin: 6 }
+                                Caption { visible: root.reflectionAvailable && root.reflNotes.length > 0; text: "NOTES ON THIS DEVICE"; Layout.topMargin: 6 }
                                 Repeater {
                                     model: root.reflectionAvailable ? root.reflNotes : []
                                     FileRow {
@@ -1470,17 +1468,26 @@ Item {
                     anchors.margins: 16
                     spacing: Theme.spacing.small
                     LogosText { textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold; text: "Settings" }
-                    Caption { text: "YOUR NAME IN SHARED DRAFTS"; Layout.topMargin: 4 }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Field { id: collabNameField; Layout.fillWidth: true; placeholderText: (root.collab.me && root.collab.me.name) || "Shown on your cursor to others" }
-                        LogosButton { compact: true; text: "Save name"; enabled: collabNameField.text.trim() !== ""; onClicked: root.act("collab_set_name", [collabNameField.text], "Name saved", function () { collabNameField.text = ""; root.refreshCollab() }) }
+                    Caption { text: "SHARED DRAFTS: NETWORKS"; Layout.topMargin: 4 }
+                    Hint {
+                        text: root.networksSettable
+                              ? "Where shared drafts are published (Reflection's engine, reflection_core, publishes them; the same setting as in Reflection). Logos: Logos Delivery. p2panda: the p2panda network of Reflection's other apps. Both: everyone on either can join, and edits are passed between the two."
+                              : "Shared drafts are published by Reflection's engine (reflection_core), now on " + root.networksLabel(root.reflSyncMode === "p2panda" ? "p2panda" : "logos") + ". Choosing Logos, p2panda or both here needs a newer reflection_core."
                     }
-                    Caption { text: "SHARED DRAFTS: SYNC SPEED"; Layout.topMargin: 4 }
-                    Hint { text: "Live: others see your typing within a fraction of a second (many messages over Logos Delivery). Economy: every 2 seconds, sized for an RLN message budget." }
                     RowLayout {
-                        LogosButton { compact: true; text: "Live"; variant: root.collabLive ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; onClicked: root.act("collab_set_speed", ["live"], "Shared drafts: live", function () { root.refreshCollab() }) }
-                        LogosButton { compact: true; text: "Economy"; variant: !root.collabLive ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; onClicked: root.act("collab_set_speed", ["economy"], "Shared drafts: economy", function () { root.refreshCollab() }) }
+                        visible: root.networksSettable
+                        Repeater {
+                            model: [{ k: "logos", t: "Logos" }, { k: "p2panda", t: "p2panda" }, { k: "both", t: "Both" }]
+                            LogosButton {
+                                compact: true; text: modelData.t
+                                variant: root.reflSettings && root.reflSettings.networks === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                onClicked: root.refl("set_settings", [JSON.stringify({ networks: modelData.k })], function (raw) {
+                                    var r = root.j(raw)
+                                    if (r && r.ok) { if (r.settings) root.reflSettings = r.settings; root.say("Shared drafts: " + root.networksLabel(modelData.k)); root.refreshCollab() }
+                                    else root.fail((r && r.error) || "reflection_core did not take the setting")
+                                })
+                            }
+                        }
                     }
                     Caption { text: "IPFS GATEWAYS"; Layout.topMargin: 4 }
                     Hint { text: "Tried after your own node, one per line. Every block is checked against its hash, so a gateway can fail but cannot change content." }
@@ -1803,16 +1810,16 @@ Item {
                     }
                     Chip {
                         visible: root.isShared
-                        text: (root.viaReflection ? "Reflection note" : "shared")
-                              + (!(root.collab.transport && root.collab.transport.connected) && !root.viaReflection ? " · connecting…"
-                                 : root.collabOnline.length === 0 ? " · only you here" : (" · " + (root.collabOnline.length + 1) + " here"))
+                        text: "shared · " + root.networksLabel(root.collab.networks)
+                              + (root.collabOnline.length === 0 ? " · only you here" : (" · " + (root.collabOnline.length + 1) + " here"))
                         tint: root.collab.transport && root.collab.transport.connected ? Theme.palette.success : Theme.palette.warning
                         HoverHandler { id: shareHover }
                         ToolTip.visible: shareHover.hovered
-                        ToolTip.text: "Synced over Logos Delivery (loam_core): " + (root.collab.transport ? (root.collab.transport.status + (root.collab.transport.error ? " · " + root.collab.transport.error : "")) : "")
+                        ToolTip.text: "A Reflection note: also opens in the Reflection apps. Published by reflection_core on " + root.networksLabel(root.collab.networks) + " (Settings in Fileverse or Reflection)."
+                                      + (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : "")
                     }
-                    Chip { visible: root.viaReflection && !root.isShared; text: "Reflection note · reflection_core not answering"; tint: Theme.palette.warning }
-                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, root.viaReflection ? "Reflection note id" : "Shared draft id") }
+                    Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
+                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared draft id") }
                     LogosButton {
                         // reflection_core sends this device's cursor only when the user says so
                         // (one setting for every note, also Reflection's "Share my cursor")
@@ -1827,11 +1834,11 @@ Item {
                     }
                     LogosButton {
                         visible: root.isShared; compact: true
-                        text: root.viaReflection ? "Unlink note" : root.collab.joined ? "Leave" : "Stop sharing"
+                        text: "Stop sharing"
                         onClicked: root.stopSharing()
                         HoverHandler { id: leaveHover }
                         ToolTip.visible: leaveHover.hovered
-                        ToolTip.text: "Stop syncing this draft on this device. Its text stays here, private; the others keep their copies and can go on editing together."
+                        ToolTip.text: "Stop syncing this draft on this device. Its text stays here, private; the others keep their copies and can go on editing together (the note stays in Reflection)."
                     }
                     LogosButton {
                         visible: !root.isShared && !!root.draft && !root.viaReflection
@@ -1839,7 +1846,7 @@ Item {
                         onClicked: root.shareClicked()
                         HoverHandler { id: shareBtnHover }
                         ToolTip.visible: shareBtnHover.hovered
-                        ToolTip.text: "Edit this draft together with others, live, over Logos Delivery. You get an id to send them; anyone with it can read and write."
+                        ToolTip.text: "Edit this draft together with others, live. You get an id to send them; anyone with it can read and write. It also opens in the Reflection apps."
                     }
                     LogosButton { visible: root.coreSlides.length > 0; compact: true; text: "Present"; onClicked: root.present() }
                     LogosButton {
@@ -1848,27 +1855,6 @@ Item {
                         enabled: !root.busyWith("publish")
                         text: root.busyWith("publish") ? ("Publishing… " + root.elapsed("publish") + "s") : (root.draft && root.draft.published ? "Publish again" : "Publish")
                         onClicked: root.publishDraft()
-                    }
-                }
-                // Share…: how (when reflection_core is installed)
-                Rectangle {
-                    Layout.fillWidth: true
-                    visible: root.shareOpen && !root.isShared
-                    implicitHeight: shareRow.implicitHeight + 16
-                    radius: Theme.spacing.radiusSmall
-                    color: Theme.palette.surfaceRaised
-                    border.color: Theme.palette.borderSubtle
-                    RowLayout {
-                        id: shareRow
-                        anchors.fill: parent; anchors.margins: 8
-                        spacing: Theme.spacing.small
-                        LogosText {
-                            Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13
-                            text: "Edit together: with Fileverse (built in, over Logos Delivery), or as a Reflection note (reflection_core: also editable in the Reflection apps, over Logos Delivery or p2panda)."
-                        }
-                        LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Share with Fileverse"; onClicked: root.shareDraft() }
-                        LogosButton { compact: true; text: "Share as a Reflection note"; onClicked: root.shareAsNote() }
-                        LogosButton { compact: true; text: "Cancel"; onClicked: root.shareOpen = false }
                     }
                 }
                 // changed on disk (an agent?) while you have unsaved edits here
