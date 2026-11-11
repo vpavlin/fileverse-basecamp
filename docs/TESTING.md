@@ -1,5 +1,28 @@
 # What was tested, and how to repeat it
 
+## 0.16.0: Download Markdown; "catching up…" on shared documents (2026-11-11)
+
+"Download Markdown" saves the document as a .md file in the Downloads folder (XDG_DOWNLOAD_DIR,
+else ~/Downloads, made if missing), named after its title, like a browser download: no dialog,
+never overwriting ("Title (2).md"), and a message says where it went. It is under the title in
+the editor (the editor's text as it is now, starting with the title as a heading) and next to
+"Copy Markdown" for opened documents. The core's new `download_file(title, ext, content)` does
+the writing; the title is made a safe file name (no separators, not hidden, 100 characters).
+
+Qt's own save dialog was tried first and dropped: inside Basecamp it listed the process's
+working folder whatever folder it was given, and did not fill in the proposed name.
+
+- Basecamp t, "Feedback on 0.3.3" (10.5 KB): downloaded twice, "Feedback on 0.3.3.md" and
+  "… (2).md", byte-identical to the user's original Markdown.
+- Core: safe names, the "(2)" rule and XDG_DOWNLOAD_DIR have tests.
+
+Shared documents need reflection_core 0.6.2, which keeps asking for missing changes until a
+note is complete (before, a joiner asked three times in its first 30 s and the sharer answered
+one of them: on a slow network the note could stay at its title for good). Its
+`state().current.delivery` drives a new chip: "catching up…" while others' changes are missing,
+"sending…" while ours are not out yet. "Copy id" moved to the row under the title, with
+"Download Markdown", so a shared document's title is not cut off. Harness: sharedcatchup.
+
 ## 0.15.1 (view): Share no longer hides a failed send (2026-11-11)
 
 vpavlin shared an existing document; the other side saw "2 here" but no text. Joining the

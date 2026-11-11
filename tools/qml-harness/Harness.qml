@@ -32,7 +32,7 @@ Window {
     function draft() {
         var md = "# Logos plan\n\nWe go **self-sovereign**: [Logos](https://logos.co).\n\n## Steps\n\n- IPFS node module\n- Logos Storage\n  - copy blocks\n\n1. edit\n2. publish\n\n> no servers\n\n```\nfvbc://ipfs/bafk…\n```\n\n| what | where |\n|---|---|\n| blocks | IPFS + Storage |\n"
         return { id: "abc123", title: "Logos plan", markdown: md, sourceUrl: "", preview: win.previewOf(), published: mode === "edit" ? { link: "fvbc://ipfs/bafkreiexample#key=k", at: 1792700000000 } : null,
-                 reflection: (mode === "shared" || mode === "sharedmd") ? { id: "ab".repeat(32) } : undefined }
+                 reflection: (mode === "shared" || mode === "sharedmd" || mode === "sharedcatchup") ? { id: "ab".repeat(32) } : undefined }
     }
     function previewOf() {
         var b = [
@@ -76,7 +76,8 @@ Window {
         if (method === "reflection_call") {
             var rm = args[0], ra = JSON.parse(args[1] || "[]")
             var cur = { id: "ab".repeat(32), name: "Logos plan", text: win.draft().markdown, version: 3, online: ["b0b", "a11"],
-                        cursors: [ { author: "b0b", pos: 12, anchor: 12 }, { author: "a11", pos: 60, anchor: 60 } ] }
+                        cursors: [ { author: "b0b", pos: 12, anchor: 12 }, { author: "a11", pos: 60, anchor: 60 } ],
+                        delivery: { unpublished: false, catchingUp: mode === "sharedcatchup", waiting: 0, peersMissingOurs: [] } }
             var st = { ok: true, me: "me", transport: { status: "Logos: Connected" }, syncMode: "logos",
                        settings: { shareCursor: true, networks: mode === "sharedold" ? undefined : "both" },
                        docs: [ { id: "ab".repeat(32), name: "Logos plan", online: 2 } ] }
@@ -128,7 +129,7 @@ Window {
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
-            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedmd" || win.mode === "editmd") {
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd") {
                 it.section = "drafts"; it.openDraft("abc123")
                 if (win.mode === "sharedmd" || win.mode === "editmd") Qt.callLater(function () { it.setVisualEdit(false) })
             }

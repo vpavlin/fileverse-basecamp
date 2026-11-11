@@ -374,7 +374,7 @@ Item {
             peers.push({ id: a, name: String(a).substring(0, 6), color: root.colorOf(a), online: true,
                          caret: cur ? md.at(cur.pos) : null, anchor: cur ? md.at(cur.anchor) : null })
         })
-        return { ok: true, shared: true, engine: "reflection", id: c.id, name: c.name || "", networks: root.networksOf(r), networkStatus: r.networkStatus || null, version: String(c.version), text: md.text,
+        return { ok: true, shared: true, engine: "reflection", id: c.id, name: c.name || "", networks: root.networksOf(r), networkStatus: r.networkStatus || null, delivery: c.delivery || null, version: String(c.version), text: md.text,
                  peers: peers, transport: r.transport, joined: true,
                  me: { id: r.me, name: "you", speed: "live", shareCursor: !!(r.settings && r.settings.shareCursor) } }
     }
@@ -1292,6 +1292,29 @@ Item {
         nameFilters: ["Pictures (*.png *.jpg *.jpeg *.gif *.webp *.svg)", "All files (*)"]
         onAccepted: root.insertImage(selectedFile)
     }
+    // "Download Markdown": like a browser download, straight into the Downloads folder
+    function downloadMarkdown(title, md) {
+        md = String(md || "")
+        if (md.length && md.charAt(md.length - 1) !== "\n") md += "\n"
+        root.core("download_file", [String(title || ""), "md", md], function (raw) {
+            var r = root.j(raw)
+            if (r && r.ok) root.say("Downloaded to " + r.path)
+            else root.fail("Could not save the file: " + ((r && r.error) || "no answer from the core"))
+        })
+    }
+    // A draft's title is kept apart from its text; a downloaded file starts with it.
+    function withTitle(title, md) {
+        var t = String(title || "").trim(), first = String(md || "").replace(/^\s+/, "").split("\n")[0]
+        if (!t || /^#\s/.test(first)) return md
+        return "# " + t + "\n\n" + md
+    }
+    // The editor's Markdown as it is now (the draft file can be a moment behind the typing).
+    function editorMarkdown() {
+        if (!root.draft) return ""
+        if (!root.visualEdit) return mdArea.text
+        var r = root.coreSync("rich_md", [root.draft.id, richArea.text])
+        return (r && r.markdown !== undefined) ? r.markdown : root.draft.markdown
+    }
     FileDialog {
         id: backupDialog
         title: "Choose a dDocs/dSheets backup-key file"
@@ -2063,6 +2086,7 @@ Item {
                     onClicked: root.copyToStorage()
                 }
                 LogosButton { visible: root.docv && root.docv.markdown !== undefined; compact: true; text: "Copy Markdown"; onClicked: root.copy(root.docv.markdown, "Markdown") }
+                LogosButton { visible: root.docv && root.docv.markdown !== undefined; compact: true; text: "Download Markdown"; onClicked: root.downloadMarkdown(root.docv.title, root.docv.markdown) }
                 LogosButton { visible: root.docUrl.indexOf("fvbc://") === 0; compact: true; text: "Copy link"; onClicked: root.copy(root.docUrl, "Link") }
                 LogosButton { compact: true; text: root.showDetails ? "Hide sources" : "Sources"; onClicked: root.showDetails = !root.showDetails }
             }
@@ -2148,8 +2172,19 @@ Item {
                                       + (root.networkStatusText(root.collab.networkStatus) !== "" ? " " + root.networkStatusText(root.collab.networkStatus)
                                          : (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : ""))
                     }
+                    // reflection_core 0.6.2+: changes still on their way, either direction
+                    Chip {
+                        readonly property var d: root.collab.delivery
+                        visible: root.isShared && !!d && (!!d.catchingUp || !!d.unpublished)
+                        text: d && d.catchingUp ? "catching up…" : "sending…"
+                        tint: Theme.palette.warning
+                        HoverHandler { id: deliveryHover }
+                        ToolTip.visible: deliveryHover.hovered
+                        ToolTip.text: d && d.catchingUp
+                                      ? "Some of the others' changes have not arrived yet. reflection_core keeps asking for them; the text fills in when they come. Keep the document open."
+                                      : "Your latest changes have not been sent yet. They go out as soon as the network lets them."
+                    }
                     Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
-                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared document id") }
                     LogosButton {
                         // reflection_core sends this device's cursor only when the user says so
                         // (one setting for every note, also Reflection's "Share my cursor")
@@ -2210,8 +2245,10 @@ Item {
                 }
                 RowLayout {
                     Layout.fillWidth: true
-                    visible: !!(root.draft && (root.draft.published || root.draft.sourceUrl))
+                    visible: !!root.draft
                     spacing: Theme.spacing.small
+                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared document id") }
+                    LogosButton { compact: true; text: "Download Markdown"; onClicked: root.downloadMarkdown(titleField.text, root.withTitle(titleField.text, root.editorMarkdown())) }
                     LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Copy link"; onClicked: root.copy(root.draft.published.link, "Link") }
                     LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Open published"; onClicked: root.open(root.draft.published.link) }
                     LogosButton { visible: !!(root.draft && root.draft.sourceUrl); compact: true; text: "Open original"; onClicked: root.open(root.draft.sourceUrl) }

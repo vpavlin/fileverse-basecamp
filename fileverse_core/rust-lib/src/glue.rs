@@ -88,6 +88,9 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn backup_portal(&self, portal: String) -> String;
     /// Render Markdown the way the document view and the slide view will show it.
     fn preview(&self, markdown: String) -> String;
+    /// "Download": save text in the user's Downloads folder, named after `title` with the
+    /// extension `ext` ("md"), never overwriting ("Title (2).md"). Returns `{ ok, path }`.
+    fn download_file(&self, title: String, ext: String, content: String) -> String;
     /// Create a draft. `source_url` names the document it was copied from (may be empty).
     fn draft_create(&self, title: String, markdown: String, source_url: String) -> String;
     /// Save a draft's title and Markdown. Returns it with a fresh preview. `base` is the
@@ -484,6 +487,45 @@ fn now_ms() -> u64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+/// The user's Downloads folder: XDG_DOWNLOAD_DIR from user-dirs.dirs, else ~/Downloads.
+fn downloads_dir() -> std::path::PathBuf {
+    let home = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()));
+    let conf = std::env::var("XDG_CONFIG_HOME").map(std::path::PathBuf::from).unwrap_or_else(|_| home.join(".config"));
+    if let Ok(text) = std::fs::read_to_string(conf.join("user-dirs.dirs")) {
+        if let Some(d) = xdg_download_dir(&text, &home) {
+            return d;
+        }
+    }
+    home.join("Downloads")
+}
+
+fn xdg_download_dir(text: &str, home: &std::path::Path) -> Option<std::path::PathBuf> {
+    let line = text.lines().map(str::trim).find(|l| l.starts_with("XDG_DOWNLOAD_DIR="))?;
+    let v = line["XDG_DOWNLOAD_DIR=".len()..].trim().trim_matches('"');
+    let p = if let Some(rest) = v.strip_prefix("$HOME") { home.join(rest.trim_start_matches('/')) } else { std::path::PathBuf::from(v) };
+    // "$HOME/" alone means downloads are switched off: use ~/Downloads then
+    if p.is_absolute() && p != home { Some(p) } else { None }
+}
+
+/// A title as a file name (without extension): no path separators or control characters,
+/// not hidden, at most 100 characters.
+fn safe_file_name(title: &str) -> String {
+    let cleaned: String = title.chars().map(|c| if c == '/' || c == '\\' || c.is_control() || ":*?\"<>|".contains(c) { ' ' } else { c }).collect();
+    let n = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let n: String = n.trim_start_matches(|c| c == '.' || c == ' ').chars().take(100).collect();
+    let n = n.trim_end_matches(|c| c == '.' || c == ' ');
+    if n.is_empty() { "Untitled".into() } else { n.to_string() }
+}
+
+/// `dir/stem.ext`, or `dir/stem (2).ext` and so on if that is taken.
+fn free_path(dir: &std::path::Path, stem: &str, ext: &str) -> std::path::PathBuf {
+    let first = dir.join(format!("{stem}.{ext}"));
+    if !first.exists() {
+        return first;
+    }
+    (2..10000).map(|k| dir.join(format!("{stem} ({k}).{ext}"))).find(|p| !p.exists()).unwrap_or(first)
 }
 
 fn err(e: impl std::fmt::Display) -> String {
@@ -1341,6 +1383,22 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         )
     }
 
+    fn download_file(&self, title: String, ext: String, content: String) -> String {
+        let ext: String = ext.chars().filter(|c| c.is_ascii_alphanumeric()).take(8).collect();
+        if ext.is_empty() {
+            return err("no file type");
+        }
+        let dir = downloads_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return err(format!("could not make {}: {e}", dir.display()));
+        }
+        let path = free_path(&dir, &safe_file_name(&title), &ext);
+        match std::fs::write(&path, content.as_bytes()) {
+            Ok(()) => json!({ "ok": true, "path": path.display().to_string(), "bytes": content.len() }).to_string(),
+            Err(e) => err(format!("could not write {}: {e}", path.display())),
+        }
+    }
+
     fn preview(&self, markdown: String) -> String {
         json!({ "ok": true, "tabs": preview_json(&markdown) }).to_string()
     }
@@ -1771,3 +1829,33 @@ pub extern "Rust" fn logos_module_install() {
     install::<FileverseCoreModuleImpl>();
 }
 
+
+#[cfg(test)]
+mod download_tests {
+    use super::*;
+
+    #[test]
+    fn a_title_becomes_a_safe_file_name() {
+        assert_eq!(safe_file_name("Feedback: Chat / Basecamp"), "Feedback Chat Basecamp");
+        assert_eq!(safe_file_name("../../etc/passwd"), "etc passwd");
+        assert_eq!(safe_file_name(" ... "), "Untitled");
+        assert_eq!(safe_file_name("Notes on v0.3.3"), "Notes on v0.3.3");
+    }
+
+    #[test]
+    fn a_second_download_does_not_overwrite_the_first() {
+        let dir = std::env::temp_dir().join(format!("fv-dl-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), "x").unwrap();
+        assert_eq!(free_path(&dir, "b", "md"), dir.join("b.md"));
+        assert_eq!(free_path(&dir, "a", "md"), dir.join("a (2).md"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn the_xdg_download_dir_is_honoured() {
+        let home = std::path::Path::new("/home/u");
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"$HOME/Stažené\"\n", home), Some(home.join("Stažené")));
+        assert_eq!(xdg_download_dir("XDG_DOWNLOAD_DIR=\"$HOME/\"\n", home), None);
+    }
+}
