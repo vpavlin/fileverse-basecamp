@@ -2239,12 +2239,14 @@ Item {
                     // reflection_core 0.6.2+: changes still on their way, either direction
                     Chip {
                         readonly property var d: root.collab.delivery
-                        visible: root.isShared && !!d && (!!d.catchingUp || !!d.unpublished)
-                        text: d && d.catchingUp ? "catching up…" : "sending…"
+                        // loroPending (0.6.3+): received changes wait for one this device never got
+                        readonly property bool behind: !!d && (!!d.catchingUp || !!d.loroPending)
+                        visible: root.isShared && !!d && (behind || !!d.unpublished)
+                        text: behind ? "catching up…" : "sending…"
                         tint: Theme.palette.warning
                         HoverHandler { id: deliveryHover }
                         ToolTip.visible: deliveryHover.hovered
-                        ToolTip.text: d && d.catchingUp
+                        ToolTip.text: behind
                                       ? "Some of the others' changes have not arrived yet. reflection_core keeps asking for them; the text fills in when they come. Keep the document open."
                                       : "Your latest changes have not been sent yet. They go out as soon as the network lets them."
                     }

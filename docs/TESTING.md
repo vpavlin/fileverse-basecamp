@@ -1,5 +1,12 @@
 # What was tested, and how to repeat it
 
+## 0.16.2 (view): "catching up…" also while changes wait for a missing one (2026-11-11)
+
+reflection_core 0.6.3 adds `delivery.loroPending`: received changes held back because they
+depend on one this device never got (the "title only" state). The chip shows "catching up…"
+for it as for `catchingUp`. Works with 0.6.2 too (the field is then absent). Harness:
+sharedcatchup now sets only loroPending.
+
 ## 0.16.1 (view): the title keeps its room on shared documents (2026-11-11)
 
 On a shared document the title row held the title, the avatars of who is here, the sharing

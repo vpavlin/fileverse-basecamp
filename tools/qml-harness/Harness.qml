@@ -77,7 +77,7 @@ Window {
             var rm = args[0], ra = JSON.parse(args[1] || "[]")
             var cur = { id: "ab".repeat(32), name: "Logos plan", text: win.draft().markdown, version: 3, online: ["b0b", "a11"],
                         cursors: [ { author: "b0b", pos: 12, anchor: 12 }, { author: "a11", pos: 60, anchor: 60 } ],
-                        delivery: { unpublished: false, catchingUp: mode === "sharedcatchup", waiting: 0, peersMissingOurs: [] } }
+                        delivery: { unpublished: false, catchingUp: false, loroPending: mode === "sharedcatchup", waiting: 0, peersMissingOurs: [] } }
             var st = { ok: true, me: "me", transport: { status: "Logos: Connected" }, syncMode: "logos",
                        settings: { shareCursor: true, networks: mode === "sharedold" ? undefined : "both" },
                        docs: [ { id: "ab".repeat(32), name: "Logos plan", online: 2 } ] }
