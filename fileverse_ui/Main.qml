@@ -2147,44 +2147,6 @@ Item {
                         visible: !root.isShared
                         text: root.draftDirty ? "editing…" : "saved on this device"; tint: root.draftDirty ? Theme.palette.warning : Theme.palette.success
                     }
-                    // shared: who else has it open (a dot each), and the transport
-                    Row {
-                        visible: root.isShared
-                        spacing: -6
-                        Repeater {
-                            model: root.collabOnline
-                            Rectangle {
-                                width: 24; height: 24; radius: 12; color: modelData.color; border.color: Theme.palette.background; border.width: 2
-                                LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 11; font.weight: Theme.typography.weightBold; color: "white"; text: (modelData.name || "?").charAt(0).toUpperCase() }
-                                HoverHandler { id: peerHover }
-                                ToolTip.visible: peerHover.hovered; ToolTip.text: modelData.name
-                            }
-                        }
-                    }
-                    Chip {
-                        visible: root.isShared
-                        text: "shared · " + root.networksLabel(root.collab.networks)
-                              + (root.collabOnline.length === 0 ? " · only you here" : (" · " + (root.collabOnline.length + 1) + " here"))
-                        tint: root.collab.transport && root.collab.transport.connected ? Theme.palette.success : Theme.palette.warning
-                        HoverHandler { id: shareHover }
-                        ToolTip.visible: shareHover.hovered
-                        ToolTip.text: "A Reflection note: also opens in the Reflection apps. Published by reflection_core on " + root.networksLabel(root.collab.networks) + " (Settings in Fileverse or Reflection)."
-                                      + (root.networkStatusText(root.collab.networkStatus) !== "" ? " " + root.networkStatusText(root.collab.networkStatus)
-                                         : (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : ""))
-                    }
-                    // reflection_core 0.6.2+: changes still on their way, either direction
-                    Chip {
-                        readonly property var d: root.collab.delivery
-                        visible: root.isShared && !!d && (!!d.catchingUp || !!d.unpublished)
-                        text: d && d.catchingUp ? "catching up…" : "sending…"
-                        tint: Theme.palette.warning
-                        HoverHandler { id: deliveryHover }
-                        ToolTip.visible: deliveryHover.hovered
-                        ToolTip.text: d && d.catchingUp
-                                      ? "Some of the others' changes have not arrived yet. reflection_core keeps asking for them; the text fills in when they come. Keep the document open."
-                                      : "Your latest changes have not been sent yet. They go out as soon as the network lets them."
-                    }
-                    Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
                     LogosButton {
                         // reflection_core sends this device's cursor only when the user says so
                         // (one setting for every note, also Reflection's "Share my cursor")
@@ -2249,6 +2211,44 @@ Item {
                     spacing: Theme.spacing.small
                     LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared document id") }
                     LogosButton { compact: true; text: "Download Markdown"; onClicked: root.downloadMarkdown(titleField.text, root.withTitle(titleField.text, root.editorMarkdown())) }
+                    // shared: who else has it open (a dot each), and the transport
+                    Row {
+                        visible: root.isShared
+                        spacing: -6
+                        Repeater {
+                            model: root.collabOnline
+                            Rectangle {
+                                width: 24; height: 24; radius: 12; color: modelData.color; border.color: Theme.palette.background; border.width: 2
+                                LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 11; font.weight: Theme.typography.weightBold; color: "white"; text: (modelData.name || "?").charAt(0).toUpperCase() }
+                                HoverHandler { id: peerHover }
+                                ToolTip.visible: peerHover.hovered; ToolTip.text: modelData.name
+                            }
+                        }
+                    }
+                    Chip {
+                        visible: root.isShared
+                        text: "shared · " + root.networksLabel(root.collab.networks)
+                              + (root.collabOnline.length === 0 ? " · only you here" : (" · " + (root.collabOnline.length + 1) + " here"))
+                        tint: root.collab.transport && root.collab.transport.connected ? Theme.palette.success : Theme.palette.warning
+                        HoverHandler { id: shareHover }
+                        ToolTip.visible: shareHover.hovered
+                        ToolTip.text: "A Reflection note: also opens in the Reflection apps. Published by reflection_core on " + root.networksLabel(root.collab.networks) + " (Settings in Fileverse or Reflection)."
+                                      + (root.networkStatusText(root.collab.networkStatus) !== "" ? " " + root.networkStatusText(root.collab.networkStatus)
+                                         : (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : ""))
+                    }
+                    // reflection_core 0.6.2+: changes still on their way, either direction
+                    Chip {
+                        readonly property var d: root.collab.delivery
+                        visible: root.isShared && !!d && (!!d.catchingUp || !!d.unpublished)
+                        text: d && d.catchingUp ? "catching up…" : "sending…"
+                        tint: Theme.palette.warning
+                        HoverHandler { id: deliveryHover }
+                        ToolTip.visible: deliveryHover.hovered
+                        ToolTip.text: d && d.catchingUp
+                                      ? "Some of the others' changes have not arrived yet. reflection_core keeps asking for them; the text fills in when they come. Keep the document open."
+                                      : "Your latest changes have not been sent yet. They go out as soon as the network lets them."
+                    }
+                    Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
                     LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Copy link"; onClicked: root.copy(root.draft.published.link, "Link") }
                     LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Open published"; onClicked: root.open(root.draft.published.link) }
                     LogosButton { visible: !!(root.draft && root.draft.sourceUrl); compact: true; text: "Open original"; onClicked: root.open(root.draft.sourceUrl) }

@@ -1,5 +1,16 @@
 # What was tested, and how to repeat it
 
+## 0.16.1 (view): the title keeps its room on shared documents (2026-11-11)
+
+On a shared document the title row held the title, the avatars of who is here, the sharing
+chip, "catching up…" and four buttons, and the title was cut off ("edback: Chat in a fresh
+Basecamp"). The avatars and the chips moved to the row under the title, next to Copy id and
+Download Markdown; the title row keeps the title and the buttons.
+
+- Rig, both Basecamps on reflection_core 0.6.2 and Fileverse 0.16.0: the 10.5 KB feedback
+  document shared from t, joined from u. u had the whole text after about 150 s,
+  byte-identical, showing "catching up…" until then; the chip went away by itself.
+
 ## 0.16.0: Download Markdown; "catching up…" on shared documents (2026-11-11)
 
 "Download Markdown" saves the document as a .md file in the Downloads folder (XDG_DOWNLOAD_DIR,
