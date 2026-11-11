@@ -1,5 +1,17 @@
 # What was tested, and how to repeat it
 
+## 0.15.1 (view): Share no longer hides a failed send (2026-11-11)
+
+vpavlin shared an existing document; the other side saw "2 here" but no text. Joining the
+same note from Basecamp t showed only its first line, the title: Share creates the note with
+the title, then sets the whole text, and ignored whether that worked. A refused text (most
+likely reflection_core's 100 KB limit, "The note is too long") still linked the draft and said
+"Shared". Now Share checks the size first (at most 100 KB of text, with a clear message) and
+the result of setting the text; on a refusal it says why and shares nothing.
+
+- Basecamp t joined vpavlin's note 8f28acd3…: one operation arrived (the title), nothing more
+  in 90 s.
+
 ## 0.15.0: published documents findable in Logos Storage; Light / Dark paper (2026-11-11)
 
 **Storage links.** vpavlin: a published link carried only the manifest's IPFS CID, so only

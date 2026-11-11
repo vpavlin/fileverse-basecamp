@@ -523,12 +523,22 @@ Item {
         root.shareOpen = false
         var draftId = root.draft.id, title = titleField.text || root.draft.title || "Untitled"
         root.saveDraft(function () {
-            var md = root.draft.markdown
+            var md = root.draft.markdown, text = root.toNote(md).text
+            // reflection_core takes at most 100 KB of text (a full copy must fit one message):
+            // say so here instead of sharing a note that holds only the title
+            var bytes = unescape(encodeURIComponent(text)).length
+            if (bytes > 100 * 1024) {
+                root.fail("This document is too long to share (" + Math.ceil(bytes / 1024) + " KB of text, at most 100 KB). Split it, or share a shorter part.")
+                return
+            }
             root.refl("create_document", [title], function (raw) {
                 var r = root.j(raw)
                 if (!r || !r.ok) { root.fail((r && r.error) || "reflection_core could not create a note"); return }
                 var note = r.id
-                root.refl("set_text", [note, String(r.current.version), root.toNote(md).text], function () {
+                root.refl("set_text", [note, String(r.current.version), text], function (raw2) {
+                    // only a note that took the whole text is linked and announced
+                    var w = root.j(raw2)
+                    if (!w || !w.ok) { root.fail("Could not share the text: " + ((w && w.error) || "reflection_core did not answer") + ". Nothing was shared."); return }
                     root.core("reflection_link", [draftId, note], function () {
                         if (!root.draft || root.draft.id !== draftId) return
                         var d = JSON.parse(JSON.stringify(root.draft)); d.reflection = { id: note }; root.draft = d
