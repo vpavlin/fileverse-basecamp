@@ -1,5 +1,31 @@
 # What was tested, and how to repeat it
 
+## 0.14.4: behave like Google Docs, LibreOffice and ddocs.new (2026-11-11)
+
+vpavlin: the editor should do what people are used to. Compared with ddocs.new's editor
+(read in fileverse-ddocs: Tiptap with CommonMark emphasis rules, tab-indent.ts, Yjs undo)
+and the documented defaults of Google Docs and LibreOffice Writer; where they differ,
+ddocs.new's way.
+
+- Typed emphasis: `**b**`, `__b__` bold, `*i*`, `_i_` italic, `~~s~~` strike, `` `c` `` code
+  as the closing marker is typed, with ddocs.new's CommonMark rules (`5 * 3 * 2` and
+  snake_case stay text); the text typed after it is plain again.
+- Shift+Enter: a line break inside the paragraph, written as Markdown's backslash break; one
+  at the start or end of a block (Qt writes empty lines as `<br />`) is dropped
+  (`shift_enter_is_a_line_break`). Shift+Enter at the end of a heading keeps the heading.
+- Tab in text and headings: an indent (four no-break spaces; Qt collapses other inserted
+  spaces), Shift+Tab takes it back; the core keeps leading no-break spaces (`a_tab_indent_survives`).
+- Undo: Fileverse's own history instead of Qt's (which merged all typing since the last
+  formatting step, and was wiped by every remote edit or reload). Steps end at a word (space
+  or Enter), a 0.7 s pause, or a formatting change; a step keeps only what it changed with
+  some text around it, so undo finds that place in the current text and restores it, leaving
+  other people's edits alone. Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y and the toolbar, in both editors.
+
+Tests (tools/gui-tests: cases3.py 14, cases4.py 11, undo_shared.py): all pass (Enter then two
+undos removes the line with its Enter, which is how the steps are cut). Shared document, t
+and u on Logos: t typed a word, u typed a word, t pressed Ctrl+Z: on both, t's word gone and
+u's kept. u's word took a minute to reach t over Logos (network, as before).
+
 ## 0.14.3: editor UX pass, three people on one document (2026-11-10)
 
 vpavlin asked for a thorough editor test (formatting, Tab leaving the editor, double Enter

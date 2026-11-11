@@ -323,6 +323,11 @@ impl InlineBuf {
         let raw_at = |i: usize| self.raw.iter().filter(move |(k, _)| *k == i).map(|(_, m)| m.as_str());
         while i < self.runs.len() {
             for m in raw_at(i) {
+                // a line break only between text: Qt writes an empty line as <br />, and
+                // one at the start or end of a block means nothing in Markdown
+                if m == "\\\n" && (out.trim().is_empty() || self.runs[i..].iter().all(|r| r.2.trim_matches(|c: char| c.is_whitespace() || c == '\u{200b}').is_empty())) {
+                    continue;
+                }
                 out.push_str(m);
             }
             // a link spans consecutive runs with the same href
@@ -347,7 +352,8 @@ impl InlineBuf {
             out.push_str(&mark(&self.runs[i].0, &self.runs[i].2, plain_bold_ok));
             i += 1;
         }
-        out.trim().to_string()
+        // not Unicode whitespace: no-break spaces at the start are an indent (Tab in the editor)
+        out.trim_matches(|c: char| c == ' ' || c == '\n' || c == '\t' || c == '\r').to_string()
     }
 }
 
@@ -536,7 +542,8 @@ fn read_inline(toks: &[Tok], mut i: usize, end: &str) -> (InlineBuf, String, usi
                     }
                 }
                 if n == "br" {
-                    buf.push(cur, link.clone(), " ");
+                    // Shift+Enter: a line break inside the paragraph (Markdown's backslash break)
+                    buf.push_raw("\\\n".into());
                     plain.push('\n');
                 } else {
                     styles.push((n.clone(), st));
@@ -1412,6 +1419,28 @@ li.checked::marker { content: "\2612"; }
     /// tests/fixtures/qt_columns.html (captured from a TextArea in RichText mode) is
     /// `Test pres⏎A little image test▸This i cool:)⏎Yay!▸[image: pic]◂⏎Test▸Hello world how are you ?▸Right text◂⏎fdfd`
     /// (⏎ U+2029, ▸ U+FDD0, ◂ U+FDD1), and the one that starts with columns `▸L▸R◂`.
+    #[test]
+    fn a_tab_indent_survives() {
+        let md = to_md("<html><body><p>\u{a0}\u{a0}\u{a0}\u{a0}indented</p></body></html>");
+        assert_eq!(md.trim_end(), "\u{a0}\u{a0}\u{a0}\u{a0}indented");
+        assert!(to_md(&to_html(&md)).starts_with("\u{a0}\u{a0}\u{a0}\u{a0}indented"));
+    }
+
+    #[test]
+    fn shift_enter_is_a_line_break() {
+        let qt = "<html><body><p>line one<br />line two</p></body></html>";
+        let md = to_md(qt);
+        assert_eq!(md.trim(), "line one\\\nline two");
+        // and back: the editor gets the break again, the preview too
+        assert!(to_html(&md).contains("<br />"), "{}", to_html(&md));
+        // bold across the break stays bold on both lines
+        let md = to_md("<html><body><p><span style=\" font-weight:700;\">a<br />b</span></p></body></html>");
+        assert_eq!(md.trim(), "**a**\\\n**b**");
+        // a break with no text on one side is nothing (Qt's empty lines are <br />)
+        assert_eq!(to_md("<html><body><p><br />a</p></body></html>").trim(), "a");
+        assert_eq!(to_md("<html><body><p>a<br /></p></body></html>").trim(), "a");
+    }
+
     #[test]
     fn code_keeps_its_indentation_in_the_editor() {
         // as Qt writes a code block: one <pre> per line, spaces kept

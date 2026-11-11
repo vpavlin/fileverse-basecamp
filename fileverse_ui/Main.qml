@@ -707,10 +707,11 @@ Item {
     property bool loadingEditor: false
     property string blockKind: "p"        // p h1 h2 h3 ul ol task done quote code hr table
     function loadEditor(md) {
+        root.commitStep()
         root.loadingEditor = true
         mdArea.text = md
         root.loadingEditor = false
-        if (!root.visualEdit) return
+        if (!root.visualEdit) { root.histLoaded(); return }
         var r = root.coreSync("rich_html", [md, root.draft ? root.draft.id : "", root.viewDir])
         if (!r || !r.ok) { root.fail("Could not open the visual editor; showing Markdown."); root.visualEdit = false; return }
         root.loadingEditor = true
@@ -718,6 +719,7 @@ Item {
         root.loadingEditor = false
         richArea.cursorPosition = 0
         root.updateBlockKind()
+        root.histLoaded()
         root.fetchEditorImages(r.pending || [])
     }
     // Images the editor shows but the cache does not have yet (a copy of a Fileverse
@@ -808,8 +810,97 @@ Item {
         }
         return Math.max(0, Math.min(approx, text.length))
     }
+    // ── undo: Fileverse's own history, in steps of a word or a pause, as Google Docs,
+    // LibreOffice and ddocs.new undo. A step keeps only what it changed and a little text
+    // around it, so undo finds that place in the current text and puts back what was there:
+    // in a shared document the others' edits stay. Text arriving from others or loaded does
+    // not clear it (Qt's own undo forgets everything then).
+    property var undoStack: []
+    property var redoStack: []
+    property string histBase: ""        // the editor's text when the last step closed
+    property bool stepOpen: false
+    property int stepCaret: 0
+    property bool histApplying: false
+    property string histKey: ""         // draft id + editor kind the history belongs to
+    function histText() { return root.visualEdit ? richArea.text : mdArea.text }
+    // after the editor's text was loaded (opening, a remote edit, switching editors)
+    function histLoaded() {
+        var key = (root.draft ? root.draft.id : "") + (root.visualEdit ? ":v" : ":m")
+        if (key !== root.histKey) { root.undoStack = []; root.redoStack = []; root.histKey = key }
+        root.stepOpen = false
+        root.histBase = root.histText()
+    }
+    function histEdited() {
+        if (root.histApplying) return
+        if (!root.stepOpen) {
+            root.stepOpen = true
+            root.stepCaret = root.visualEdit ? richArea.cursorPosition : mdArea.cursorPosition
+        }
+        stepTimer.restart()
+    }
+    Timer { id: stepTimer; interval: 700; onTriggered: root.commitStep() }
+    function commitStep() {
+        stepTimer.stop()
+        if (!root.stepOpen) return
+        root.stepOpen = false
+        var a = root.histBase, b = root.histText()
+        root.histBase = b
+        if (a === b) return
+        var p = 0, n = Math.min(a.length, b.length)
+        while (p < n && a.charCodeAt(p) === b.charCodeAt(p)) p++
+        var q = 0
+        while (q < n - p && a.charCodeAt(a.length - 1 - q) === b.charCodeAt(b.length - 1 - q)) q++
+        var st = root.undoStack.slice()
+        st.push({ removed: a.substring(p, a.length - q), inserted: b.substring(p, b.length - q),
+                  anchor: b.substring(Math.max(0, p - 48), p), after: b.substring(b.length - q, Math.min(b.length, b.length - q + 48)),
+                  caret: root.stepCaret })
+        if (st.length > 200) st.shift()
+        root.undoStack = st; root.redoStack = []
+    }
+    // Put `step.removed` back where `step.inserted` is now; returns the inverse step.
+    function applyStep(step) {
+        var t = root.histText(), at = -1
+        var tries = [[step.anchor + step.inserted + step.after, step.anchor.length], [step.anchor + step.inserted, step.anchor.length], [step.inserted + step.after, 0]]
+        for (var k = 0; k < tries.length && at < 0; k++) {
+            if (!tries[k][0].length) continue
+            var i = t.indexOf(tries[k][0])
+            if (i >= 0) at = i + tries[k][1]
+        }
+        if (at < 0) return null
+        var next = t.substring(0, at) + step.removed + t.substring(at + step.inserted.length)
+        root.histApplying = true
+        var caret = root.visualEdit ? richArea.cursorPosition : mdArea.cursorPosition
+        if (root.visualEdit) richArea.text = next; else mdArea.text = next
+        root.histApplying = false
+        var area = root.visualEdit ? richArea : mdArea
+        area.cursorPosition = Math.max(0, Math.min(step.caret, area.length))
+        area.forceActiveFocus()
+        root.histBase = root.histText()
+        root.editorChanged()
+        root.histApplying = false
+        return { removed: step.inserted, inserted: step.removed, anchor: step.anchor, after: step.after, caret: caret }
+    }
+    function undoStep() {
+        root.commitStep()
+        var st = root.undoStack.slice()
+        if (!st.length) return
+        var inv = root.applyStep(st.pop())
+        root.undoStack = st
+        if (!inv) { root.say("That text was changed since; nothing to undo there"); return }
+        var r = root.redoStack.slice(); r.push(inv); root.redoStack = r
+    }
+    function redoStep() {
+        root.commitStep()
+        var r = root.redoStack.slice()
+        if (!r.length) return
+        var inv = root.applyStep(r.pop())
+        root.redoStack = r
+        if (!inv) { root.say("That text was changed since; nothing to redo there"); return }
+        var st = root.undoStack.slice(); st.push(inv); root.undoStack = st
+    }
     function editorChanged() {
         if (root.loadingEditor) return
+        root.histEdited()
         root.editGen++
         root.draftDirty = true
         // a shared draft sends while you type (every timer period), not only when you pause
@@ -869,6 +960,7 @@ Item {
         if (r && r.ok) root.blockKind = r.kind || "p"
     }
     function setBlock(kind) {
+        root.commitStep()
         var pos = richArea.cursorPosition
         var r = root.coreSync("rich_block", [richArea.text, String(root.blockIndex()), kind, root.draft ? root.draft.id : "", root.viewDir])
         if (!r || !r.ok) {
@@ -886,6 +978,7 @@ Item {
         richArea.cursorPosition = pos
         richArea.forceActiveFocus()
         root.editorChanged()
+        Qt.callLater(root.commitStep)
         if (kind === "indent" || kind === "outdent") root.refreshBlockKind()
         else root.blockKind = kind
     }
@@ -912,13 +1005,22 @@ Item {
         if (/^(ul|ol|task|done)$/.test(root.blockKind)) root.setBlock(back ? "outdent" : "indent")
         // (no-break spaces: inserted plain spaces would collapse; the core writes them as spaces)
         else if (root.blockKind === "code" && !back) richArea.insert(richArea.cursorPosition, "\u00a0\u00a0\u00a0\u00a0")
+        // in text and headings an indent, as ddocs.new does (no-break spaces: Qt collapses
+        // other inserted spaces, em spaces too)
+        else if (root.blockKind !== "code" && root.blockKind !== "table") {
+            var c = richArea.cursorPosition, ind = "\u00a0\u00a0\u00a0\u00a0"
+            if (!back) richArea.insert(c, ind)
+            else if (c >= 4 && richArea.getText(c - 4, c) === ind) richArea.remove(c - 4, c)
+        }
     }
     function focusEditor() {
         var a = root.visualEdit ? richArea : mdArea
         a.forceActiveFocus()
         a.cursorPosition = 0
     }
-    property var pendingFont: null      // Ctrl+B/I with nothing selected: { prop, value, pos }
+    // The style of the next typed text: { props: { bold: true, … }, pos, prop, value }
+    // (Ctrl+B/I with nothing selected, and plain text again after a typed **bold**)
+    property var pendingFont: null
     function applyPendingFont() {
         var p = root.pendingFont
         if (!p) return
@@ -927,11 +1029,45 @@ Item {
         root.pendingFont = null
         richArea.select(p.pos, c)
         var f = richArea.cursorSelection.font
-        f[p.prop] = p.value
+        for (var k in p.props) f[k] = p.props[k]
         richArea.cursorSelection.font = f
         richArea.cursorPosition = c
     }
+    // Typed Markdown emphasis becomes formatting as the closing marker is typed, with
+    // ddocs.new's CommonMark rules (no space just inside the markers: 5 * 3 * 2 stays text).
+    readonly property var inlineRules: [
+        { re: /(?:^|\s)(\*\*(?!\s+\*\*)([^*\s](?:[^*]*[^*\s])?)\*\*(?!\s+\*\*))$/, tag: "b", off: { bold: false } },
+        { re: /(?:^|\s)(__(?!\s+__)([^_\s](?:[^_]*[^_\s])?)__(?!\s+__))$/, tag: "b", off: { bold: false } },
+        { re: /(?:^|\s)(\*(?!\s+\*)([^*\s](?:[^*]*[^*\s])?)\*(?!\s+\*))$/, tag: "i", off: { italic: false } },
+        { re: /(?:^|\s)(_(?!\s+_)([^_\s](?:[^_]*[^_\s])?)_(?!\s+_))$/, tag: "i", off: { italic: false } },
+        { re: /(?:^|\s)(~~(?!\s+~~)([^~\s](?:[^~]*[^~\s])?)~~(?!\s+~~))$/, tag: "s", off: { strikeout: false } },
+        { re: /(?:^|[^`])(`([^`\s](?:[^`]*[^`\s])?)`)$/, tag: "code", off: null }
+    ]
+    property bool applyingRule: false
+    function inlineRule() {
+        if (root.applyingRule || root.loadingEditor || !richArea.activeFocus) return
+        if (root.blockKind === "code" || richArea.selectionStart !== richArea.selectionEnd) return
+        var pos = richArea.cursorPosition, p = root.textBefore(pos)
+        // (a line the editor restyled while empty starts with a zero-width space)
+        var line = p.substring(root.lastBreak(p) + 1).replace(/^[\u200b\ufeff]+/, "")
+        for (var i = 0; i < root.inlineRules.length; i++) {
+            var r = root.inlineRules[i], m = line.match(r.re)
+            if (!m) continue
+            var start = pos - m[1].length
+            root.applyingRule = true
+            richArea.remove(start, pos)
+            richArea.insert(start, "<" + r.tag + ">" + root.escHtml(m[2]) + "</" + r.tag + ">")
+            var end = start + m[2].length
+            richArea.cursorPosition = end
+            root.applyingRule = false
+            // what is typed next is plain again
+            var off = r.off || { family: richArea.font.family }
+            root.pendingFont = { props: off, pos: end, prop: "", value: false }
+            return
+        }
+    }
     function toggleFont(prop) {
+        root.commitStep()
         // with nothing selected: the style of the text typed next, the opposite of the
         // character before the cursor (Qt reports the block's style for an empty selection)
         if (richArea.selectionStart === richArea.selectionEnd) {
@@ -944,7 +1080,8 @@ Item {
             }
             // Qt types with the style of the character before: style the next typed one,
             // and what follows takes it on
-            root.pendingFont = { prop: prop, value: !on, pos: pos }
+            var props = {}; props[prop] = !on
+            root.pendingFont = { prop: prop, value: !on, pos: pos, props: props }
             return
         }
         var f = richArea.cursorSelection.font
@@ -955,6 +1092,7 @@ Item {
     function escHtml(t) { return String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;") }
     // Inline code and links go in as HTML, which TextArea.insert parses in RichText mode.
     function wrapSelection(make) {
+        root.commitStep()
         var s = richArea.selectionStart, e = richArea.selectionEnd
         if (s === e) { root.say("Select some text first"); return false }
         var t = richArea.selectedText
@@ -2051,8 +2189,8 @@ Item {
                                 ["🖼 Image", "", "Insert a picture (kept with the document; encrypted when published)", function () { imageDialog.open() }],
                                 ["▥ Columns", "", "Two columns side by side, e.g. an image beside text", function () { root.insertColumns() }],
                                 ["|", "", "", null],
-                                ["↶", "", "Undo (Ctrl+Z)", function () { richArea.undo() }],
-                                ["↷", "", "Redo (Ctrl+Shift+Z)", function () { richArea.redo() }]
+                                ["↶", "", "Undo (Ctrl+Z)", function () { root.undoStep() }],
+                                ["↷", "", "Redo (Ctrl+Shift+Z or Ctrl+Y)", function () { root.redoStep() }]
                             ] : []
                             Item {
                                 implicitWidth: modelData[0] === "|" ? 9 : tbLabel.implicitWidth + 16
@@ -2152,7 +2290,7 @@ Item {
                             placeholderText: "Start writing… (# heading, - list, [] task, > quote)"
                             placeholderTextColor: Theme.palette.textPlaceholder
                             background: Item {}
-                            onTextChanged: { root.applyPendingFont(); root.editorChanged() }
+                            onTextChanged: { root.applyPendingFont(); root.inlineRule(); root.editorChanged() }
                             onCursorPositionChanged: { root.updateBlockKind(); root.cursorMoved() }
                             // others' carets (shared drafts)
                             Repeater {
@@ -2184,17 +2322,21 @@ Item {
                             // Basecamp binds Ctrl+K (its search), and Tab moves the focus: take them
                             // while the editor has focus
                             Keys.onShortcutOverride: function (e) {
-                                if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_K || e.key === Qt.Key_B || e.key === Qt.Key_I)) e.accepted = true
+                                if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_K || e.key === Qt.Key_B || e.key === Qt.Key_I || e.key === Qt.Key_Z || e.key === Qt.Key_Y)) e.accepted = true
                                 if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true
                             }
                             Keys.onTabPressed: function (e) { root.editorTab(false); e.accepted = true }
+                            Keys.onReleased: function (e) { if (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) root.commitStep() }
                             Keys.onBacktabPressed: function (e) { root.editorTab(true); e.accepted = true }
                             Keys.onPressed: function (e) {
                                 var ctrl = e.modifiers & Qt.ControlModifier
-                                if (ctrl && e.key === Qt.Key_B) { root.toggleFont("bold"); e.accepted = true }
+                                if (ctrl && e.key === Qt.Key_Z) { if (e.modifiers & Qt.ShiftModifier) root.redoStep(); else root.undoStep(); e.accepted = true }
+                                else if (ctrl && e.key === Qt.Key_Y) { root.redoStep(); e.accepted = true }
+                                else if (ctrl && e.key === Qt.Key_B) { root.toggleFont("bold"); e.accepted = true }
                                 else if (ctrl && e.key === Qt.Key_I) { root.toggleFont("italic"); e.accepted = true }
                                 else if (ctrl && e.key === Qt.Key_K) { root.askLink(); e.accepted = true }
                                 else if (!ctrl && e.key === Qt.Key_Space && root.typedShortcut()) e.accepted = true
+                                // a word ends a step (space or Enter typed after it)
                                 // Tab nests a list item, Shift+Tab lifts it; in code it indents. It
                                 // never moves the focus out of the editor.
                                 else if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) {
@@ -2213,7 +2355,7 @@ Item {
                                     e.accepted = true
                                 }
                                 // Enter at the end of a heading starts normal text, as in Fileverse
-                                else if (e.key === Qt.Key_Return || e.key === Qt.Key_Enter) {
+                                else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && !(e.modifiers & Qt.ShiftModifier)) {
                                     // decided before Qt splits the block: is this a heading, and are we at its end?
                                     var p = richArea.getText(0, richArea.length), c = richArea.cursorPosition
                                     var atEnd = c === p.length || root.pieceBreak.test(p.charAt(c))
@@ -2245,7 +2387,16 @@ Item {
                             background: Rectangle { color: Theme.palette.backgroundInset; radius: Theme.spacing.radiusLarge; border.color: Theme.palette.borderSubtle }
                             onTextChanged: if (activeFocus) root.editorChanged()
                             // Tab indents (nested lists are four spaces), never leaves the editor
-                            Keys.onShortcutOverride: function (e) { if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true }
+                            Keys.onShortcutOverride: function (e) {
+                                if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true
+                                if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_Z || e.key === Qt.Key_Y)) e.accepted = true
+                            }
+                            Keys.onPressed: function (e) {
+                                if (!(e.modifiers & Qt.ControlModifier)) return
+                                if (e.key === Qt.Key_Z) { if (e.modifiers & Qt.ShiftModifier) root.redoStep(); else root.undoStep(); e.accepted = true }
+                                else if (e.key === Qt.Key_Y) { root.redoStep(); e.accepted = true }
+                            }
+                            Keys.onReleased: function (e) { if (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) root.commitStep() }
                             Keys.onTabPressed: function (e) { mdArea.insert(mdArea.cursorPosition, "    "); e.accepted = true }
                             Keys.onBacktabPressed: function (e) {
                                 var t = mdArea.text, c = mdArea.cursorPosition, s0 = t.lastIndexOf("\n", c - 1) + 1

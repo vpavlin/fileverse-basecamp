@@ -81,7 +81,7 @@ for c in mod.CASES:
     want = c.get("want")
     ok = None
     if want is not None:
-        norm = lambda t: t.replace("\r", "").strip()
+        norm = lambda t: t.replace("\r", "").strip(" \n")
         ok = (norm(got) == norm(want)) if not c.get("contains") else all(w in got for w in (want if isinstance(want, list) else [want]))
     results.append({"name": c["name"], "ok": ok, "got": got, "want": want, "note": c.get("note", "")})
     print(("PASS" if ok else "FAIL" if ok is False else "LOOK"), c["name"], repr(got)[:160], flush=True)
