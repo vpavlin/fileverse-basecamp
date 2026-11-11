@@ -8,7 +8,14 @@ CASES = [
   {"name": "undo_bold", "steps": [("type", "x"), ("key", "shift+Home ctrl+b"), ("wait", 0.5), ("key", "ctrl+z")], "want": "x"},
   {"name": "undo_list_style", "steps": [("type", "item"), ("tool", "List"), ("wait", 0.5), ("key", "ctrl+z")], "want": "item"},
   {"name": "undo_toolbar", "steps": [("type", "keep drop"), ("tool", "Undo")], "want": "keep"},
-  {"name": "undo_enter", "steps": [("type", "a"), ("key", "Return"), ("type", "b"), ("key", "ctrl+z ctrl+z")], "want": "a"},
+  {"name": "undo_enter", "steps": [("type", "a"), ("key", "Return"), ("type", "b"), ("key", "ctrl+z")], "want": "a"},
   {"name": "md_undo_word", "markdown": True, "steps": [("type", "hello world"), ("key", "ctrl+z")], "want": "hello"},
   {"name": "md_redo", "markdown": True, "steps": [("type", "hello world"), ("key", "ctrl+z ctrl+y")], "want": "hello world"},
+]
+CASES += [
+  # the cursor after undo: typing on goes where the undone text was
+  {"name": "undo_caret_mid_doc", "steps": [("type", "first line"), ("key", "Return"), ("type", "second"), ("key", "ctrl+Home End"), ("type", " added"), ("key", "ctrl+z"), ("type", "X")], "want": "first lineX\n\nsecond"},
+  {"name": "undo_caret_after_bold", "steps": [("type", "one two"), ("key", "Return"), ("type", "three"), ("key", "ctrl+Home ctrl+shift+Right ctrl+b"), ("wait", 0.5), ("key", "ctrl+z"), ("type", "X")], "want": "oneX two\n\nthree", "note": "cursor stays after 'one' when its bold is undone"},
+  {"name": "redo_caret", "steps": [("type", "a b"), ("key", "Return"), ("type", "c"), ("key", "ctrl+Home End"), ("type", " d"), ("key", "ctrl+z ctrl+y"), ("type", "X")], "want": "a b dX\n\nc"},
+  {"name": "md_undo_caret", "markdown": True, "steps": [("text", "line one\nline two"), ("key", "ctrl+Home End"), ("type", " more"), ("key", "ctrl+z"), ("type", "X")], "want": "line oneX\nline two"},
 ]

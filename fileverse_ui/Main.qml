@@ -868,12 +868,20 @@ Item {
         }
         if (at < 0) return null
         var next = t.substring(0, at) + step.removed + t.substring(at + step.inserted.length)
+        var area = root.visualEdit ? richArea : mdArea
+        var plainOf = function () { return root.visualEdit ? richArea.getText(0, richArea.length) : mdArea.text }
+        var caret = area.cursorPosition, before = plainOf()
         root.histApplying = true
-        var caret = root.visualEdit ? richArea.cursorPosition : mdArea.cursorPosition
         if (root.visualEdit) richArea.text = next; else mdArea.text = next
         root.histApplying = false
-        var area = root.visualEdit ? richArea : mdArea
-        area.cursorPosition = Math.max(0, Math.min(step.caret, area.length))
+        // the cursor goes where the text changed (the end of what came back, or where the
+        // removed text was), not to the start or end of the document
+        var after = plainOf(), p = 0, n = Math.min(before.length, after.length)
+        while (p < n && before.charCodeAt(p) === after.charCodeAt(p)) p++
+        var q = 0
+        while (q < n - p && before.charCodeAt(before.length - 1 - q) === after.charCodeAt(after.length - 1 - q)) q++
+        // (a formatting change leaves the text the same: the cursor stays where it was)
+        area.cursorPosition = Math.max(0, Math.min(before === after ? caret : after.length - q, area.length))
         area.forceActiveFocus()
         root.histBase = root.histText()
         root.editorChanged()
@@ -2326,17 +2334,17 @@ Item {
                                 if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true
                             }
                             Keys.onTabPressed: function (e) { root.editorTab(false); e.accepted = true }
-                            Keys.onReleased: function (e) { if (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) root.commitStep() }
                             Keys.onBacktabPressed: function (e) { root.editorTab(true); e.accepted = true }
                             Keys.onPressed: function (e) {
                                 var ctrl = e.modifiers & Qt.ControlModifier
+                                // a word ends a step: the space or Enter after it starts the next one
+                                if (!ctrl && (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter)) root.commitStep()
                                 if (ctrl && e.key === Qt.Key_Z) { if (e.modifiers & Qt.ShiftModifier) root.redoStep(); else root.undoStep(); e.accepted = true }
                                 else if (ctrl && e.key === Qt.Key_Y) { root.redoStep(); e.accepted = true }
                                 else if (ctrl && e.key === Qt.Key_B) { root.toggleFont("bold"); e.accepted = true }
                                 else if (ctrl && e.key === Qt.Key_I) { root.toggleFont("italic"); e.accepted = true }
                                 else if (ctrl && e.key === Qt.Key_K) { root.askLink(); e.accepted = true }
                                 else if (!ctrl && e.key === Qt.Key_Space && root.typedShortcut()) e.accepted = true
-                                // a word ends a step (space or Enter typed after it)
                                 // Tab nests a list item, Shift+Tab lifts it; in code it indents. It
                                 // never moves the focus out of the editor.
                                 else if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) {
@@ -2392,11 +2400,13 @@ Item {
                                 if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_Z || e.key === Qt.Key_Y)) e.accepted = true
                             }
                             Keys.onPressed: function (e) {
-                                if (!(e.modifiers & Qt.ControlModifier)) return
+                                if (!(e.modifiers & Qt.ControlModifier)) {
+                                    if (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) root.commitStep()
+                                    return
+                                }
                                 if (e.key === Qt.Key_Z) { if (e.modifiers & Qt.ShiftModifier) root.redoStep(); else root.undoStep(); e.accepted = true }
                                 else if (e.key === Qt.Key_Y) { root.redoStep(); e.accepted = true }
                             }
-                            Keys.onReleased: function (e) { if (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) root.commitStep() }
                             Keys.onTabPressed: function (e) { mdArea.insert(mdArea.cursorPosition, "    "); e.accepted = true }
                             Keys.onBacktabPressed: function (e) {
                                 var t = mdArea.text, c = mdArea.cursorPosition, s0 = t.lastIndexOf("\n", c - 1) + 1

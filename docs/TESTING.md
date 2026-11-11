@@ -1,5 +1,17 @@
 # What was tested, and how to repeat it
 
+## 0.14.5 (view): the cursor after undo (2026-11-11)
+
+vpavlin: after undo the cursor jumped to the end of the document or the next line. Undo put
+it back at the step's start, counted before the editor reloaded. Now it goes where the text
+changed (the end of what came back, or where the removed text was), found by comparing the
+text before and after; after undoing a formatting change it stays where it was. Steps now
+close just before a space or Enter, so undo removes " word" with its space, as Google Docs does.
+
+Tests (tools/gui-tests/cases4.py, 15): undo, then type on: the letter lands where the undone
+word was, in the visual and the Markdown editor, also after redo. Reproduced first on 0.14.4
+(the letter went to the start of the next line).
+
 ## 0.14.4: behave like Google Docs, LibreOffice and ddocs.new (2026-11-11)
 
 vpavlin: the editor should do what people are used to. Compared with ddocs.new's editor
