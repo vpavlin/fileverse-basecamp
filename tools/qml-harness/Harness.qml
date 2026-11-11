@@ -12,7 +12,9 @@ Window {
     visible: true
 
     readonly property var args: Qt.application.arguments.slice(Qt.application.arguments.indexOf("--") + 1)
-    property string mode: args[0]
+    // MODE or MODE-light / MODE-dark: the paper colours to show
+    property string mode: String(args[0]).replace(/-(light|dark)$/, "")
+    property string paperArg: (String(args[0]).match(/-(light|dark)$/) || [null, "basecamp"])[1]
     property int slideAt: args.length > 2 ? parseInt(args[1]) : 0
     property var docJson: null
     property var lastJob: ""
@@ -50,7 +52,7 @@ Window {
     }
 
     function answer(method, args) {
-        if (method === "snapshot") return { ok: true, version: "0.3.0", rpc: "eth_rpc_module (chain 100)", gateways: ["https://gateway.pinata.cloud"], storedBlocks: 6,
+        if (method === "snapshot") return { ok: true, prefs: { paper: win.paperArg }, version: "0.3.0", rpc: "eth_rpc_module (chain 100)", gateways: ["https://gateway.pinata.cloud"], storedBlocks: 6,
             node: { api: "", gateway: "" },
             recent: [ { url: "x", portal: "0x81fb962e2088De6925AffA4E068dd3FAF3EFE163", fileId: 57, title: "Fileverse Agents SDK - Docs 💛", kind: "ddoc", kept: ["a"], inStorage: ["a"] },
                       { url: "fvbc://ipfs/b#key=k", layout: "logos", title: "Logos plan", kind: "ddoc" },

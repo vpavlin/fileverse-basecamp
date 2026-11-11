@@ -991,15 +991,38 @@ Item {
         else root.blockKind = kind
     }
     // Qt draws links in a fixed dark blue; give them the theme's colour.
+    // ── the paper: documents, the editors, the preview and slides can be read on white
+    // (Light), on a very dark grey (Dark) or in Basecamp's own colours. Kept as a preference.
+    readonly property string paper: (root.snap && root.snap.prefs && root.snap.prefs.paper) ? String(root.snap.prefs.paper) : "basecamp"
+    readonly property bool paperLight: root.paper === "light"
+    readonly property bool paperDark: root.paper === "dark"
+    readonly property color paperBg: root.paperLight ? "#ffffff" : root.paperDark ? "#1c1c1e" : Theme.palette.backgroundSecondary
+    readonly property color paperInset: root.paperLight ? "#f7f7f7" : root.paperDark ? "#161618" : Theme.palette.backgroundInset
+    readonly property color paperText: root.paperLight ? "#1b1b1b" : root.paperDark ? "#ececec" : Theme.palette.text
+    readonly property color paperSub: root.paperLight ? "#5f6368" : root.paperDark ? "#a1a1a6" : Theme.palette.textSecondary
+    readonly property color paperFaint: root.paperLight ? "#80868b" : root.paperDark ? "#7c7c80" : Theme.palette.textTertiary
+    readonly property color paperCode: root.paperLight ? "#f1f3f4" : root.paperDark ? "#2c2c2e" : Theme.palette.surfaceRaised
+    readonly property color paperCodeText: root.paperLight ? "#b3361b" : Theme.palette.primary
+    readonly property color paperBorder: root.paperLight ? "#dadce0" : root.paperDark ? "#3a3a3c" : Theme.palette.borderHairline
+    readonly property color paperLink: root.paperLight ? "#c2410c" : Theme.palette.primary
+    function setPaper(kind) {
+        root.core("set_pref", ["paper", JSON.stringify(kind)], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok) { root.fail((r && r.error) || "Could not save the setting"); return }
+            var sn = JSON.parse(JSON.stringify(root.snap)); sn.prefs = r.prefs; root.snap = sn
+            // the visual editor holds its colours in its text: show the document again
+            if (root.mode === "edit" && root.draft && root.visualEdit) root.saveDraft(function () { root.loadEditor(root.draft.markdown) })
+        })
+    }
     function linkTint(html) {
-        var c = String(Theme.palette.primary)
+        var c = String(root.paperLink)
         return String(html).replace(/<a href="([^"]*)">/g, '<a href="$1"><span style="color:' + c + ';">').replace(/<\/a>/g, "</span></a>")
     }
     function tintLinks(html) { return root.codeTint(root.linkTint(html)) }
     // Inline code stands out: monospace on a tinted background in the accent colour (Qt's
     // rich text knows <code> only as a font; the reading view's styled text not at all).
     function codeStyle() {
-        return "font-family:'monospace'; background-color:" + String(Theme.palette.surfaceRaised) + "; color:" + String(Theme.palette.primary) + ";"
+        return "font-family:'monospace'; background-color:" + String(root.paperCode) + "; color:" + String(root.paperCodeText) + ";"
     }
     function codeSpan(escaped) { return '<code style="' + root.codeStyle() + '">' + escaped + "</code>" }
     function codeTint(html) { return String(html).replace(/<code>/g, '<code style="' + root.codeStyle() + '">') }
@@ -1720,6 +1743,18 @@ Item {
                     anchors.margins: 16
                     spacing: Theme.spacing.small
                     LogosText { textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold; text: "Settings" }
+                    Caption { text: "PAPER"; Layout.topMargin: 4 }
+                    Hint { text: "The colours documents are read and written in (the editors, the preview, documents and slides). The rest of the app keeps Basecamp's colours." }
+                    RowLayout {
+                        Repeater {
+                            model: [{ k: "basecamp", t: "Basecamp" }, { k: "light", t: "Light" }, { k: "dark", t: "Dark" }]
+                            LogosButton {
+                                compact: true; text: modelData.t
+                                variant: root.paper === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                onClicked: root.setPaper(modelData.k)
+                            }
+                        }
+                    }
                     Caption { text: "SHARED DOCUMENTS: NETWORKS"; Layout.topMargin: 4 }
                     Hint {
                         text: root.networksSettable
@@ -2285,6 +2320,8 @@ Item {
                 // visual: the document as a page you type into
                 Card {
                     visible: root.visualEdit
+                    color: root.paperBg
+                    border.color: root.paperBorder
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     ScrollView {
@@ -2299,10 +2336,11 @@ Item {
                             wrapMode: TextEdit.Wrap
                             selectByMouse: true
                             persistentSelection: true
-                            color: Theme.palette.text
+                            color: root.paperText
                             selectionColor: Theme.colors.getColor(Theme.palette.primary, 0.35)
-                            selectedTextColor: Theme.palette.text
-                            palette.link: Theme.palette.primary
+                            selectedTextColor: root.paperText
+                            placeholderTextColor: root.paperFaint
+                            palette.link: root.paperLink
                             font.family: Theme.typography.publicSans
                             font.pixelSize: 16
                             leftPadding: side
@@ -2310,7 +2348,6 @@ Item {
                             topPadding: 28
                             bottomPadding: 60
                             placeholderText: "Start writing… (# heading, - list, [] task, > quote)"
-                            placeholderTextColor: Theme.palette.textPlaceholder
                             background: Item {}
                             onTextChanged: { root.applyPendingFont(); root.inlineRule(); root.editorChanged() }
                             onCursorPositionChanged: { root.updateBlockKind(); root.cursorMoved() }
@@ -2399,14 +2436,14 @@ Item {
                         SplitView.minimumWidth: 200
                         TextArea {
                             id: mdArea
-                            color: Theme.palette.text
+                            color: root.paperText
                             font.pixelSize: 14
                             font.family: Theme.typography.mono
                             wrapMode: TextEdit.Wrap
                             selectByMouse: true
                             textFormat: TextEdit.PlainText
                             padding: 14
-                            background: Rectangle { color: Theme.palette.backgroundInset; radius: Theme.spacing.radiusLarge; border.color: Theme.palette.borderSubtle }
+                            background: Rectangle { color: root.paperInset; radius: Theme.spacing.radiusLarge; border.color: root.paperBorder }
                             onTextChanged: if (activeFocus) root.editorChanged()
                             // Tab indents (nested lists are four spaces), never leaves the editor
                             Keys.onShortcutOverride: function (e) {
@@ -2449,9 +2486,9 @@ Item {
                     }
                     Rectangle {
                         SplitView.fillWidth: true
-                        color: Theme.palette.backgroundSecondary
+                        color: root.paperBg
                         radius: Theme.spacing.radiusLarge
-                        border.color: Theme.palette.borderHairline
+                        border.color: root.paperBorder
                         ListView {
                             id: previewList
                             anchors.fill: parent
@@ -2494,6 +2531,8 @@ Item {
             // document body: a page of readable width
             Card {
                 visible: root.mode === "doc" && root.tabs.length > 0
+                color: root.paperBg
+                border.color: root.paperBorder
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 ListView {
@@ -2606,9 +2645,9 @@ Item {
             readonly property real indent: listItem ? (28 + (b.depth || 0) * 24) * fs : (b.depth || 0) * 22 * fs
             width: parent ? parent.width : 0
             height: body.implicitHeight + (b.callout ? 16 : 0)
-            color: b.callout ? Theme.palette.surfaceRaised : "transparent"
+            color: b.callout ? root.paperCode : "transparent"
             radius: Theme.spacing.radiusSmall
-            Rectangle { visible: !!b.quote; width: 3; height: parent.height; color: Theme.palette.border }
+            Rectangle { visible: !!b.quote; width: 3; height: parent.height; color: root.paperBorder }
             Text {
                 id: body
                 x: (b.quote ? 14 : 0) + (b.callout ? 8 : 0) + indent
@@ -2616,8 +2655,8 @@ Item {
                 width: parent.width - x - (b.callout ? 8 : 0)
                 wrapMode: Text.Wrap
                 textFormat: b.t === "image" || b.t === "embed" ? Text.PlainText : Text.RichText
-                color: b.t === "image" || b.t === "embed" ? Theme.palette.textTertiary : Theme.palette.text
-                linkColor: Theme.palette.primary
+                color: b.t === "image" || b.t === "embed" ? root.paperFaint : root.paperText
+                linkColor: root.paperLink
                 font.family: Theme.typography.publicSans
                 font.pixelSize: Math.round((heading ? [0, 28, 22, 18, 16, 15, 14][level] : 15) * fs)
                 font.bold: heading
@@ -2640,7 +2679,7 @@ Item {
                 horizontalAlignment: Text.AlignRight
                 textFormat: Text.PlainText
                 font: body.font
-                color: Theme.palette.textSecondary
+                color: root.paperSub
                 text: b.t === "oli" ? b.num + "." : b.t === "task" ? (b.checked ? "☑" : "☐") : ((b.depth || 0) % 2 ? "◦" : "•")
             }
         }
@@ -2652,7 +2691,7 @@ Item {
             readonly property real fs: parent && parent.fs ? parent.fs : 1
             width: parent ? parent.width : 0
             height: code.implicitHeight + 16
-            color: Theme.palette.surfaceRaised
+            color: root.paperCode
             radius: Theme.spacing.radiusSmall
             Text {
                 id: code
@@ -2662,7 +2701,7 @@ Item {
                 textFormat: Text.PlainText
                 font.family: Theme.typography.mono
                 font.pixelSize: Math.round(13 * fs)
-                color: Theme.palette.text
+                color: root.paperText
                 text: b.text
             }
         }
@@ -2672,7 +2711,7 @@ Item {
         Item {
             width: parent ? parent.width : 0
             height: 14
-            Rectangle { anchors.centerIn: parent; width: parent.width; height: 1; color: Theme.palette.border }
+            Rectangle { anchors.centerIn: parent; width: parent.width; height: 1; color: root.paperBorder }
         }
     }
     Component {
@@ -2694,8 +2733,8 @@ Item {
                         Rectangle {
                             width: tbl.width / Math.max(1, tbl.ncols)
                             height: cellText.implicitHeight + 10
-                            color: trow.ri === 0 ? Theme.palette.surfaceRaised : "transparent"
-                            border.color: Theme.palette.borderHairline
+                            color: trow.ri === 0 ? root.paperCode : "transparent"
+                            border.color: root.paperBorder
                             Text {
                                 id: cellText
                                 x: 5; y: 5
@@ -2705,8 +2744,8 @@ Item {
                                 font.family: Theme.typography.publicSans
                                 font.pixelSize: Math.round(13 * tbl.fs)
                                 font.bold: trow.ri === 0
-                                color: Theme.palette.text
-                                linkColor: Theme.palette.primary
+                                color: root.paperText
+                                linkColor: root.paperLink
                                 text: root.codeRead(root.linkTint(modelData))
                                 onLinkActivated: function (link) { root.openLink(link) }
                             }
@@ -2770,7 +2809,7 @@ Item {
                 visible: !ib.ready
                 anchors.fill: parent
                 radius: Theme.spacing.radiusLarge
-                color: Theme.palette.surfaceRaised
+                color: root.paperCode
                 LogosText {
                     anchors.centerIn: parent
                     width: parent.width - 24
@@ -2778,7 +2817,7 @@ Item {
                     wrapMode: Text.WordWrap
                     textFormat: Text.PlainText
                     font.pixelSize: Math.round(13 * ib.fs)
-                    color: Theme.palette.textTertiary
+                    color: root.paperFaint
                     text: !ib.b.img ? ("Image not available here" + (ib.b.text ? ": " + ib.b.text : ""))
                           : ib.src === "failed" ? "Image could not be loaded" : "Loading image…"
                 }
@@ -2788,12 +2827,13 @@ Item {
     // ── diagrams: a `mermaid` code block (as dDocs stores them), drawn by the core ──
     function isDiagram(b) { return !!b && b.t === "code" && String(b.lang || "").trim().toLowerCase() === "mermaid" }
     readonly property string diagramColors: JSON.stringify({
-        background: String(Theme.palette.backgroundSecondary), surface: String(Theme.palette.surface),
-        text: String(Theme.palette.text), textSecondary: String(Theme.palette.textSecondary),
-        border: String(Theme.palette.border), primary: String(Theme.palette.primary),
+        background: String(root.paperBg), surface: String(root.paperCode),
+        text: String(root.paperText), textSecondary: String(root.paperSub),
+        border: String(root.paperBorder), primary: String(root.paperLink),
         font: String(Theme.typography.publicSans)
     })
     property var diagramCache: ({})   // source -> "loading" | { url, w, h } | { error }
+    onDiagramColorsChanged: root.diagramCache = ({})   // drawn again in the paper's colours
     function diagramOf(source) {
         var c = root.diagramCache[source]
         if (c !== undefined) return c
@@ -2838,8 +2878,8 @@ Item {
                 visible: !db.ready && !db.failed
                 anchors.fill: parent
                 radius: Theme.spacing.radiusLarge
-                color: Theme.palette.surfaceRaised
-                LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: Math.round(13 * db.fs); color: Theme.palette.textTertiary; text: "Drawing diagram…" }
+                color: root.paperCode
+                LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: Math.round(13 * db.fs); color: root.paperFaint; text: "Drawing diagram…" }
             }
             // not drawable here: show its source, and why
             Column {
@@ -2849,7 +2889,7 @@ Item {
                 spacing: 4
                 LogosText {
                     width: parent.width; wrapMode: Text.WordWrap; textFormat: Text.PlainText
-                    font.pixelSize: Math.round(12 * db.fs); color: Theme.palette.textTertiary
+                    font.pixelSize: Math.round(12 * db.fs); color: root.paperFaint
                     text: "Diagram not drawn here (" + (db.failed ? db.d.error : "") + "); its source:"
                 }
                 Loader { width: parent.width; property var b: db.b; property real fs: db.fs; sourceComponent: codeBlock }
@@ -2990,7 +3030,7 @@ Item {
         // full-screen request) the window would otherwise open tiny.
         width: Screen.width > 0 ? Screen.width : 1280
         height: Screen.height > 0 ? Screen.height : 720
-        color: Theme.palette.background
+        color: root.paper === "basecamp" ? Theme.palette.background : root.paperBg
         onClosing: function (close) { root.leaveFullScreen() }
     }
     function toggleFullScreen() { if (root.fullScreen) root.leaveFullScreen(); else root.enterFullScreen() }
@@ -3046,7 +3086,7 @@ Item {
         id: deckPane
         visible: root.presenting && root.slide !== null
         anchors.fill: parent
-        color: Theme.palette.background
+        color: root.paper === "basecamp" ? Theme.palette.background : root.paperBg
         focus: root.presenting
         Keys.onPressed: function (e) {
             if (e.key === Qt.Key_Right || e.key === Qt.Key_Space || e.key === Qt.Key_PageDown || e.key === Qt.Key_Down) { root.nextSlide(); e.accepted = true }

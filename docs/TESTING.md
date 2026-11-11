@@ -1,5 +1,39 @@
 # What was tested, and how to repeat it
 
+## 0.15.0: published documents findable in Logos Storage; Light / Dark paper (2026-11-11)
+
+**Storage links.** vpavlin: a published link carried only the manifest's IPFS CID, so only
+the publishing device (which kept "IPFS CID -> Storage CID" in its own table) could use the
+Logos Storage copy. Now publishing copies the files to Storage first, writes the manifest with
+each file's Storage CID (`"storage": { ipfs CID: [storage CID, size] }`), copies that too, and
+the link carries the manifest's Storage CID: `fvbc://ipfs/<manifest>?ls=<storage cid>#key=…`.
+A reader uses the link's `ls` and the manifest's map for any block IPFS does not deliver;
+every block is still checked against its IPFS CID. Without Storage, publishing falls back to
+the IPFS-only link. Old links open as before. Storage is now always offered as a source.
+Tests: `a_link_carries_the_manifests_storage_cid`, `the_manifest_names_where_each_file_is_in_storage`.
+
+Found on the way: storage_module gives `manifests()` (the list of every stored item) one
+second (`DEFAULT_TIMEOUT_MS 1000`), so on a node with ~660 items it failed and publishing lost
+its Storage CIDs. Uploads now learn their CID from storage_module's `storageUploadDone` event
+(session id -> cid), with `manifests()` only as the fallback. A failed Storage fetch now says
+why (no Storage CID known, the download call's error, or not finished in 90 s).
+
+- Basecamp t: published "Storage link test": "Published to IPFS (ipfs_module) and Logos
+  Storage", link with `?ls=zDvZRw…`.
+- Basecamp u (gateways pointed at a dead address, no IPFS node): opening the link asked Logos
+  Storage for the manifest by its `ls` CID; the transfer did not complete in 90 s. Both Storage
+  nodes are behind NAT here ("TCP port mapping failed"); they connected and the block-exchange
+  stream closed. Device-to-device Storage transfer between NATed nodes is a known limit (a
+  reachable Storage node is needed); not verified end to end.
+- Seen: u without an IPFS node waits 60 s for ipfs_module before trying gateways and Storage.
+
+**Paper.** vpavlin: the Basecamp grey-on-beige is hard to read. Settings > Paper: Basecamp,
+Light (white, black text) or Dark (very dark grey). It colours the visual editor, the Markdown
+source and preview, documents, tables, code, diagrams and slides; the rest of the app keeps
+Basecamp's colours. Kept by the core (`set_pref`, the snapshot's `prefs`). Harness: doc-light,
+doc-dark, editmd-light, edit-light, settings. Basecamp t: switched Light and Dark on an open
+document; `settings.json` keeps `"prefs": {"paper": "dark"}`.
+
 ## 0.14.7: inline code stands out (2026-11-11)
 
 vpavlin: inline code (a path in backticks) must be highlighted. It was not: the reading view

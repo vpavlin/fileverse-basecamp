@@ -307,9 +307,21 @@ pub(crate) fn sniff_image(b: &[u8]) -> &'static str {
 pub fn open_published(gw: &Gateways, url: &str) -> Result<Value, String> {
     let (cid, key) = crate::publish::parse_link(url).ok_or("not a fvbc:// link")?;
     let mut prov = vec![];
+    // where the manifest is in Logos Storage (the link's `ls`), then where its files are
+    if let (Some(ls), Ok(c)) = (crate::publish::link_storage(url), crate::ipfs::Cid::parse(&cid)) {
+        gw.storage_hints.lock().unwrap().insert(c.to_v1(), (ls, 0));
+    }
     let manifest = fetch_json(gw, &cid, &mut prov)?;
     if !crate::publish::manifest_ok(&manifest) {
         return Err("this CID is not a published Basecamp document".into());
+    }
+    if let Some(m) = manifest.get("storage").and_then(Value::as_object) {
+        let mut h = gw.storage_hints.lock().unwrap();
+        for (k, v) in m {
+            if let (Some(ls), Ok(c)) = (v[0].as_str(), crate::ipfs::Cid::parse(k)) {
+                h.insert(c.to_v1(), (ls.to_string(), v[1].as_u64().unwrap_or(0)));
+            }
+        }
     }
     let mut steps = vec![format!("read the manifest {cid} (no chain record)")];
     let meta = fetch_json(gw, str_field(&manifest, "metadata"), &mut prov)?;

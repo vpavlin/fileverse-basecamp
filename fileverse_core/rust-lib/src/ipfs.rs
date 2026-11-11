@@ -307,6 +307,15 @@ pub struct Provenance {
 pub trait BlockSource: Send + Sync {
     fn name(&self) -> String;
     fn block(&self, cid: &Cid) -> Option<Vec<u8>>;
+    /// As `block`, told where the block is said to be in Logos Storage (from a link or a
+    /// manifest): `(storage CID, size or 0)`. The bytes are still checked against `cid`.
+    fn block_at(&self, cid: &Cid, _hint: Option<&(String, u64)>) -> Option<Vec<u8>> {
+        self.block(cid)
+    }
+    /// Why the last `block`/`block_at` returned nothing, when the source knows.
+    fn why_not(&self) -> Option<String> {
+        None
+    }
 }
 
 /// How long your own node may take for a block before we look elsewhere: a node
@@ -325,6 +334,9 @@ pub struct Gateways {
     /// Accept whole-file answers we cannot hash-check (dag-pb files from a gateway
     /// that does not serve raw blocks). Off by default.
     pub allow_unverified: bool,
+    /// Where blocks are said to be in Logos Storage (CIDv1 -> storage CID, size or 0),
+    /// learnt while reading (a link's `ls`, a manifest's `storage`).
+    pub storage_hints: std::sync::Mutex<std::collections::HashMap<String, (String, u64)>>,
     client: reqwest::blocking::Client,
     quick: reqwest::blocking::Client,
 }
@@ -341,7 +353,7 @@ impl Gateways {
             .user_agent("fileverse-basecamp-viewer")
             .build()
             .expect("http client");
-        Gateways { node: None, urls, extra: vec![], cache_dir, allow_unverified: false, client, quick }
+        Gateways { node: None, urls, extra: vec![], cache_dir, allow_unverified: false, storage_hints: Default::default(), client, quick }
     }
 
     fn cached(&self, cid: &Cid) -> Option<Vec<u8>> {
@@ -427,14 +439,15 @@ impl Gateways {
                 Err(e) => errors.push(format!("{g}: {}", short(&e))),
             }
         }
+        let hint = self.storage_hints.lock().unwrap().get(&cid.to_v1()).cloned();
         for src in &self.extra {
-            match src.block(cid) {
+            match src.block_at(cid, hint.as_ref()) {
                 Some(b) if Sha256::digest(&b).as_slice() == cid.digest => {
                     self.store(cid, &b);
                     return Some((b, src.name()));
                 }
                 Some(_) => errors.push(format!("{}: block does not match its CID", src.name())),
-                None => errors.push(format!("{}: not found", src.name())),
+                None => errors.push(format!("{}: {}", src.name(), src.why_not().unwrap_or_else(|| "not found".into()))),
             }
         }
         None

@@ -63,6 +63,29 @@ pub struct Published {
     pub manifest: String,
     /// Every block (CIDv1, bytes): manifest first.
     pub blocks: Vec<(String, Vec<u8>)>,
+    /// The manifest as JSON, to add Storage CIDs to once the files are in Logos Storage.
+    pub manifest_json: Value,
+    pub secret: [u8; 32],
+}
+
+/// The manifest again with where each file is in Logos Storage (`"storage": { ipfs CID:
+/// [storage CID, size] }`), so a reader anywhere can fetch them from Storage: its block
+/// and CID.
+pub fn with_storage(manifest: &Value, storage: &[(String, String, u64)]) -> Result<(String, Vec<u8>), String> {
+    let mut m = manifest.clone();
+    let map: serde_json::Map<String, Value> = storage.iter().map(|(ipfs, ls, n)| (ipfs.clone(), json!([ls, n]))).collect();
+    m["storage"] = Value::Object(map);
+    let bytes = m.to_string().into_bytes();
+    let cid = raw_cid(&bytes).to_v1();
+    Ok((cid, bytes))
+}
+
+/// The share link: the manifest's IPFS CID, and its Logos Storage CID when it has one.
+pub fn link_for(manifest_cid: &str, storage_cid: Option<&str>, secret: &[u8; 32]) -> String {
+    match storage_cid {
+        Some(ls) if !ls.is_empty() => format!("{LINK_PREFIX}{manifest_cid}?ls={ls}#key={}", b64::encode_url(secret)),
+        _ => format!("{LINK_PREFIX}{manifest_cid}#key={}", b64::encode_url(secret)),
+    }
 }
 
 fn add(blocks: &mut Vec<(String, Vec<u8>)>, what: &str, bytes: Vec<u8>) -> Result<String, String> {
@@ -114,20 +137,62 @@ pub fn build(id: &str, title: &str, markdown: &str, secret: &[u8; 32], now_ms: u
     let manifest_cid = add(&mut blocks, "manifest", manifest.to_string().into_bytes())?;
     blocks.rotate_right(1);
     Ok(Published {
-        link: format!("{LINK_PREFIX}{manifest_cid}#key={}", b64::encode_url(secret)),
+        link: link_for(&manifest_cid, None, secret),
         manifest: manifest_cid,
         blocks,
+        manifest_json: manifest,
+        secret: *secret,
     })
 }
 
-/// `fvbc://ipfs/<cid>#key=<secret>` -> (cid, secret).
+/// `fvbc://ipfs/<cid>[?ls=<storage cid>]#key=<secret>` -> (cid, secret).
 pub fn parse_link(url: &str) -> Option<(String, String)> {
     let rest = url.trim().strip_prefix(LINK_PREFIX)?;
-    let (cid, frag) = rest.split_once('#')?;
+    let (path, frag) = rest.split_once('#')?;
+    let cid = path.split('?').next().unwrap_or("");
     let key = frag.split('&').find_map(|p| p.strip_prefix("key="))?;
     Some((cid.trim_end_matches('/').to_string(), key.to_string()))
 }
 
+/// The manifest's Logos Storage CID from a link (`?ls=`), if it has one.
+pub fn link_storage(url: &str) -> Option<String> {
+    let rest = url.trim().strip_prefix(LINK_PREFIX)?;
+    let path = rest.split('#').next().unwrap_or("");
+    let q = path.split_once('?')?.1;
+    q.split('&').find_map(|p| p.strip_prefix("ls=")).filter(|s| !s.is_empty()).map(str::to_string)
+}
+
 pub fn manifest_ok(v: &Value) -> bool {
     v.get("type").and_then(Value::as_str) == Some(MANIFEST_TYPE)
+}
+
+#[cfg(test)]
+mod storage_link_tests {
+    use super::*;
+
+    #[test]
+    fn a_link_carries_the_manifests_storage_cid() {
+        let secret = [7u8; 32];
+        let l = link_for("bafkreimanifest", Some("zDvStorageCid"), &secret);
+        assert!(l.starts_with("fvbc://ipfs/bafkreimanifest?ls=zDvStorageCid#key="), "{l}");
+        assert_eq!(parse_link(&l).unwrap().0, "bafkreimanifest");
+        assert_eq!(link_storage(&l).as_deref(), Some("zDvStorageCid"));
+        // old links: no ls, still parsed
+        let old = link_for("bafkreimanifest", None, &secret);
+        assert_eq!(parse_link(&old).unwrap().0, "bafkreimanifest");
+        assert_eq!(link_storage(&old), None);
+    }
+
+    #[test]
+    fn the_manifest_names_where_each_file_is_in_storage() {
+        let p = build("d1", "T", "# T\n\nhello\n", &[1u8; 32], 1).unwrap();
+        let list: Vec<(String, String, u64)> = p.blocks.iter().filter(|(c, _)| *c != p.manifest).map(|(c, b)| (c.clone(), format!("ls-{c}"), b.len() as u64)).collect();
+        let (cid, bytes) = with_storage(&p.manifest_json, &list).unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert!(manifest_ok(&v));
+        assert_eq!(v["storage"].as_object().unwrap().len(), list.len());
+        assert_eq!(v["content"], p.manifest_json["content"]);
+        assert_eq!(cid, raw_cid(&bytes).to_v1());
+        assert_ne!(cid, p.manifest);
+    }
 }

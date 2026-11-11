@@ -46,6 +46,9 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn snapshot(&self) -> String;
     /// Replace the IPFS gateway list (a JSON array of base URLs). An empty array restores the defaults.
     fn set_gateways(&self, gateways_json: String) -> String;
+    /// Remember one of the view's preferences (`key`, a JSON value); the snapshot's
+    /// `prefs` has them all.
+    fn set_pref(&self, key: String, value_json: String) -> String;
     /// Remove a document from the recent list.
     fn forget(&self, url: String) -> String;
     /// A manually configured IPFS node (Kubo RPC API and gateway), used when ipfs_module is not installed.
@@ -306,6 +309,7 @@ type StorageMap = HashMap<String, (String, u64)>;
 struct StorageSource {
     map: StorageMap,
     tmp: PathBuf,
+    why: Mutex<Option<String>>,
 }
 
 impl BlockSource for StorageSource {
@@ -314,36 +318,73 @@ impl BlockSource for StorageSource {
     }
 
     fn block(&self, cid: &Cid) -> Option<Vec<u8>> {
-        let (ls_cid, size) = self.map.get(&cid.to_v1())?.clone();
+        self.block_at(cid, None)
+    }
+
+    // A block this device copied (its own table), or one a link or manifest says is in
+    // Logos Storage. Without a size the download is done when its bytes hash to `cid`.
+    fn why_not(&self) -> Option<String> {
+        self.why.lock().unwrap().clone()
+    }
+
+    fn block_at(&self, cid: &Cid, hint: Option<&(String, u64)>) -> Option<Vec<u8>> {
+        *self.why.lock().unwrap() = None;
+        let Some((ls_cid, size)) = self.map.get(&cid.to_v1()).or(hint).cloned() else {
+            *self.why.lock().unwrap() = Some("not known there (no Storage CID for it)".into());
+            return None;
+        };
         let _ = std::fs::create_dir_all(&self.tmp);
         let path = self.tmp.join(format!("dl-{}", cid.to_v1()));
         let _ = std::fs::remove_file(&path);
         let client = storage_module::StorageModuleClient::new();
-        unwrap_result(
+        if let Err(e) = unwrap_result(
             client.download_to_url_with_timeout(&ls_cid, &path.to_string_lossy(), false, 65536, false, true, STORAGE_CALL),
-            "Logos Storage download",
-        )
-        .ok()?;
+            "download",
+        ) {
+            *self.why.lock().unwrap() = Some(format!("{ls_cid}: {e}"));
+            return None;
+        }
         let t0 = Instant::now();
         while t0.elapsed() < STORAGE_WAIT {
-            if std::fs::metadata(&path).map(|m| m.len() == size).unwrap_or(false) {
+            let len = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            let done = if size > 0 { len == size } else { len > 0 && std::fs::read(&path).map(|b| Sha256::digest(&b).as_slice() == cid.digest).unwrap_or(false) };
+            if done {
                 let b = std::fs::read(&path).ok();
                 let _ = std::fs::remove_file(&path);
                 return b;
             }
             std::thread::sleep(Duration::from_millis(300));
         }
+        let _ = std::fs::remove_file(&path);
+        *self.why.lock().unwrap() = Some(format!("{ls_cid}: the download did not finish in {} s", STORAGE_WAIT.as_secs()));
         None
     }
 }
 
-/// Upload blocks to Logos Storage, one file per block named by its IPFS CID, and
-/// learn each one's Storage CID from `manifests()` once its upload completes.
+/// The JSON object of a storage_module event (it arrives as a JSON string, an object, or
+/// an array holding one of those).
+fn storage_event(v: &Value) -> Option<Value> {
+    match v {
+        Value::Object(_) => Some(v.clone()),
+        Value::String(s) => serde_json::from_str(s).ok(),
+        Value::Array(a) => a.iter().find_map(storage_event),
+        _ => None,
+    }
+}
+
+/// Upload blocks to Logos Storage, one file per block named by its IPFS CID, and learn
+/// each one's Storage CID from its `storageUploadDone` event (the session id the upload
+/// returned, and the CID). Listing every stored item (`manifests()`) instead is the
+/// fallback: storage_module gives that call one second, too little on a node with many
+/// items.
 fn copy_blocks_to_storage(gw: &Gateways, blocks: &[String], known: &StorageMap, tmp: &Path) -> Result<StorageMap, String> {
     let client = storage_module::StorageModuleClient::new();
     std::fs::create_dir_all(tmp).map_err(|e| e.to_string())?;
+    // listen before uploading, so no completion is missed
+    let mut proxy = logos_rust_sdk::LogosModuleSDK::new().plugin("storage_module");
+    let events = proxy.on("storageUploadDone").ok();
     let mut added = StorageMap::new();
-    let mut waiting = vec![];
+    let mut waiting: Vec<(String, u64, String)> = vec![]; // (ipfs cid, size, session)
     for b in blocks {
         if known.contains_key(b) {
             continue;
@@ -351,18 +392,45 @@ fn copy_blocks_to_storage(gw: &Gateways, blocks: &[String], known: &StorageMap, 
         let bytes = gw.block_bytes(b)?;
         let path = tmp.join(b);
         std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-        unwrap_result(client.upload_url_with_timeout(&path.to_string_lossy(), 65536, true, STORAGE_CALL), "Logos Storage upload")?;
-        waiting.push((b.clone(), bytes.len() as u64));
+        let session = unwrap_result(client.upload_url_with_timeout(&path.to_string_lossy(), 65536, true, STORAGE_CALL), "Logos Storage upload")?;
+        waiting.push((b.clone(), bytes.len() as u64, session.as_str().unwrap_or("").to_string()));
     }
     let t0 = Instant::now();
+    if let Some(sub) = &events {
+        while !waiting.is_empty() && t0.elapsed() < STORAGE_WAIT {
+            match sub.receiver().recv_timeout(Duration::from_millis(500)) {
+                Ok(ev) => {
+                    let Some(e) = storage_event(&ev.data) else { continue };
+                    let sid = e["sessionId"].as_str().unwrap_or("");
+                    let Some(i) = waiting.iter().position(|w| !w.2.is_empty() && w.2 == sid) else { continue };
+                    let (name, size, _) = waiting.remove(i);
+                    let _ = std::fs::remove_file(tmp.join(&name));
+                    match (e["success"].as_bool(), e["cid"].as_str()) {
+                        (Some(true), Some(cid)) if !cid.is_empty() => {
+                            added.insert(name, (cid.to_string(), size));
+                        }
+                        _ => return Err(format!("Logos Storage upload: {}", e["error"].as_str().unwrap_or("failed"))),
+                    }
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                Err(_) => break,
+            }
+        }
+    }
+    // no events (or some missed): look the rest up in the list of stored items
+    let deadline = Instant::now() + STORAGE_WAIT;
     while !waiting.is_empty() {
-        if t0.elapsed() > STORAGE_WAIT {
+        if Instant::now() > deadline {
             return Err(format!("Logos Storage did not finish {} upload(s) in time", waiting.len()));
         }
         std::thread::sleep(Duration::from_millis(500));
-        let list = unwrap_result(client.manifests_with_timeout(STORAGE_CALL), "Logos Storage manifests")?;
+        let list = match unwrap_result(client.manifests_with_timeout(STORAGE_CALL), "Logos Storage manifests") {
+            Ok(l) => l,
+            Err(e) if Instant::now() > deadline => return Err(e),
+            Err(_) => continue,
+        };
         let list = list.as_array().cloned().unwrap_or_default();
-        waiting.retain(|(name, size)| {
+        waiting.retain(|(name, size, _)| {
             match list.iter().find(|m| m["filename"].as_str() == Some(name.as_str()) && m["datasetSize"].as_u64() == Some(*size)) {
                 Some(m) => {
                     added.insert(name.clone(), (m["cid"].as_str().unwrap_or("").to_string(), *size));
@@ -402,6 +470,8 @@ struct State {
     seq: u64,
     chain_seeded: bool,
     ipfs_module_absent_until: Option<Instant>,
+    /// The view's own preferences (e.g. the paper's colours), kept with the settings.
+    prefs: serde_json::Map<String, Value>,
 }
 
 #[derive(Default)]
@@ -439,7 +509,7 @@ impl State {
             let storage: HashMap<&String, Value> = self.storage.iter().map(|(k, (c, n))| (k, json!([c, n]))).collect();
             let v = json!({
                 "gateways": self.gateways, "recent": self.recent, "nodeApi": self.node_api,
-                "nodeGateway": self.node_gateway, "storage": storage,
+                "nodeGateway": self.node_gateway, "storage": storage, "prefs": self.prefs,
             });
             // Recent entries hold share-link keys: private to this user.
             write_private(&p, &v.to_string());
@@ -481,6 +551,7 @@ impl State {
                 self.recent = v["recent"].as_array().cloned().unwrap_or_default();
                 self.node_api = v["nodeApi"].as_str().unwrap_or("").to_string();
                 self.node_gateway = v["nodeGateway"].as_str().unwrap_or("").to_string();
+                self.prefs = v["prefs"].as_object().cloned().unwrap_or_default();
                 if let Some(m) = v["storage"].as_object() {
                     for (k, e) in m {
                         if let (Some(c), Some(n)) = (e[0].as_str(), e[1].as_u64()) {
@@ -597,9 +668,8 @@ impl FileverseCoreModuleImpl {
                 gw.node = Some((n.gateway.clone(), n.api.clone()));
             }
         }
-        if !s.storage.is_empty() {
-            gw.extra.push(Box::new(StorageSource { map: s.storage.clone(), tmp: s.path("tmp").unwrap_or_else(std::env::temp_dir) }));
-        }
+        // always: besides this device's own copies, links and manifests say where blocks are
+        gw.extra.push(Box::new(StorageSource { map: s.storage.clone(), tmp: s.path("tmp").unwrap_or_else(std::env::temp_dir), why: Mutex::new(None) }));
         gw
     }
 
@@ -897,9 +967,22 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             "portals": portals,
             "drafts": drafts,
             "storedBlocks": s.storage.len(),
+            "prefs": s.prefs,
             "pending": s.jobs.values().filter(|j| j.state == "pending").count(),
         })
         .to_string()
+    }
+
+    fn set_pref(&self, key: String, value_json: String) -> String {
+        let v: Value = serde_json::from_str(&value_json).unwrap_or(Value::String(value_json));
+        let key = key.trim().to_string();
+        if key.is_empty() || key.len() > 64 {
+            return err("bad preference name");
+        }
+        let mut s = self.state.lock().unwrap();
+        s.prefs.insert(key, v);
+        s.save();
+        json!({ "ok": true, "prefs": s.prefs }).to_string()
     }
 
     fn set_gateways(&self, gateways_json: String) -> String {
@@ -1499,8 +1582,6 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             Err(e) => return err(e),
         };
         built.blocks.extend(image_blocks);
-        let link = built.link.clone();
-        let link2 = link.clone();
         self.run_job(
             move |me, _job| {
                 let node = me.node(Duration::from_secs(2));
@@ -1508,9 +1589,47 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 for (cid, bytes) in &built.blocks {
                     gw.cache_block(&Cid::parse(cid)?, bytes);
                 }
-                let names: Vec<String> = built.blocks.iter().map(|(c, _)| c.clone()).collect();
-                let mut out = json!({ "ok": true, "link": built.link, "manifest": built.manifest, "blocks": names });
                 let mut notes = vec![];
+                // Logos Storage first: the files, then a manifest that says where they are
+                // in Storage, itself copied there; the link carries its Storage CID (`ls`), so
+                // a reader anywhere can fetch the document from Storage, not only this device.
+                let (known, tmp) = {
+                    let s = me.state.lock().unwrap();
+                    (s.storage.clone(), s.path("tmp").unwrap_or_else(std::env::temp_dir))
+                };
+                let files: Vec<String> = built.blocks.iter().map(|(c, _)| c.clone()).filter(|c| *c != built.manifest).collect();
+                let mut stored: StorageMap = StorageMap::new();
+                let (mut manifest, mut link) = (built.manifest.clone(), built.link.clone());
+                let mut storage_err: Option<String> = None;
+                match copy_blocks_to_storage(&gw, &files, &known, &tmp) {
+                    Ok(added) => {
+                        stored.extend(added);
+                        let all = files.iter().map(|f| stored.get(f).or(known.get(f)).map(|(c, n)| (f.clone(), c.clone(), *n))).collect::<Option<Vec<_>>>();
+                        match all {
+                            Some(list) => {
+                                let (m_cid, m_bytes) = publish::with_storage(&built.manifest_json, &list)?;
+                                gw.cache_block(&Cid::parse(&m_cid)?, &m_bytes);
+                                match copy_blocks_to_storage(&gw, &[m_cid.clone()], &known, &tmp) {
+                                    Ok(m_added) => {
+                                        let ls = m_added.get(&m_cid).map(|(c, _)| c.clone());
+                                        stored.extend(m_added);
+                                        link = publish::link_for(&m_cid, ls.as_deref(), &built.secret);
+                                        manifest = m_cid;
+                                    }
+                                    Err(e) => storage_err = Some(e),
+                                }
+                            }
+                            None => storage_err = Some("not every file reached Logos Storage".into()),
+                        }
+                    }
+                    Err(e) => storage_err = Some(e),
+                }
+                if let Some(e) = &storage_err {
+                    notes.push(format!("Logos Storage: {e}"));
+                }
+                let mut names: Vec<String> = vec![manifest.clone()];
+                names.extend(files.iter().cloned());
+                let mut out = json!({ "ok": true, "link": link, "manifest": manifest, "blocks": names });
                 match &node {
                     Some(n) => match Node::new(&n.api, Duration::from_secs(60)).keep(&gw, &names, &names) {
                         Ok(_) => {
@@ -1521,16 +1640,9 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                     },
                     None => notes.push("IPFS: no node available, so only this device and Logos Storage hold it".into()),
                 }
-                let (known, tmp) = {
-                    let s = me.state.lock().unwrap();
-                    (s.storage.clone(), s.path("tmp").unwrap_or_else(std::env::temp_dir))
-                };
-                match copy_blocks_to_storage(&gw, &names, &known, &tmp) {
-                    Ok(added) => {
-                        let map: HashMap<&String, Value> = added.iter().map(|(k, (c, n))| (k, json!([c, n]))).collect();
-                        out["storage"] = json!(map);
-                    }
-                    Err(e) => notes.push(format!("Logos Storage: {e}")),
+                if !stored.is_empty() {
+                    let map: HashMap<&String, Value> = stored.iter().map(|(k, (c, n))| (k, json!([c, n]))).collect();
+                    out["storage"] = json!(map);
                 }
                 if out.get("ipfs").is_none() && out.get("storage").is_none() {
                     return Err(format!("published nowhere: {}", notes.join("; ")));
@@ -1539,6 +1651,8 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 Ok(out)
             },
             move |s, v| {
+                let link = v["link"].as_str().unwrap_or("").to_string();
+                let link2 = link.clone();
                 if let Some(m) = v["storage"].as_object() {
                     for (k, e) in m {
                         if let (Some(c), Some(n)) = (e[0].as_str(), e[1].as_u64()) {
