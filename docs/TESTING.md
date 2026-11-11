@@ -1,5 +1,16 @@
 # What was tested, and how to repeat it
 
+## 0.14.6 (view): lists set in from the text (2026-11-11)
+
+vpavlin: documents read condensed, and top-level list items sat at the left edge with the
+text, so lists, paragraphs and headings were hard to tell apart. The reading view (documents,
+the Markdown preview, slides) drew a list item as "•  text" with no indent. Now list items are
+indented 28 px (24 more per level) with the bullet, number or checkbox in a hanging margin, so
+wrapped lines align with the text; nested bullets are hollow. A little more space above H1/H2
+and after paragraphs; list items stay close. The visual editor already indented lists (Qt).
+
+- Harness: doc mode (the SDK documentation's list), before and after.
+
 ## 0.14.5 (view): the cursor after undo (2026-11-11)
 
 vpavlin: after undo the cursor jumped to the end of the document or the next line. Undo put

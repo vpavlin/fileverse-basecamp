@@ -2586,6 +2586,10 @@ Item {
             readonly property real fs: parent && parent.fs ? parent.fs : 1
             readonly property bool heading: b.t.length === 2 && b.t.charAt(0) === "h"
             readonly property int level: heading ? parseInt(b.t.charAt(1)) : 0
+            // lists sit in from the text, with the marker in a hanging margin (as Google Docs
+            // and ddocs.new show them), one step further per level
+            readonly property bool listItem: b.t === "li" || b.t === "oli" || b.t === "task"
+            readonly property real indent: listItem ? (28 + (b.depth || 0) * 24) * fs : (b.depth || 0) * 22 * fs
             width: parent ? parent.width : 0
             height: body.implicitHeight + (b.callout ? 16 : 0)
             color: b.callout ? Theme.palette.surfaceRaised : "transparent"
@@ -2593,7 +2597,7 @@ Item {
             Rectangle { visible: !!b.quote; width: 3; height: parent.height; color: Theme.palette.border }
             Text {
                 id: body
-                x: (b.quote ? 14 : 0) + (b.callout ? 8 : 0) + (b.depth || 0) * 22 * fs
+                x: (b.quote ? 14 : 0) + (b.callout ? 8 : 0) + indent
                 y: b.callout ? 8 : 0
                 width: parent.width - x - (b.callout ? 8 : 0)
                 wrapMode: Text.Wrap
@@ -2603,18 +2607,27 @@ Item {
                 font.family: Theme.typography.publicSans
                 font.pixelSize: Math.round((heading ? [0, 28, 22, 18, 16, 15, 14][level] : 15) * fs)
                 font.bold: heading
-                topPadding: heading ? 8 * fs : 0
+                // a little more air above headings and after paragraphs; list items stay close
+                topPadding: heading ? (level <= 2 ? 14 : 8) * fs : 0
+                bottomPadding: b.t === "p" ? 4 * fs : 0
                 text: {
                     if (b.t === "image") return "[image" + (b.text ? ": " + b.text : "") + "]"
                     if (b.t === "embed") return "[embedded: " + b.text + "]"
-                    var marker = ""
-                    if (b.t === "li") marker = "•  "
-                    else if (b.t === "oli") marker = b.num + ".  "
-                    else if (b.t === "task") marker = (b.checked ? "☑  " : "☐  ")
-                    return marker + b.html
+                    return b.html
                 }
                 onLinkActivated: function (link) { root.openLink(link) }
                 HoverHandler { cursorShape: body.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor }
+            }
+            Text {
+                visible: listItem
+                x: body.x - 26 * fs
+                y: body.y + body.topPadding
+                width: 20 * fs
+                horizontalAlignment: Text.AlignRight
+                textFormat: Text.PlainText
+                font: body.font
+                color: Theme.palette.textSecondary
+                text: b.t === "oli" ? b.num + "." : b.t === "task" ? (b.checked ? "☑" : "☐") : ((b.depth || 0) % 2 ? "◦" : "•")
             }
         }
     }
