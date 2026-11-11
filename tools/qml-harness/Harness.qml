@@ -35,7 +35,7 @@ Window {
     function previewOf() {
         var b = [
             { t: "h1", html: "Logos plan", text: "Logos plan" },
-            { t: "p", html: "We go <b>self-sovereign</b>: <a href=\"https://logos.co\">Logos</a>.", text: "We go self-sovereign: Logos." },
+            { t: "p", html: "We go <b>self-sovereign</b>: <a href=\"https://logos.co\">Logos</a>. Drafts live in <code>~/.local/share/Logos/drafts</code>.", text: "We go self-sovereign: Logos." },
             { t: "h2", html: "Steps", text: "Steps" },
             { t: "li", html: "IPFS node module", text: "IPFS node module" },
             { t: "li", html: "Logos Storage", text: "Logos Storage" },
@@ -126,9 +126,9 @@ Window {
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
-            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedmd") {
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedmd" || win.mode === "editmd") {
                 it.section = "drafts"; it.openDraft("abc123")
-                if (win.mode === "sharedmd") it.setVisualEdit(false)
+                if (win.mode === "sharedmd" || win.mode === "editmd") Qt.callLater(function () { it.setVisualEdit(false) })
             }
             else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
         })

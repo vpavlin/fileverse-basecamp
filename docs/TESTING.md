@@ -1,5 +1,18 @@
 # What was tested, and how to repeat it
 
+## 0.14.7: inline code stands out (2026-11-11)
+
+vpavlin: inline code (a path in backticks) must be highlighted. It was not: the reading view
+(documents, preview, slides, tables) used Qt's styled text, which ignores <code>, and the
+editor showed only a monospace font. Now inline code is monospace in the accent colour on a
+tinted background everywhere (reading view and tables as rich text, links tinted as before;
+in the editor the core's <code> and the typed / toolbar code carry the style). After a typed
+`code` or the toolbar's code the editor puts a zero-width space outside the span so typing
+goes on plain; the core drops it (`inline_code_keeps_no_marker_after_it`).
+
+- Harness editmd (preview with inline code and a link). Basecamp v: typed `~/.local/share/x`
+  and toolbar code on a selected word, text typed after both plain (cases5.py).
+
 ## 0.14.6 (view): lists set in from the text (2026-11-11)
 
 vpavlin: documents read condensed, and top-level list items sat at the left edge with the

@@ -349,7 +349,11 @@ impl InlineBuf {
                 i = j;
                 continue;
             }
-            out.push_str(&mark(&self.runs[i].0, &self.runs[i].2, plain_bold_ok));
+            // the editor types on after inline code past a zero-width space (so the code's
+            // background stops); it is no part of the text
+            let text = &self.runs[i].2;
+            let text = if i > 0 && self.runs[i - 1].0.code { text.strip_prefix('\u{200b}').unwrap_or(text) } else { text };
+            out.push_str(&mark(&self.runs[i].0, text, plain_bold_ok));
             i += 1;
         }
         // not Unicode whitespace: no-break spaces at the start are an indent (Tab in the editor)
@@ -1419,6 +1423,12 @@ li.checked::marker { content: "\2612"; }
     /// tests/fixtures/qt_columns.html (captured from a TextArea in RichText mode) is
     /// `Test pres⏎A little image test▸This i cool:)⏎Yay!▸[image: pic]◂⏎Test▸Hello world how are you ?▸Right text◂⏎fdfd`
     /// (⏎ U+2029, ▸ U+FDD0, ◂ U+FDD1), and the one that starts with columns `▸L▸R◂`.
+    #[test]
+    fn inline_code_keeps_no_marker_after_it() {
+        let qt = "<html><body><p>see <span style=\" font-family:'monospace'; background-color:#333333; color:#e8743b;\">a/b/c</span>\u{200b} now</p></body></html>";
+        assert_eq!(to_md(qt).trim(), "see `a/b/c` now");
+    }
+
     #[test]
     fn a_tab_indent_survives() {
         let md = to_md("<html><body><p>\u{a0}\u{a0}\u{a0}\u{a0}indented</p></body></html>");

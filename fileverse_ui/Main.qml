@@ -991,9 +991,21 @@ Item {
         else root.blockKind = kind
     }
     // Qt draws links in a fixed dark blue; give them the theme's colour.
-    function tintLinks(html) {
+    function linkTint(html) {
         var c = String(Theme.palette.primary)
-        return html.replace(/<a href="([^"]*)">/g, '<a href="$1"><span style="color:' + c + ';">').replace(/<\/a>/g, "</span></a>")
+        return String(html).replace(/<a href="([^"]*)">/g, '<a href="$1"><span style="color:' + c + ';">').replace(/<\/a>/g, "</span></a>")
+    }
+    function tintLinks(html) { return root.codeTint(root.linkTint(html)) }
+    // Inline code stands out: monospace on a tinted background in the accent colour (Qt's
+    // rich text knows <code> only as a font; the reading view's styled text not at all).
+    function codeStyle() {
+        return "font-family:'monospace'; background-color:" + String(Theme.palette.surfaceRaised) + "; color:" + String(Theme.palette.primary) + ";"
+    }
+    function codeSpan(escaped) { return '<code style="' + root.codeStyle() + '">' + escaped + "</code>" }
+    function codeTint(html) { return String(html).replace(/<code>/g, '<code style="' + root.codeStyle() + '">') }
+    // for read-only text (documents, preview, slides, tables): a little room around it too
+    function codeRead(html) {
+        return String(html).replace(/<code>/g, '<span style="' + root.codeStyle() + '">&nbsp;').replace(/<\/code>/g, "&nbsp;</span>")
     }
     // Links open through the core: Basecamp's QML sandbox stops Qt.openUrlExternally.
     function openLink(url) {
@@ -1064,13 +1076,15 @@ Item {
             var start = pos - m[1].length
             root.applyingRule = true
             richArea.remove(start, pos)
-            richArea.insert(start, "<" + r.tag + ">" + root.escHtml(m[2]) + "</" + r.tag + ">")
-            var end = start + m[2].length
+            var isCode = r.tag === "code"
+            // after code a zero-width space outside the span, so typing goes on plain (the
+            // background cannot be switched off for the next typed text; the core drops it)
+            richArea.insert(start, isCode ? root.codeSpan(root.escHtml(m[2])) + "\u200b" : "<" + r.tag + ">" + root.escHtml(m[2]) + "</" + r.tag + ">")
+            var end = start + m[2].length + (isCode ? 1 : 0)
             richArea.cursorPosition = end
             root.applyingRule = false
             // what is typed next is plain again
-            var off = r.off || { family: richArea.font.family }
-            root.pendingFont = { props: off, pos: end, prop: "", value: false }
+            if (r.off) root.pendingFont = { props: r.off, pos: end, prop: "", value: false }
             return
         }
     }
@@ -2185,7 +2199,7 @@ Item {
                                 ["B", "", "Bold (Ctrl+B)", function () { root.toggleFont("bold") }],
                                 ["I", "", "Italic (Ctrl+I)", function () { root.toggleFont("italic") }],
                                 ["S", "", "Strikethrough", function () { root.toggleFont("strikeout") }],
-                                ["</>", "", "Inline code", function () { root.wrapSelection(function (t) { return "<code>" + t + "</code>" }) }],
+                                ["</>", "", "Inline code", function () { root.wrapSelection(function (t) { return root.codeSpan(t) + "\u200b" }) }],
                                 ["Link", "", "Link (Ctrl+K)", function () { root.askLink() }],
                                 ["|", "", "", null],
                                 ["• List", "ul", "Bulleted list (-)", function () { root.toggleBlock("ul") }],
@@ -2601,7 +2615,7 @@ Item {
                 y: b.callout ? 8 : 0
                 width: parent.width - x - (b.callout ? 8 : 0)
                 wrapMode: Text.Wrap
-                textFormat: b.t === "image" || b.t === "embed" ? Text.PlainText : Text.StyledText
+                textFormat: b.t === "image" || b.t === "embed" ? Text.PlainText : Text.RichText
                 color: b.t === "image" || b.t === "embed" ? Theme.palette.textTertiary : Theme.palette.text
                 linkColor: Theme.palette.primary
                 font.family: Theme.typography.publicSans
@@ -2613,7 +2627,7 @@ Item {
                 text: {
                     if (b.t === "image") return "[image" + (b.text ? ": " + b.text : "") + "]"
                     if (b.t === "embed") return "[embedded: " + b.text + "]"
-                    return b.html
+                    return root.codeRead(root.linkTint(b.html))
                 }
                 onLinkActivated: function (link) { root.openLink(link) }
                 HoverHandler { cursorShape: body.hoveredLink ? Qt.PointingHandCursor : Qt.ArrowCursor }
@@ -2687,13 +2701,13 @@ Item {
                                 x: 5; y: 5
                                 width: parent.width - 10
                                 wrapMode: Text.Wrap
-                                textFormat: Text.StyledText
+                                textFormat: Text.RichText
                                 font.family: Theme.typography.publicSans
                                 font.pixelSize: Math.round(13 * tbl.fs)
                                 font.bold: trow.ri === 0
                                 color: Theme.palette.text
                                 linkColor: Theme.palette.primary
-                                text: modelData
+                                text: root.codeRead(root.linkTint(modelData))
                                 onLinkActivated: function (link) { root.openLink(link) }
                             }
                         }
