@@ -1,5 +1,67 @@
 # What was tested, and how to repeat it
 
+## 0.18.0 (view) + core 0.17.0, draft on branch ai-gateway-draft: AI chat (2026-11-22)
+
+"💬 AI chat" (under the title) opens a panel beside the editor: a conversation with an AI
+about the open document.
+
+**One consent, then no dialogs (AI Gateway 0.1.2+ sessions).**
+- The first message asks through the `ai.session` intent: Basecamp confirms it, then AI
+  Gateway shows the purpose, the system prompt and the document. The user picks the model
+  and presses "Allow this chat".
+- Every later message goes from fileverse_core to ai_gateway_core (`ai_call`: sessionChat,
+  then job polled every 0.7 s), with no dialog. The answer shows as it streams in.
+- AI Gateway keeps the conversation and the latest document. Fileverse sends the new message,
+  plus the whole document only when it changed.
+- A lost session (no_session: closed, idle over 12 h, AI Gateway restarted) is asked for
+  again once, with the earlier conversation passed along. Closing the panel, "New chat" and
+  opening another document close the session.
+- `uses` declares ai.ask, ai.chat and ai.session. A missing declaration is refused by
+  Basecamp as "not_declared".
+- ai_gateway_core is an optional dependency, with its contract vendored in
+  contracts/ai_gateway_core.lidl (the builder requires one).
+
+**Without sessions** (no ai_gateway_core, or an AI Gateway without ai.session), it falls back
+to one `ai.chat` request per message, each confirmed. Each request carries the conversation,
+with the document as a full copy the first time and after big changes, or as the changed
+lines. Capped at 60 KB.
+
+**Edits.** The AI proposes changes as FIND/REPLACE blocks. Each shows as a card (old text
+struck through, new text) with Apply / Dismiss, plus Apply all. Apply looks the FIND text up
+in the document's Markdown, exactly or ignoring trailing spaces. If it isn't there any more,
+the card says so. Each applied edit is one undo step (the visual editor reloads, and the
+history gets the before/after as a step). Shared documents send it like typing.
+
+**History.** Kept per document on this device only: core `chat_load` / `chat_save` write
+`<module data>/chats/<draft id>.json`, not under drafts/. Deleting the draft deletes it. "New
+chat" clears it.
+
+**Failures.** On a failure nothing counts as sent: the message goes back into the box and the
+note says why.
+
+**Layout.** The editor toolbar and the row under the title wrap onto a second line when the
+panel leaves too little room. The title field shows a document's title from its start.
+
+Tests:
+- Harness:
+  - chat: session opened, first turn;
+  - chatmd: Apply all in Markdown mode; the second turn carries `message` + `document`;
+    closing the panel closes the session;
+  - chatstateless: ai.session unavailable → ai.chat requests.
+- Basecamp t (0.3.2), Fileverse core 0.17.0 + view 0.18.0, AI Gateway core 0.1.2 + view 0.1.3
+  from lan03, with a fake OpenAI-compatible model on 127.0.0.1 as a Custom connector
+  ("On this device"):
+  - the first message: Basecamp's "Use this app?", then AI Gateway's "Allow this chat"; the
+    model got the system prompt with the document plus the earlier conversation;
+  - the second message: no dialog; the model got the history plus the new message, with the
+    document unchanged (1132 characters);
+  - Apply put "A second paragraph, now **tighter**." into the draft;
+  - the third message: no dialog; the updated document went along (1113 characters);
+  - closing the chat: AI Gateway's Open chats said None.
+  - Found and fixed there: ai.session missing from `uses` ("not_declared"), and two chat saves
+    at once sharing one temporary file.
+- Not tried: a real model (Venice).
+
 ## 0.17.0 (view, draft on branch ai-gateway-draft): write with AI through AI Gateway (2026-11-22)
 
 "✨ Write with AI" (under the title, next to Download Markdown) opens a row of actions:

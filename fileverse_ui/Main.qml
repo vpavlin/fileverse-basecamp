@@ -1444,6 +1444,353 @@ Item {
         root.aiResult = null
         root.say("Added the AI's text. Undo (Ctrl+Z) takes it out again.")
     }
+    // ── AI chat (AI Gateway's "ai.chat" intent) ─────────────────────────────────────
+    // A conversation about the open document, kept on this device only (core chat_load /
+    // chat_save). ai.chat keeps no state between requests, so each one carries the
+    // conversation; the document goes in only when it changed since the AI last saw it:
+    // as a full copy (older copies are then left out) or, for a small change, as the
+    // changed lines. The AI proposes edits as FIND/REPLACE blocks; each shows as a card
+    // the user applies or dismisses. Nothing changes in the document by itself.
+    property bool chatOpen: false
+    property bool chatBusy: false
+    property string chatDraftId: ""
+    property var chatMsgs: []        // { role: user|assistant|doc|note, text, raw?, edits?, full?, omitted?, model?, privacy? }
+    property string chatDocSent: ""  // the document as the AI last saw it
+    property string chatNote: ""
+    readonly property int chatMaxBytes: 60000
+    readonly property string chatSystem: "You are a co-author in Fileverse, a Markdown document editor. You and the user talk about the document they are writing. Its Markdown is in the messages that start with [Document]; messages that start with [Document changes] say what changed since. Answer in the user's language, briefly and to the point.\n\nWhen the user asks you to change the document, or a change clearly helps, propose it with blocks of exactly this form, one block per change:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```\n\nFIND must be copied character for character from the current document and occur in it only once: short, but unique. To add text, FIND a nearby line and repeat it in the new text together with the addition. To delete, leave the new text empty. The user reviews every block before it is applied. Outside the blocks, talk normally and do not repeat the blocks in prose."
+    function chatSave() {
+        if (!root.chatDraftId) return
+        var c = root.chatMsgs.length ? JSON.stringify({ v: 1, msgs: root.chatMsgs, docSent: root.chatDocSent }) : "null"
+        root.core("chat_save", [root.chatDraftId, c], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok) root.chatNote = "Could not keep the chat on this device: " + ((r && r.error) || "no answer from the core")
+        })
+    }
+    function chatLoad() {
+        if (!root.draft) return
+        var id = root.draft.id
+        root.chatDraftId = id
+        root.chatMsgs = []; root.chatDocSent = ""; root.chatNote = ""
+        root.core("chat_load", [id], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok || root.chatDraftId !== id) return
+            var c = r.chat
+            if (c && c.msgs) { root.chatMsgs = c.msgs; root.chatDocSent = c.docSent || "" }
+        })
+    }
+    onDraftChanged: if (root.chatOpen && root.draft && root.draft.id !== root.chatDraftId) { root.chatCloseSession(); root.chatLoad() }
+    function chatToggle() {
+        root.chatOpen = !root.chatOpen
+        if (!root.chatOpen) root.chatCloseSession()
+        else if (root.draft && root.draft.id !== root.chatDraftId) root.chatLoad()
+    }
+    function chatClear() {
+        root.chatCloseSession()
+        root.chatMsgs = []; root.chatDocSent = ""; root.chatNote = ""
+        root.chatSave()
+    }
+    // The document as the AI sees it: the title as a heading, then the text.
+    function chatDocument() { return root.withTitle(titleField.text, root.editorMarkdown()) }
+    // What changed between two versions, by lines: the first and last differing lines and
+    // what is between them (one region; enough for the usual edit between two messages).
+    function chatDiff(a, b) {
+        var x = a.split("\n"), y = b.split("\n"), p = 0
+        while (p < x.length && p < y.length && x[p] === y[p]) p++
+        var q = 0
+        while (q < x.length - p && q < y.length - p && x[x.length - 1 - q] === y[y.length - 1 - q]) q++
+        var was = x.slice(p, x.length - q), now = y.slice(p, y.length - q)
+        var where = p === 0 ? "At the start of the document" : "After the line " + JSON.stringify(x[p - 1].substring(0, 120))
+        if (!was.length) return where + ", these lines were added:\n```\n" + now.join("\n") + "\n```"
+        if (!now.length) return where + ", these lines were removed:\n```\n" + was.join("\n") + "\n```"
+        return where + ", these lines:\n```\n" + was.join("\n") + "\n```\nare now:\n```\n" + now.join("\n") + "\n```"
+    }
+    // The request: the instructions, then the conversation with each document message as
+    // the AI should read it; neighbouring user messages are joined (some models want turns
+    // to alternate). Oldest turns go first when it would not fit.
+    function chatRequest(msgs) {
+        var title = titleField.text.trim() || "Untitled"
+        var turns = []
+        msgs.forEach(function (m) {
+            var role = m.role === "assistant" ? "assistant" : "user", content
+            if (m.role === "note") return
+            if (m.role === "doc") content = m.omitted ? "[An earlier copy of the document was here; a newer full copy follows.]"
+                                       : m.full ? "[Document: " + JSON.stringify(title) + "]\n" + m.text : "[Document changes]\n" + m.text
+            else content = m.role === "assistant" ? (m.raw || m.text) : m.text
+            var last = turns[turns.length - 1]
+            if (last && last.role === role) last.content += "\n\n" + content
+            else turns.push({ role: role, content: content })
+        })
+        var size = function () { return turns.reduce(function (n, t) { return n + root.utf8Len(t.content) + 32 }, root.utf8Len(root.chatSystem)) }
+        // keep the turn holding the latest full copy of the document and everything after it
+        var keepFrom = 0
+        for (var k = turns.length - 1; k >= 0; k--) if (turns[k].content.indexOf("[Document: ") >= 0) { keepFrom = k; break }
+        while (size() > root.chatMaxBytes && turns.length > 1 && keepFrom > 0) { turns.shift(); keepFrom-- }
+        if (size() > root.chatMaxBytes) turns.forEach(function (t) { t.content = root.aiCap(t.content, false) })
+        while (turns.length && turns[0].role === "assistant") turns.shift()
+        return [{ role: "system", content: root.chatSystem }].concat(turns)
+    }
+    // The AI's reply: its words and its edit blocks.
+    function chatParse(t) {
+        var edits = [], re = /```edit[^\n]*\n<<<<<<< FIND\n([\s\S]*?)\n=======\n([\s\S]*?)\n?>>>>>>> REPLACE[ \t]*\n?```/g, m
+        while ((m = re.exec(t)) !== null) edits.push({ find: m[1], replace: m[2], state: "new" })
+        var prose = t.replace(re, "").replace(/\n{3,}/g, "\n\n").trim()
+        return { text: prose, edits: edits }
+    }
+    // Without AI Gateway sessions (an older AI Gateway): every message is an ai.chat request
+    // that Basecamp confirms, carrying the conversation and the document's changes.
+    function chatSendStateless(text) {
+        text = String(text || "").trim()
+        if (!text || root.chatBusy || !root.draft) return false
+        if (typeof logos === "undefined" || logos === null || typeof logos.request !== "function") {
+            root.chatNote = "This Basecamp cannot ask other apps yet. AI chat needs Basecamp 0.3.2 or newer and the AI Gateway app."
+            return false
+        }
+        root.commitStep()
+        var before = { msgs: root.chatMsgs, docSent: root.chatDocSent }
+        var msgs = root.chatMsgs.slice(), doc = root.chatDocument()
+        if (doc !== root.chatDocSent) {
+            var diff = root.chatDocSent ? root.chatDiff(root.chatDocSent, doc) : ""
+            if (diff && root.utf8Len(diff) < Math.min(20000, root.utf8Len(doc) / 2)) {
+                msgs.push({ role: "doc", full: false, text: diff })
+            } else {
+                // a new full copy: the AI no longer needs the older ones (or their changes)
+                msgs = msgs.map(function (m) { return m.role === "doc" && !m.omitted ? Object.assign({}, m, { omitted: true, text: "" }) : m })
+                msgs.push({ role: "doc", full: true, text: root.aiCap(doc, false) })
+            }
+        }
+        msgs.push({ role: "user", text: text })
+        root.chatMsgs = msgs; root.chatDocSent = doc; root.chatNote = ""
+        root.chatBusy = true
+        var id = root.chatDraftId
+        logos.request("ai.chat", { messages: root.chatRequest(msgs) }, function (res) {
+            root.chatBusy = false
+            if (root.chatDraftId !== id) return
+            if (typeof res === "string") res = root.j(res)
+            if (!res || !res.ok) {
+                var e = res ? String(res.error || "failed") : "failed"
+                // nothing reached the AI: back to before, the message back in the box
+                root.chatMsgs = before.msgs; root.chatDocSent = before.docSent
+                chatInput.text = text
+                root.chatNote = e === "unavailable" ? "AI chat needs the AI Gateway app. Install it in Basecamp, then try again."
+                              : e === "cancelled" ? "Not sent to the AI."
+                              : e === "timeout" ? "The AI did not answer in time. Try again, or pick a faster model in AI Gateway."
+                              : "The AI could not answer (" + e + ")" + (res && res.message ? ": " + res.message : "") + "."
+                return
+            }
+            var d = res.data || {}, raw = String(d.text || ""), parsed = root.chatParse(raw)
+            var m2 = root.chatMsgs.slice()
+            m2.push({ role: "assistant", raw: raw, text: parsed.text, edits: parsed.edits, model: d.model || "", privacy: d.privacy || "" })
+            root.chatMsgs = m2
+            root.chatSave()
+        })
+        root.chatSave()
+        return true
+    }
+    // ── AI chat through an AI Gateway session (ai.session) ──
+    // The view asks once (Basecamp and AI Gateway confirm, the user picks the model); then
+    // fileverse_core sends each turn to ai_gateway_core without a dialog. AI Gateway keeps
+    // the conversation and the latest document; Fileverse sends the new message, and the
+    // whole document only when it changed. Without sessions it falls back to ai.chat.
+    property var chatSession: null        // { id, model, privacy, doc }: doc = what AI Gateway has
+    property bool chatStateless: false
+    property string chatPartial: ""       // the answer as it streams in
+    property string chatJob: ""
+    property var chatPending: null        // { text, doc, before, retried }
+    readonly property string chatSessionSystem: root.chatSystem.replace("Its Markdown is in the messages that start with [Document]; messages that start with [Document changes] say what changed since.", "Its latest Markdown is given below and is updated as the user edits.")
+    function chatSend(text) {
+        text = String(text || "").trim()
+        if (!text || root.chatBusy || !root.draft) return false
+        if (root.chatStateless) return root.chatSendStateless(text)
+        if (typeof logos === "undefined" || logos === null || typeof logos.request !== "function") {
+            root.chatNote = "This Basecamp cannot ask other apps yet. AI chat needs Basecamp 0.3.2 or newer and the AI Gateway app."
+            return false
+        }
+        root.commitStep()
+        var doc = root.chatDocument()
+        var pend = { text: text, doc: doc, before: { msgs: root.chatMsgs, docSent: root.chatDocSent }, retried: false }
+        var msgs = root.chatMsgs.slice()
+        if (!root.chatSession || root.chatSession.doc !== doc) msgs.push({ role: "doc", full: true, text: "" })
+        msgs.push({ role: "user", text: text })
+        root.chatMsgs = msgs; root.chatNote = ""; root.chatBusy = true; root.chatPartial = ""
+        root.chatPending = pend
+        if (root.chatSession) root.chatTurn(false)
+        else root.chatOpenSession()
+        return true
+    }
+    // Nothing reached the AI: the chat as it was, the message back in the box.
+    function chatUndoSend(note) {
+        var p = root.chatPending
+        root.chatBusy = false; root.chatPartial = ""; root.chatJob = ""; root.chatPending = null
+        if (!p) return
+        root.chatMsgs = p.before.msgs; root.chatDocSent = p.before.docSent
+        chatInput.text = p.text
+        if (note) root.chatNote = note
+    }
+    function chatFailNote(e, res) {
+        var msg = res && (res.message || (res.data && res.data.message)) ? ": " + (res.message || res.data.message) : ""
+        return e === "unavailable" ? "AI chat needs the AI Gateway app. Install it in Basecamp, then try again."
+             : e === "cancelled" ? "Not sent to the AI" + msg + "."
+             : e === "timeout" ? "The AI did not answer in time. Try again, or pick a faster model in AI Gateway."
+             : "The AI could not answer (" + e + ")" + msg + "."
+    }
+    function chatOpenSession() {
+        var p = root.chatPending; if (!p) return
+        var title = titleField.text.trim() || "Untitled"
+        // an intent's strings are at most 64 KB: a longer document goes with the first turn
+        var docNow = root.utf8Len(p.doc) <= root.aiMaxBytes ? p.doc : ""
+        logos.request("ai.session", { title: title, purpose: "Talk about this document in Fileverse and propose edits to it",
+                                      system: root.chatSessionSystem, document: docNow }, function (res) {
+            if (root.chatPending !== p) return
+            if (typeof res === "string") res = root.j(res)
+            if (!res || !res.ok) {
+                var e = res ? String(res.error || "failed") : "failed"
+                if (e === "unavailable") {
+                    // an AI Gateway without sessions (or none): one ai.chat request per message
+                    root.chatUndoSend("")
+                    root.chatStateless = true
+                    if (root.chatSendStateless(p.text)) chatInput.text = ""
+                    return
+                }
+                root.chatUndoSend(root.chatFailNote(e, res))
+                return
+            }
+            var d = res.data || {}
+            root.chatSession = { id: String(d.sessionId || ""), model: d.model || "", privacy: d.privacy || "", doc: docNow }
+            root.chatTurn(true)
+        })
+    }
+    // One turn: the new message (with the earlier conversation when the session is new),
+    // and the document when AI Gateway's copy is not the current one.
+    function chatTurn(fresh) {
+        var p = root.chatPending, sess = root.chatSession
+        if (!p || !sess) return
+        var turn = {}
+        if (fresh) {
+            var past = []
+            p.before.msgs.forEach(function (m) {
+                if (m.role === "user") past.push({ role: "user", content: m.text })
+                else if (m.role === "assistant") past.push({ role: "assistant", content: m.raw || m.text })
+            })
+            past = past.slice(-60)
+            while (past.length && past[0].role !== "user") past.shift()
+            turn.messages = past.concat([{ role: "user", content: p.text }])
+        } else turn.message = p.text
+        if (sess.doc !== p.doc) turn.document = p.doc
+        root.core("ai_call", ["sessionChat", JSON.stringify([sess.id, JSON.stringify(turn)])], function (raw) {
+            if (root.chatPending !== p) return
+            var r = root.j(raw)
+            if (r && r.absent) {
+                // no ai_gateway_core to talk to: one ai.chat request per message
+                root.chatSession = null
+                root.chatUndoSend("")
+                root.chatStateless = true
+                if (root.chatSendStateless(p.text)) chatInput.text = ""
+                return
+            }
+            var code = r ? String(r.code || r.error || "") : ""
+            if (r && r.ok === false && /no_session/.test(code) && !p.retried) {
+                // closed, idle too long or AI Gateway restarted: ask for a new session (once)
+                p.retried = true
+                root.chatSession = null
+                root.chatOpenSession()
+                return
+            }
+            var job = r ? String(r.jobId || r.id || (r.job && r.job.id) || "") : ""
+            if (!r || r.ok === false || !job) {
+                root.chatUndoSend(/busy/.test(code) ? "The AI is still answering the last message; wait a moment." : root.chatFailNote(code || "failed", r))
+                return
+            }
+            root.chatJob = job
+            chatPoll.start()
+        })
+    }
+    Timer {
+        id: chatPoll
+        interval: 700; repeat: true
+        onTriggered: {
+            var p = root.chatPending, job = root.chatJob
+            if (!p || !job) { stop(); return }
+            root.core("ai_call", ["job", JSON.stringify([job])], function (raw) {
+                if (root.chatPending !== p || root.chatJob !== job) return
+                var r = root.j(raw) || {}
+                var st = String(r.state || (r.job && r.job.state) || "")
+                var text = String(r.text !== undefined ? r.text : (r.result && r.result.text) || "")
+                if (st === "running" || st === "queued" || st === "") { root.chatPartial = text; return }
+                chatPoll.stop()
+                if (st !== "done") { root.chatUndoSend(root.chatFailNote(st === "cancelled" ? "cancelled" : String(r.code || r.error || "failed"), r)); return }
+                var sess = Object.assign({}, root.chatSession); sess.doc = p.doc; root.chatSession = sess
+                root.chatDocSent = p.doc
+                var parsed = root.chatParse(text), m2 = root.chatMsgs.slice()
+                m2.push({ role: "assistant", raw: text, text: parsed.text, edits: parsed.edits, model: r.model || sess.model || "", privacy: r.privacy || sess.privacy || "" })
+                root.chatMsgs = m2
+                root.chatBusy = false; root.chatPartial = ""; root.chatJob = ""; root.chatPending = null
+                root.chatSave()
+            })
+        }
+    }
+    function chatCloseSession() {
+        if (root.chatSession && root.chatSession.id) root.core("ai_call", ["closeSession", JSON.stringify([root.chatSession.id])], function () {})
+        root.chatSession = null
+    }
+    // Where an edit's FIND text is in the document's Markdown: exactly, else ignoring
+    // trailing spaces on lines. -1 when it is not there (any more).
+    function chatFind(md, find) {
+        var i = md.indexOf(find)
+        if (i >= 0 || !find.trim()) return { at: i, len: find.length }
+        var norm = function (t) { return t.split("\n").map(function (l) { return l.replace(/[ \t]+$/, "") }).join("\n") }
+        var nf = norm(find).trim(), lines = md.split("\n"), off = 0, flat = norm(md)
+        var j = flat.indexOf(nf)
+        if (j < 0) return { at: -1, len: 0 }
+        // map back: count characters of md up to the same line/column (lines only lose trailing blanks)
+        var before = flat.substring(0, j).split("\n"), pos = 0
+        for (var k = 0; k < before.length - 1; k++) pos += lines[k].length + 1
+        pos += before[before.length - 1].length
+        var endFlat = j + nf.length, upto = flat.substring(0, endFlat).split("\n"), end = 0
+        for (var k2 = 0; k2 < upto.length - 1; k2++) end += lines[k2].length + 1
+        end += upto[upto.length - 1].length
+        return { at: pos, len: end - pos }
+    }
+    // Apply edit `ei` of message `mi`: one undo step, saved and (when shared) sent like typing.
+    function chatApply(mi, ei) {
+        var m = root.chatMsgs[mi]; if (!m || !m.edits || !m.edits[ei]) return false
+        var e = m.edits[ei]
+        var md = root.editorMarkdown()
+        var hit = root.chatFind(md, e.find)
+        // the title line the AI saw is the draft's title, not part of its text
+        if (hit.at < 0) { root.chatSetEdit(mi, ei, "missing"); return false }
+        var next = md.substring(0, hit.at) + e.replace + md.substring(hit.at + hit.len)
+        root.commitStep()
+        if (root.visualEdit) {
+            var htmlBefore = richArea.text, caret = richArea.cursorPosition
+            root.loadEditor(next)
+            richArea.cursorPosition = Math.min(caret, richArea.length)
+            // loading set a new history base; make the change one undo step from the old one
+            root.histBase = htmlBefore; root.stepOpen = true; root.stepCaret = caret
+            root.commitStep()
+            root.editorChanged()
+            root.commitStep()
+        } else {
+            mdArea.remove(hit.at, hit.at + hit.len)
+            mdArea.insert(hit.at, e.replace)
+            root.editorChanged()
+            root.commitStep()
+        }
+        root.chatSetEdit(mi, ei, "applied")
+        return true
+    }
+    function chatApplyAll(mi) {
+        var m = root.chatMsgs[mi], n = 0
+        for (var i = 0; m && m.edits && i < m.edits.length; i++) if (m.edits[i].state === "new" && root.chatApply(mi, i)) n++
+        root.say(n ? "Applied " + n + " edit" + (n > 1 ? "s" : "") + ". Undo (Ctrl+Z) takes them out one by one." : "Nothing applied")
+    }
+    function chatSetEdit(mi, ei, state) {
+        var msgs = root.chatMsgs.slice(), m = Object.assign({}, msgs[mi]), edits = m.edits.slice()
+        edits[ei] = Object.assign({}, edits[ei], { state: state })
+        m.edits = edits; msgs[mi] = m
+        root.chatMsgs = msgs
+        root.chatSave()
+    }
     // A draft's title is kept apart from its text; a downloaded file starts with it.
     function withTitle(title, md) {
         var t = String(title || "").trim(), first = String(md || "").replace(/^\s+/, "").split("\n")[0]
@@ -2263,529 +2610,709 @@ Item {
                 }
             }
 
-            // editor
-            ColumnLayout {
+            // editor, with the AI chat beside it
+            RowLayout {
                 visible: root.mode === "edit" && root.draft !== null
                 Layout.fillWidth: true
                 Layout.fillHeight: true
-                spacing: Theme.spacing.small
-                RowLayout {
+                spacing: Theme.spacing.medium
+                // editor
+                ColumnLayout {
                     Layout.fillWidth: true
+                    Layout.fillHeight: true
                     spacing: Theme.spacing.small
-                    Field {
-                        id: titleField
-                        Layout.fillWidth: true
-                        font.pixelSize: 22
-                        font.weight: Theme.typography.weightBold
-                        placeholderText: "Title"
-                        background: Item {}
-                        onTextEdited: { root.draftDirty = true; previewTimer.restart() }
-                        // Tab or Enter in the title goes on into the text (not to the buttons)
-                        Keys.onTabPressed: function (e) { root.focusEditor(); e.accepted = true }
-                        Keys.onReturnPressed: function (e) { root.focusEditor(); e.accepted = true }
-                        Keys.onEnterPressed: function (e) { root.focusEditor(); e.accepted = true }
-                    }
-                    Chip {
-                        visible: !root.isShared
-                        text: root.draftDirty ? "editing…" : "saved on this device"; tint: root.draftDirty ? Theme.palette.warning : Theme.palette.success
-                    }
-                    LogosButton {
-                        // reflection_core sends this device's cursor only when the user says so
-                        // (one setting for every note, also Reflection's "Share my cursor")
-                        readonly property bool on: !!(root.collab.me && root.collab.me.shareCursor)
-                        visible: root.isShared && root.viaReflection; compact: true
-                        text: on ? "Hide my cursor" : "Share my cursor"
-                        onClicked: root.refl("set_settings", [JSON.stringify({ shareCursor: !on })], function () { root.refreshCollab(); if (!on) root.sendCursor() })
-                        HoverHandler { id: cursorHover }
-                        ToolTip.visible: cursorHover.hovered
-                        ToolTip.text: on ? "The others on Reflection notes see where you are in the text. Same setting as Reflection's \"Share my cursor\"."
-                                         : "Show the others on Reflection notes where you are in the text. Same setting as Reflection's \"Share my cursor\"."
-                    }
-                    LogosButton {
-                        visible: root.isShared; compact: true
-                        text: "Stop sharing"
-                        onClicked: root.stopSharing()
-                        HoverHandler { id: leaveHover }
-                        ToolTip.visible: leaveHover.hovered
-                        ToolTip.text: "Stop syncing this document on this device. Its text stays here, private; the others keep their copies and can go on editing together (the note stays in Reflection)."
-                    }
-                    LogosButton {
-                        visible: !root.isShared && !!root.draft && !root.viaReflection
-                        compact: true; text: "Share…"
-                        onClicked: root.shareClicked()
-                        HoverHandler { id: shareBtnHover }
-                        ToolTip.visible: shareBtnHover.hovered
-                        ToolTip.text: "Edit this document together with others, live. You get an id to send them; anyone with it can read and write. It also opens in the Reflection apps."
-                    }
-                    LogosButton { visible: root.coreSlides.length > 0; compact: true; text: "Present"; onClicked: root.present() }
-                    LogosButton {
-                        compact: true
-                        variant: LogosButton.Variant.Primary
-                        enabled: !root.busyWith("publish")
-                        text: root.busyWith("publish") ? ("Publishing… " + root.elapsed("publish") + "s") : (root.draft && root.draft.published ? "Publish again" : "Publish")
-                        onClicked: root.publishDraft()
-                    }
-                }
-                // changed on disk (an agent?) while you have unsaved edits here
-                Rectangle {
-                    Layout.fillWidth: true
-                    visible: !!root.outsideDraft
-                    implicitHeight: outsideRow.implicitHeight + 16
-                    radius: Theme.spacing.radiusSmall
-                    color: Theme.colors.getColor(Theme.palette.primary, 0.16)
-                    border.color: Theme.palette.primary
                     RowLayout {
-                        id: outsideRow
-                        anchors.fill: parent
-                        anchors.margins: 8
+                        Layout.fillWidth: true
                         spacing: Theme.spacing.small
-                        LogosText {
-                            Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13
-                            text: "This document was changed outside the editor (by an agent or another window) while you were typing. Saving is paused."
+                        Field {
+                            id: titleField
+                            Layout.fillWidth: true
+                            font.pixelSize: 22
+                            font.weight: Theme.typography.weightBold
+                            placeholderText: "Title"
+                            background: Item {}
+                            onTextEdited: { root.draftDirty = true; previewTimer.restart() }
+                            // a title set by opening a document shows from its start when the field is narrow
+                            onTextChanged: if (!activeFocus) cursorPosition = 0
+                            // Tab or Enter in the title goes on into the text (not to the buttons)
+                            Keys.onTabPressed: function (e) { root.focusEditor(); e.accepted = true }
+                            Keys.onReturnPressed: function (e) { root.focusEditor(); e.accepted = true }
+                            Keys.onEnterPressed: function (e) { root.focusEditor(); e.accepted = true }
                         }
-                        LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Load their version"; onClicked: root.reloadDraft(root.outsideDraft) }
-                        LogosButton { compact: true; text: "Keep mine"; onClicked: root.keepMine() }
+                        Chip {
+                            visible: !root.isShared
+                            text: root.draftDirty ? "editing…" : "saved on this device"; tint: root.draftDirty ? Theme.palette.warning : Theme.palette.success
+                        }
+                        LogosButton {
+                            // reflection_core sends this device's cursor only when the user says so
+                            // (one setting for every note, also Reflection's "Share my cursor")
+                            readonly property bool on: !!(root.collab.me && root.collab.me.shareCursor)
+                            visible: root.isShared && root.viaReflection; compact: true
+                            text: on ? "Hide my cursor" : "Share my cursor"
+                            onClicked: root.refl("set_settings", [JSON.stringify({ shareCursor: !on })], function () { root.refreshCollab(); if (!on) root.sendCursor() })
+                            HoverHandler { id: cursorHover }
+                            ToolTip.visible: cursorHover.hovered
+                            ToolTip.text: on ? "The others on Reflection notes see where you are in the text. Same setting as Reflection's \"Share my cursor\"."
+                                             : "Show the others on Reflection notes where you are in the text. Same setting as Reflection's \"Share my cursor\"."
+                        }
+                        LogosButton {
+                            visible: root.isShared; compact: true
+                            text: "Stop sharing"
+                            onClicked: root.stopSharing()
+                            HoverHandler { id: leaveHover }
+                            ToolTip.visible: leaveHover.hovered
+                            ToolTip.text: "Stop syncing this document on this device. Its text stays here, private; the others keep their copies and can go on editing together (the note stays in Reflection)."
+                        }
+                        LogosButton {
+                            visible: !root.isShared && !!root.draft && !root.viaReflection
+                            compact: true; text: "Share…"
+                            onClicked: root.shareClicked()
+                            HoverHandler { id: shareBtnHover }
+                            ToolTip.visible: shareBtnHover.hovered
+                            ToolTip.text: "Edit this document together with others, live. You get an id to send them; anyone with it can read and write. It also opens in the Reflection apps."
+                        }
+                        LogosButton { visible: root.coreSlides.length > 0; compact: true; text: "Present"; onClicked: root.present() }
+                        LogosButton {
+                            compact: true
+                            variant: LogosButton.Variant.Primary
+                            enabled: !root.busyWith("publish")
+                            text: root.busyWith("publish") ? ("Publishing… " + root.elapsed("publish") + "s") : (root.draft && root.draft.published ? "Publish again" : "Publish")
+                            onClicked: root.publishDraft()
+                        }
                     }
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: !!root.draft
-                    spacing: Theme.spacing.small
-                    LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared document id") }
-                    LogosButton { compact: true; text: "Download Markdown"; onClicked: root.downloadMarkdown(titleField.text, root.withTitle(titleField.text, root.editorMarkdown())) }
-                    LogosButton {
-                        compact: true
-                        variant: root.aiOpen ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
-                        text: root.aiBusy ? "✨ AI is writing…" : "✨ Write with AI"
-                        onClicked: { root.aiOpen = !root.aiOpen; root.aiField = ""; root.aiNote = "" }
-                        HoverHandler { id: aiHover }
-                        ToolTip.visible: aiHover.hovered
-                        ToolTip.text: "Continue, rewrite, summarize, translate or ask about the selection or this paragraph. Uses the AI Gateway app, which shows what is sent and lets you pick the model."
+                    // changed on disk (an agent?) while you have unsaved edits here
+                    Rectangle {
+                        Layout.fillWidth: true
+                        visible: !!root.outsideDraft
+                        implicitHeight: outsideRow.implicitHeight + 16
+                        radius: Theme.spacing.radiusSmall
+                        color: Theme.colors.getColor(Theme.palette.primary, 0.16)
+                        border.color: Theme.palette.primary
+                        RowLayout {
+                            id: outsideRow
+                            anchors.fill: parent
+                            anchors.margins: 8
+                            spacing: Theme.spacing.small
+                            LogosText {
+                                Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13
+                                text: "This document was changed outside the editor (by an agent or another window) while you were typing. Saving is paused."
+                            }
+                            LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Load their version"; onClicked: root.reloadDraft(root.outsideDraft) }
+                            LogosButton { compact: true; text: "Keep mine"; onClicked: root.keepMine() }
+                        }
                     }
-                    // shared: who else has it open (a dot each), and the transport
-                    Row {
-                        visible: root.isShared
-                        spacing: -6
-                        Repeater {
-                            model: root.collabOnline
+                    Flow {
+                        Layout.fillWidth: true
+                        visible: !!root.draft
+                        spacing: Theme.spacing.small
+                        LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared document id") }
+                        LogosButton { compact: true; text: "Download Markdown"; onClicked: root.downloadMarkdown(titleField.text, root.withTitle(titleField.text, root.editorMarkdown())) }
+                        LogosButton {
+                            compact: true
+                            variant: root.chatOpen ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                            text: root.chatBusy ? "💬 AI chat…" : "💬 AI chat"
+                            onClicked: root.chatToggle()
+                            HoverHandler { id: chatHover }
+                            ToolTip.visible: chatHover.hovered
+                            ToolTip.text: "Talk with an AI about this document; it can propose edits for you to apply. Uses the AI Gateway app. The chat stays on this device."
+                        }
+                        LogosButton {
+                            compact: true
+                            variant: root.aiOpen ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                            text: root.aiBusy ? "✨ AI is writing…" : "✨ Write with AI"
+                            onClicked: { root.aiOpen = !root.aiOpen; root.aiField = ""; root.aiNote = "" }
+                            HoverHandler { id: aiHover }
+                            ToolTip.visible: aiHover.hovered
+                            ToolTip.text: "Continue, rewrite, summarize, translate or ask about the selection or this paragraph. Uses the AI Gateway app, which shows what is sent and lets you pick the model."
+                        }
+                        // shared: who else has it open (a dot each), and the transport
+                        Row {
+                            visible: root.isShared
+                            spacing: -6
+                            Repeater {
+                                model: root.collabOnline
+                                Rectangle {
+                                    width: 24; height: 24; radius: 12; color: modelData.color; border.color: Theme.palette.background; border.width: 2
+                                    LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 11; font.weight: Theme.typography.weightBold; color: "white"; text: (modelData.name || "?").charAt(0).toUpperCase() }
+                                    HoverHandler { id: peerHover }
+                                    ToolTip.visible: peerHover.hovered; ToolTip.text: modelData.name
+                                }
+                            }
+                        }
+                        Chip {
+                            visible: root.isShared
+                            text: "shared · " + root.networksLabel(root.collab.networks)
+                                  + (root.collabOnline.length === 0 ? " · only you here" : (" · " + (root.collabOnline.length + 1) + " here"))
+                            tint: root.collab.transport && root.collab.transport.connected ? Theme.palette.success : Theme.palette.warning
+                            HoverHandler { id: shareHover }
+                            ToolTip.visible: shareHover.hovered
+                            ToolTip.text: "A Reflection note: also opens in the Reflection apps. Published by reflection_core on " + root.networksLabel(root.collab.networks) + " (Settings in Fileverse or Reflection)."
+                                          + (root.networkStatusText(root.collab.networkStatus) !== "" ? " " + root.networkStatusText(root.collab.networkStatus)
+                                             : (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : ""))
+                        }
+                        // reflection_core 0.6.2+: changes still on their way, either direction
+                        Chip {
+                            readonly property var d: root.collab.delivery
+                            // loroPending (0.6.3+): received changes wait for one this device never got
+                            readonly property bool behind: !!d && (!!d.catchingUp || !!d.loroPending)
+                            visible: root.isShared && !!d && (behind || !!d.unpublished)
+                            text: behind ? "catching up…" : "sending…"
+                            tint: Theme.palette.warning
+                            HoverHandler { id: deliveryHover }
+                            ToolTip.visible: deliveryHover.hovered
+                            ToolTip.text: behind
+                                          ? "Some of the others' changes have not arrived yet. reflection_core keeps asking for them; the text fills in when they come. Keep the document open."
+                                          : "Your latest changes have not been sent yet. They go out as soon as the network lets them."
+                        }
+                        Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
+                        LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Copy link"; onClicked: root.copy(root.draft.published.link, "Link") }
+                        LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Open published"; onClicked: root.open(root.draft.published.link) }
+                        LogosButton { visible: !!(root.draft && root.draft.sourceUrl); compact: true; text: "Open original"; onClicked: root.open(root.draft.sourceUrl) }
+                        Hint {
+                            text: root.draft && root.draft.published
+                                  ? ("Published " + root.ago(root.draft.published.at) + ". Each publish makes a new link.")
+                                  : ""
+                        }
+                    }
+
+                    // toolbar
+                    Rectangle {
+                        Layout.fillWidth: true
+                        // wraps onto a second line when the AI chat leaves it too little room
+                        implicitHeight: tbFlow.implicitHeight + 12
+                        radius: Theme.spacing.radiusLarge
+                        color: Theme.palette.backgroundSecondary
+                        border.color: Theme.palette.borderHairline
+                        Flow {
+                            id: tbFlow
+                            anchors { left: parent.left; right: parent.right; top: parent.top; leftMargin: 6; rightMargin: 6; topMargin: 6 }
+                            spacing: 2
+                            Repeater {
+                                model: root.visualEdit ? [
+                                    ["Text", "p", "Normal text", function () { root.setBlock("p") }],
+                                    ["H1", "h1", "Heading 1 (type # and a space)", function () { root.toggleBlock("h1") }],
+                                    ["H2", "h2", "Heading 2 (##)", function () { root.toggleBlock("h2") }],
+                                    ["H3", "h3", "Heading 3 (###)", function () { root.toggleBlock("h3") }],
+                                    ["|", "", "", null],
+                                    ["B", "", "Bold (Ctrl+B)", function () { root.toggleFont("bold") }],
+                                    ["I", "", "Italic (Ctrl+I)", function () { root.toggleFont("italic") }],
+                                    ["S", "", "Strikethrough", function () { root.toggleFont("strikeout") }],
+                                    ["</>", "", "Inline code", function () { root.wrapSelection(function (t) { return root.codeSpan(t) + "\u200b" }) }],
+                                    ["Link", "", "Link (Ctrl+K)", function () { root.askLink() }],
+                                    ["|", "", "", null],
+                                    ["• List", "ul", "Bulleted list (-)", function () { root.toggleBlock("ul") }],
+                                    ["1. List", "ol", "Numbered list (1.)", function () { root.toggleBlock("ol") }],
+                                    ["☐ Task", "task", "Checklist ([] and a space); click again to tick", function () { root.toggleTask() }],
+                                    ["❝ Quote", "quote", "Quote (>)", function () { root.toggleBlock("quote") }],
+                                    ["{ } Code", "code", "Code block", function () { root.toggleBlock("code") }],
+                                    ["|", "", "", null],
+                                    ["🖼 Image", "", "Insert a picture (kept with the document; encrypted when published)", function () { imageDialog.open() }],
+                                    ["▥ Columns", "", "Two columns side by side, e.g. an image beside text", function () { root.insertColumns() }],
+                                    ["|", "", "", null],
+                                    ["↶", "", "Undo (Ctrl+Z)", function () { root.undoStep() }],
+                                    ["↷", "", "Redo (Ctrl+Shift+Z or Ctrl+Y)", function () { root.redoStep() }]
+                                ] : []
+                                Item {
+                                    implicitWidth: modelData[0] === "|" ? 9 : tbLabel.implicitWidth + 16
+                                    implicitHeight: 30
+                                    Rectangle { visible: modelData[0] === "|"; anchors.centerIn: parent; width: 1; height: 18; color: Theme.palette.borderHairline }
+                                    Rectangle {
+                                        visible: modelData[0] !== "|"
+                                        anchors.fill: parent
+                                        radius: Theme.spacing.radiusMedium
+                                        readonly property bool on: modelData[1] !== "" && (root.blockKind === modelData[1] || (modelData[1] === "task" && root.blockKind === "done"))
+                                        color: on ? Theme.colors.getColor(Theme.palette.primary, 0.18) : (tbMouse.containsMouse ? Theme.palette.hover : "transparent")
+                                        LogosText {
+                                            id: tbLabel
+                                            anchors.centerIn: parent
+                                            textFormat: Text.PlainText
+                                            font.pixelSize: 12
+                                            font.weight: Theme.typography.weightMedium
+                                            font.bold: modelData[0] === "B"
+                                            font.italic: modelData[0] === "I"
+                                            font.strikeout: modelData[0] === "S"
+                                            color: parent.on ? Theme.palette.primary : Theme.palette.textSecondary
+                                            text: modelData[1] === "task" && root.blockKind === "done" ? "☑ Task" : modelData[0]
+                                        }
+                                        MouseArea { id: tbMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: modelData[3]() }
+                                        LogosToolTip { text: modelData[2]; visible: tbMouse.containsMouse && text !== "" }
+                                    }
+                                }
+                            }
+                            Hint { visible: !root.visualEdit; width: implicitWidth + 12; height: 30; verticalAlignment: Text.AlignVCenter; leftPadding: 6; text: "Markdown source. Switch back to Visual to edit formatted text." }
+                            // Visual | Markdown
                             Rectangle {
-                                width: 24; height: 24; radius: 12; color: modelData.color; border.color: Theme.palette.background; border.width: 2
-                                LogosText { anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 11; font.weight: Theme.typography.weightBold; color: "white"; text: (modelData.name || "?").charAt(0).toUpperCase() }
-                                HoverHandler { id: peerHover }
-                                ToolTip.visible: peerHover.hovered; ToolTip.text: modelData.name
+                                implicitWidth: modeRow.implicitWidth + 4
+                                implicitHeight: 30
+                                radius: 15
+                                color: Theme.palette.backgroundInset
+                                Row {
+                                    id: modeRow
+                                    anchors.centerIn: parent
+                                    Repeater {
+                                        model: [["Visual", true], ["Markdown", false]]
+                                        Rectangle {
+                                            width: modeLabel.implicitWidth + 20; height: 26; radius: 13
+                                            color: root.visualEdit === modelData[1] ? Theme.palette.surfaceRaised : "transparent"
+                                            LogosText { id: modeLabel; anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 12; color: root.visualEdit === modelData[1] ? Theme.palette.text : Theme.palette.textTertiary; text: modelData[0] }
+                                            MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setVisualEdit(modelData[1]) }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    Chip {
-                        visible: root.isShared
-                        text: "shared · " + root.networksLabel(root.collab.networks)
-                              + (root.collabOnline.length === 0 ? " · only you here" : (" · " + (root.collabOnline.length + 1) + " here"))
-                        tint: root.collab.transport && root.collab.transport.connected ? Theme.palette.success : Theme.palette.warning
-                        HoverHandler { id: shareHover }
-                        ToolTip.visible: shareHover.hovered
-                        ToolTip.text: "A Reflection note: also opens in the Reflection apps. Published by reflection_core on " + root.networksLabel(root.collab.networks) + " (Settings in Fileverse or Reflection)."
-                                      + (root.networkStatusText(root.collab.networkStatus) !== "" ? " " + root.networkStatusText(root.collab.networkStatus)
-                                         : (root.collab.transport && root.collab.transport.status ? " " + root.collab.transport.status : ""))
+
+                    // link prompt
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.linkRange !== null
+                        spacing: Theme.spacing.small
+                        Field {
+                            id: linkUrl
+                            Layout.fillWidth: true
+                            placeholderText: "https://…"
+                            onAccepted: root.applyLink()
+                            Keys.onEscapePressed: { root.linkRange = null; richArea.forceActiveFocus() }
+                        }
+                        LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Add link"; onClicked: root.applyLink() }
+                        LogosButton { compact: true; text: "Cancel"; onClicked: { root.linkRange = null; richArea.forceActiveFocus() } }
                     }
-                    // reflection_core 0.6.2+: changes still on their way, either direction
-                    Chip {
-                        readonly property var d: root.collab.delivery
-                        // loroPending (0.6.3+): received changes wait for one this device never got
-                        readonly property bool behind: !!d && (!!d.catchingUp || !!d.loroPending)
-                        visible: root.isShared && !!d && (behind || !!d.unpublished)
-                        text: behind ? "catching up…" : "sending…"
-                        tint: Theme.palette.warning
-                        HoverHandler { id: deliveryHover }
-                        ToolTip.visible: deliveryHover.hovered
-                        ToolTip.text: behind
-                                      ? "Some of the others' changes have not arrived yet. reflection_core keeps asking for them; the text fills in when they come. Keep the document open."
-                                      : "Your latest changes have not been sent yet. They go out as soon as the network lets them."
+
+                    // Write with AI: the actions, then the answer to review
+                    Flow {
+                        Layout.fillWidth: true
+                        visible: root.aiOpen
+                        spacing: Theme.spacing.small
+                        Repeater {
+                            model: root.aiActions
+                            LogosButton { compact: true; enabled: !root.aiBusy; text: modelData[0]; onClicked: root.aiRun(modelData[0], modelData[1], modelData[2], modelData[3]) }
+                        }
+                        LogosButton { compact: true; enabled: !root.aiBusy; text: "Translate…"; onClicked: { root.aiField = "translate"; aiInput.text = ""; aiInput.forceActiveFocus() } }
+                        LogosButton { compact: true; enabled: !root.aiBusy; text: "Ask AI…"; onClicked: { root.aiField = "ask"; aiInput.text = ""; aiInput.forceActiveFocus() } }
+                        Hint { visible: !root.aiBusy && root.aiField === "" && root.aiNote === ""; text: "Works on the selection, or the paragraph the cursor is in (Summarize and Ask AI read the whole document when nothing is selected). You see the answer before anything changes." }
+                        Hint { visible: !root.aiBusy && root.aiNote !== ""; color: Theme.palette.warning; text: root.aiNote }
+                        Hint { visible: root.aiBusy; text: "Waiting for the AI… (AI Gateway shows what is sent and asks you first)" }
                     }
-                    Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
-                    LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Copy link"; onClicked: root.copy(root.draft.published.link, "Link") }
-                    LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Open published"; onClicked: root.open(root.draft.published.link) }
-                    LogosButton { visible: !!(root.draft && root.draft.sourceUrl); compact: true; text: "Open original"; onClicked: root.open(root.draft.sourceUrl) }
-                    Hint {
-                        text: root.draft && root.draft.published
-                              ? ("Published " + root.ago(root.draft.published.at) + ". Each publish makes a new link.")
-                              : ""
+                    RowLayout {
+                        Layout.fillWidth: true
+                        visible: root.aiOpen && root.aiField !== ""
+                        spacing: Theme.spacing.small
+                        Field {
+                            id: aiInput
+                            Layout.fillWidth: true
+                            placeholderText: root.aiField === "translate" ? "Into which language? e.g. Czech" : "What should the AI do? e.g. Turn this into a bulleted list"
+                            onAccepted: aiGo.clicked()
+                            Keys.onEscapePressed: root.aiField = ""
+                        }
+                        LogosButton {
+                            id: aiGo
+                            compact: true; variant: LogosButton.Variant.Primary; enabled: !root.aiBusy && aiInput.text.trim() !== ""
+                            text: root.aiField === "translate" ? "Translate" : "Ask"
+                            onClicked: {
+                                var q = aiInput.text.trim()
+                                if (!q) return
+                                if (root.aiField === "translate") root.aiRun("Translate", "Translate this text into " + q + ". Keep the Markdown formatting.", "target", "replace")
+                                else root.aiRun("Ask AI", q, "targetOrAll", "below")
+                                root.aiField = ""
+                            }
+                        }
+                        LogosButton { compact: true; text: "Cancel"; onClicked: root.aiField = "" }
+                    }
+                    Rectangle {
+                        Layout.fillWidth: true
+                        visible: root.aiResult !== null
+                        implicitHeight: aiCol.implicitHeight + 20
+                        radius: Theme.spacing.radiusLarge
+                        color: Theme.colors.getColor(Theme.palette.primary, 0.08)
+                        border.color: Theme.colors.getColor(Theme.palette.primary, 0.5)
+                        ColumnLayout {
+                            id: aiCol
+                            anchors { left: parent.left; right: parent.right; top: parent.top; margins: 10 }
+                            spacing: 6
+                            LogosText {
+                                Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textSecondary; elide: Text.ElideRight
+                                text: root.aiResult ? ("✨ " + root.aiResult.label
+                                      + (root.aiResult.model ? " · " + root.aiResult.model : "")
+                                      + (root.aiResult.privacy ? " · " + root.aiResult.privacy : "")
+                                      + " — review it, then choose where it goes") : ""
+                            }
+                            ScrollView {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: Math.min(aiText.implicitHeight + 8, 220)
+                                clip: true
+                                TextArea {
+                                    id: aiText
+                                    readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
+                                    textFormat: TextEdit.MarkdownText; font.pixelSize: 14; font.family: Theme.typography.publicSans
+                                    color: Theme.palette.text; background: Item {}
+                                    text: root.aiResult ? root.aiResult.text : ""
+                                }
+                            }
+                            Flow {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacing.small
+                                readonly property bool intact: root.aiRangeIntact(root.aiResult) && root.aiResult.a !== root.aiResult.b
+                                LogosButton { visible: !!root.aiResult && root.aiResult.how === "replace"; enabled: parent.intact; compact: true; variant: LogosButton.Variant.Primary; text: "Replace"; onClicked: root.aiApply("replace") }
+                                LogosButton { visible: !!root.aiResult && root.aiResult.how !== "cursor"; enabled: parent.intact; compact: true; variant: root.aiResult && root.aiResult.how === "below" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; text: "Insert below"; onClicked: root.aiApply("below") }
+                                LogosButton { compact: true; variant: root.aiResult && root.aiResult.how === "cursor" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; text: "Insert at cursor"; onClicked: root.aiApply("cursor") }
+                                LogosButton { compact: true; text: "Copy"; onClicked: root.copy(root.aiResult.text, "AI text") }
+                                LogosButton { compact: true; text: "Discard"; onClicked: root.aiResult = null }
+                            }
+                        }
+                    }
+
+                    // visual: the document as a page you type into
+                    Card {
+                        visible: root.visualEdit
+                        color: root.paperBg
+                        border.color: root.paperBorder
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        ScrollView {
+                            id: richScroll
+                            anchors.fill: parent
+                            anchors.margins: 1
+                            clip: true
+                            TextArea {
+                                id: richArea
+                                readonly property int side: Math.max(28, (richScroll.width - 760) / 2)
+                                textFormat: TextEdit.RichText
+                                wrapMode: TextEdit.Wrap
+                                selectByMouse: true
+                                persistentSelection: true
+                                color: root.paperText
+                                selectionColor: Theme.colors.getColor(Theme.palette.primary, 0.35)
+                                selectedTextColor: root.paperText
+                                placeholderTextColor: root.paperFaint
+                                palette.link: root.paperLink
+                                font.family: Theme.typography.publicSans
+                                font.pixelSize: 16
+                                leftPadding: side
+                                rightPadding: side
+                                topPadding: 28
+                                bottomPadding: 60
+                                placeholderText: "Start writing… (# heading, - list, [] task, > quote)"
+                                background: Item {}
+                                onTextChanged: { root.applyPendingFont(); root.inlineRule(); root.editorChanged() }
+                                onCursorPositionChanged: { root.updateBlockKind(); root.cursorMoved() }
+                                // others' carets (shared drafts)
+                                Repeater {
+                                    model: root.isShared ? root.collabOnline : []
+                                    Item {
+                                        readonly property int at: { root.collab; richArea.length; return root.peerCaretPos(modelData.caret) }
+                                        readonly property rect r: at >= 0 ? richArea.positionToRectangle(at) : Qt.rect(0, 0, 0, 0)
+                                        visible: at >= 0 && modelData.caret !== null && modelData.caret !== undefined
+                                        x: r.x; y: r.y; width: 2; height: Math.max(r.height, 14); z: 5
+                                        Rectangle { anchors.fill: parent; color: modelData.color }
+                                        Rectangle {
+                                            y: -14; width: peerName.implicitWidth + 8; height: 14; radius: 3; color: modelData.color
+                                            LogosText { id: peerName; x: 4; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; font.pixelSize: 10; color: "white"; text: modelData.name }
+                                        }
+                                    }
+                                }
+
+                                // Ctrl+click opens a link (a plain click puts the cursor in it to edit)
+                                onReleased: function (ev) {
+                                    if (!(ev.modifiers & Qt.ControlModifier)) return
+                                    // (linkAt wants other coordinates in a padded TextArea; the hovered link is the one clicked)
+                                    var l = String(richArea.hoveredLink || richArea.linkAt(ev.x - richArea.leftPadding, ev.y - richArea.topPadding))
+                                    if (l) root.openLink(l)
+                                }
+                                HoverHandler { cursorShape: richArea.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
+                                ToolTip.visible: richArea.hoveredLink !== ""
+                                ToolTip.delay: 600
+                                ToolTip.text: "Ctrl+click to open the link"
+                                // Basecamp binds Ctrl+K (its search), and Tab moves the focus: take them
+                                // while the editor has focus
+                                Keys.onShortcutOverride: function (e) {
+                                    if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_K || e.key === Qt.Key_B || e.key === Qt.Key_I || e.key === Qt.Key_Z || e.key === Qt.Key_Y)) e.accepted = true
+                                    if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true
+                                }
+                                Keys.onTabPressed: function (e) { root.editorTab(false); e.accepted = true }
+                                Keys.onBacktabPressed: function (e) { root.editorTab(true); e.accepted = true }
+                                Keys.onPressed: function (e) {
+                                    var ctrl = e.modifiers & Qt.ControlModifier
+                                    // a word ends a step: the space or Enter after it starts the next one
+                                    if (!ctrl && (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter)) root.commitStep()
+                                    if (ctrl && e.key === Qt.Key_Z) { if (e.modifiers & Qt.ShiftModifier) root.redoStep(); else root.undoStep(); e.accepted = true }
+                                    else if (ctrl && e.key === Qt.Key_Y) { root.redoStep(); e.accepted = true }
+                                    else if (ctrl && e.key === Qt.Key_B) { root.toggleFont("bold"); e.accepted = true }
+                                    else if (ctrl && e.key === Qt.Key_I) { root.toggleFont("italic"); e.accepted = true }
+                                    else if (ctrl && e.key === Qt.Key_K) { root.askLink(); e.accepted = true }
+                                    else if (!ctrl && e.key === Qt.Key_Space && root.typedShortcut()) e.accepted = true
+                                    // Tab nests a list item, Shift+Tab lifts it; in code it indents. It
+                                    // never moves the focus out of the editor.
+                                    else if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) {
+                                        root.editorTab(e.key === Qt.Key_Backtab || (e.modifiers & Qt.ShiftModifier))
+                                        e.accepted = true
+                                    }
+                                    // Enter on an empty list item or quote line ends the list or quote; on
+                                    // an empty last line of a code block it leaves the code block
+                                    // (the block kind the editor keeps up to date, not a fresh ask of the
+                                    // core: a call here lets the next typed key in before this Enter)
+                                    else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && !(e.modifiers & Qt.ShiftModifier)
+                                             && root.isBlank(root.blockText())
+                                             && (/^(ul|ol|task|done|quote)$/.test(root.blockKind) || (root.blockKind === "code" && root.kindAfter() !== "code"))) {
+                                        // a nested item goes up one level, a top-level one leaves the list
+                                        root.setBlock(/^(ul|ol|task|done)$/.test(root.blockKind) ? "outdent" : "p")
+                                        e.accepted = true
+                                    }
+                                    // Enter at the end of a heading starts normal text, as in Fileverse
+                                    else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && !(e.modifiers & Qt.ShiftModifier)) {
+                                        // decided before Qt splits the block: is this a heading, and are we at its end?
+                                        var p = richArea.getText(0, richArea.length), c = richArea.cursorPosition
+                                        var atEnd = c === p.length || root.pieceBreak.test(p.charAt(c))
+                                        if (/^h[1-3]$/.test(root.blockKind) && atEnd) Qt.callLater(function () { root.setBlock("p") })
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // markdown source + preview
+                    SplitView {
+                        visible: !root.visualEdit
+                        Layout.fillWidth: true
+                        Layout.fillHeight: true
+                        orientation: Qt.Horizontal
+                        ScrollView {
+                            SplitView.preferredWidth: parent.width / 2
+                            SplitView.minimumWidth: 200
+                            TextArea {
+                                id: mdArea
+                                color: root.paperText
+                                font.pixelSize: 14
+                                font.family: Theme.typography.mono
+                                wrapMode: TextEdit.Wrap
+                                selectByMouse: true
+                                textFormat: TextEdit.PlainText
+                                padding: 14
+                                background: Rectangle { color: root.paperInset; radius: Theme.spacing.radiusLarge; border.color: root.paperBorder }
+                                onTextChanged: if (activeFocus) root.editorChanged()
+                                // Tab indents (nested lists are four spaces), never leaves the editor
+                                Keys.onShortcutOverride: function (e) {
+                                    if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true
+                                    if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_Z || e.key === Qt.Key_Y)) e.accepted = true
+                                }
+                                Keys.onPressed: function (e) {
+                                    if (!(e.modifiers & Qt.ControlModifier)) {
+                                        if (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) root.commitStep()
+                                        return
+                                    }
+                                    if (e.key === Qt.Key_Z) { if (e.modifiers & Qt.ShiftModifier) root.redoStep(); else root.undoStep(); e.accepted = true }
+                                    else if (e.key === Qt.Key_Y) { root.redoStep(); e.accepted = true }
+                                }
+                                Keys.onTabPressed: function (e) { mdArea.insert(mdArea.cursorPosition, "    "); e.accepted = true }
+                                Keys.onBacktabPressed: function (e) {
+                                    var t = mdArea.text, c = mdArea.cursorPosition, s0 = t.lastIndexOf("\n", c - 1) + 1
+                                    var n = 0; while (n < 4 && t.charAt(s0 + n) === " ") n++
+                                    if (n) mdArea.remove(s0, s0 + n)
+                                    e.accepted = true
+                                }
+                                onCursorPositionChanged: root.cursorMoved()
+                                // others' carets (shared drafts)
+                                Repeater {
+                                    model: root.isShared ? root.collabOnline : []
+                                    Item {
+                                        readonly property int at: { root.collab; mdArea.length; return root.peerCaretPos(modelData.caret) }
+                                        readonly property rect r: at >= 0 ? mdArea.positionToRectangle(at) : Qt.rect(0, 0, 0, 0)
+                                        visible: at >= 0 && modelData.caret !== null && modelData.caret !== undefined
+                                        x: r.x; y: r.y; width: 2; height: Math.max(r.height, 14); z: 5
+                                        Rectangle { anchors.fill: parent; color: modelData.color }
+                                        Rectangle {
+                                            y: -14; width: peerName.implicitWidth + 8; height: 14; radius: 3; color: modelData.color
+                                            LogosText { id: peerName; x: 4; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; font.pixelSize: 10; color: "white"; text: modelData.name }
+                                        }
+                                    }
+                                }
+
+                            }
+                        }
+                        Rectangle {
+                            SplitView.fillWidth: true
+                            color: root.paperBg
+                            radius: Theme.spacing.radiusLarge
+                            border.color: root.paperBorder
+                            ListView {
+                                id: previewList
+                                anchors.fill: parent
+                                anchors.margins: 16
+                                clip: true
+                                spacing: 8
+                                model: root.mode === "edit" && !root.visualEdit ? root.blocks : []
+                                ScrollBar.vertical: ScrollBar {}
+                                delegate: Loader {
+                                    width: previewList.width - 12
+                                    property var b: modelData
+                                    property real fs: 1
+                                    sourceComponent: root.blockComponent(b)
+                                }
+                            }
+                        }
                     }
                 }
 
-                // toolbar
+                // AI chat
                 Rectangle {
-                    Layout.fillWidth: true
-                    implicitHeight: 42
+                    visible: root.chatOpen
+                    Layout.preferredWidth: 380
+                    Layout.fillHeight: true
                     radius: Theme.spacing.radiusLarge
                     color: Theme.palette.backgroundSecondary
                     border.color: Theme.palette.borderHairline
-                    RowLayout {
-                        anchors.fill: parent
-                        anchors.leftMargin: 6
-                        anchors.rightMargin: 6
-                        spacing: 2
-                        Repeater {
-                            model: root.visualEdit ? [
-                                ["Text", "p", "Normal text", function () { root.setBlock("p") }],
-                                ["H1", "h1", "Heading 1 (type # and a space)", function () { root.toggleBlock("h1") }],
-                                ["H2", "h2", "Heading 2 (##)", function () { root.toggleBlock("h2") }],
-                                ["H3", "h3", "Heading 3 (###)", function () { root.toggleBlock("h3") }],
-                                ["|", "", "", null],
-                                ["B", "", "Bold (Ctrl+B)", function () { root.toggleFont("bold") }],
-                                ["I", "", "Italic (Ctrl+I)", function () { root.toggleFont("italic") }],
-                                ["S", "", "Strikethrough", function () { root.toggleFont("strikeout") }],
-                                ["</>", "", "Inline code", function () { root.wrapSelection(function (t) { return root.codeSpan(t) + "\u200b" }) }],
-                                ["Link", "", "Link (Ctrl+K)", function () { root.askLink() }],
-                                ["|", "", "", null],
-                                ["• List", "ul", "Bulleted list (-)", function () { root.toggleBlock("ul") }],
-                                ["1. List", "ol", "Numbered list (1.)", function () { root.toggleBlock("ol") }],
-                                ["☐ Task", "task", "Checklist ([] and a space); click again to tick", function () { root.toggleTask() }],
-                                ["❝ Quote", "quote", "Quote (>)", function () { root.toggleBlock("quote") }],
-                                ["{ } Code", "code", "Code block", function () { root.toggleBlock("code") }],
-                                ["|", "", "", null],
-                                ["🖼 Image", "", "Insert a picture (kept with the document; encrypted when published)", function () { imageDialog.open() }],
-                                ["▥ Columns", "", "Two columns side by side, e.g. an image beside text", function () { root.insertColumns() }],
-                                ["|", "", "", null],
-                                ["↶", "", "Undo (Ctrl+Z)", function () { root.undoStep() }],
-                                ["↷", "", "Redo (Ctrl+Shift+Z or Ctrl+Y)", function () { root.redoStep() }]
-                            ] : []
-                            Item {
-                                implicitWidth: modelData[0] === "|" ? 9 : tbLabel.implicitWidth + 16
-                                implicitHeight: 30
-                                Rectangle { visible: modelData[0] === "|"; anchors.centerIn: parent; width: 1; height: 18; color: Theme.palette.borderHairline }
-                                Rectangle {
-                                    visible: modelData[0] !== "|"
-                                    anchors.fill: parent
-                                    radius: Theme.spacing.radiusMedium
-                                    readonly property bool on: modelData[1] !== "" && (root.blockKind === modelData[1] || (modelData[1] === "task" && root.blockKind === "done"))
-                                    color: on ? Theme.colors.getColor(Theme.palette.primary, 0.18) : (tbMouse.containsMouse ? Theme.palette.hover : "transparent")
-                                    LogosText {
-                                        id: tbLabel
-                                        anchors.centerIn: parent
-                                        textFormat: Text.PlainText
-                                        font.pixelSize: 12
-                                        font.weight: Theme.typography.weightMedium
-                                        font.bold: modelData[0] === "B"
-                                        font.italic: modelData[0] === "I"
-                                        font.strikeout: modelData[0] === "S"
-                                        color: parent.on ? Theme.palette.primary : Theme.palette.textSecondary
-                                        text: modelData[1] === "task" && root.blockKind === "done" ? "☑ Task" : modelData[0]
-                                    }
-                                    MouseArea { id: tbMouse; anchors.fill: parent; hoverEnabled: true; cursorShape: Qt.PointingHandCursor; onClicked: modelData[3]() }
-                                    LogosToolTip { text: modelData[2]; visible: tbMouse.containsMouse && text !== "" }
-                                }
-                            }
-                        }
-                        Hint { visible: !root.visualEdit; Layout.leftMargin: 6; text: "Markdown source. Switch back to Visual to edit formatted text." }
-                        Item { Layout.fillWidth: true }
-                        // Visual | Markdown
-                        Rectangle {
-                            implicitWidth: modeRow.implicitWidth + 4
-                            implicitHeight: 30
-                            radius: 15
-                            color: Theme.palette.backgroundInset
-                            Row {
-                                id: modeRow
-                                anchors.centerIn: parent
-                                Repeater {
-                                    model: [["Visual", true], ["Markdown", false]]
-                                    Rectangle {
-                                        width: modeLabel.implicitWidth + 20; height: 26; radius: 13
-                                        color: root.visualEdit === modelData[1] ? Theme.palette.surfaceRaised : "transparent"
-                                        LogosText { id: modeLabel; anchors.centerIn: parent; textFormat: Text.PlainText; font.pixelSize: 12; color: root.visualEdit === modelData[1] ? Theme.palette.text : Theme.palette.textTertiary; text: modelData[0] }
-                                        MouseArea { anchors.fill: parent; cursorShape: Qt.PointingHandCursor; onClicked: root.setVisualEdit(modelData[1]) }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // link prompt
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: root.linkRange !== null
-                    spacing: Theme.spacing.small
-                    Field {
-                        id: linkUrl
-                        Layout.fillWidth: true
-                        placeholderText: "https://…"
-                        onAccepted: root.applyLink()
-                        Keys.onEscapePressed: { root.linkRange = null; richArea.forceActiveFocus() }
-                    }
-                    LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Add link"; onClicked: root.applyLink() }
-                    LogosButton { compact: true; text: "Cancel"; onClicked: { root.linkRange = null; richArea.forceActiveFocus() } }
-                }
-
-                // Write with AI: the actions, then the answer to review
-                Flow {
-                    Layout.fillWidth: true
-                    visible: root.aiOpen
-                    spacing: Theme.spacing.small
-                    Repeater {
-                        model: root.aiActions
-                        LogosButton { compact: true; enabled: !root.aiBusy; text: modelData[0]; onClicked: root.aiRun(modelData[0], modelData[1], modelData[2], modelData[3]) }
-                    }
-                    LogosButton { compact: true; enabled: !root.aiBusy; text: "Translate…"; onClicked: { root.aiField = "translate"; aiInput.text = ""; aiInput.forceActiveFocus() } }
-                    LogosButton { compact: true; enabled: !root.aiBusy; text: "Ask AI…"; onClicked: { root.aiField = "ask"; aiInput.text = ""; aiInput.forceActiveFocus() } }
-                    Hint { visible: !root.aiBusy && root.aiField === "" && root.aiNote === ""; text: "Works on the selection, or the paragraph the cursor is in (Summarize and Ask AI read the whole document when nothing is selected). You see the answer before anything changes." }
-                    Hint { visible: !root.aiBusy && root.aiNote !== ""; color: Theme.palette.warning; text: root.aiNote }
-                    Hint { visible: root.aiBusy; text: "Waiting for the AI… (AI Gateway shows what is sent and asks you first)" }
-                }
-                RowLayout {
-                    Layout.fillWidth: true
-                    visible: root.aiOpen && root.aiField !== ""
-                    spacing: Theme.spacing.small
-                    Field {
-                        id: aiInput
-                        Layout.fillWidth: true
-                        placeholderText: root.aiField === "translate" ? "Into which language? e.g. Czech" : "What should the AI do? e.g. Turn this into a bulleted list"
-                        onAccepted: aiGo.clicked()
-                        Keys.onEscapePressed: root.aiField = ""
-                    }
-                    LogosButton {
-                        id: aiGo
-                        compact: true; variant: LogosButton.Variant.Primary; enabled: !root.aiBusy && aiInput.text.trim() !== ""
-                        text: root.aiField === "translate" ? "Translate" : "Ask"
-                        onClicked: {
-                            var q = aiInput.text.trim()
-                            if (!q) return
-                            if (root.aiField === "translate") root.aiRun("Translate", "Translate this text into " + q + ". Keep the Markdown formatting.", "target", "replace")
-                            else root.aiRun("Ask AI", q, "targetOrAll", "below")
-                            root.aiField = ""
-                        }
-                    }
-                    LogosButton { compact: true; text: "Cancel"; onClicked: root.aiField = "" }
-                }
-                Rectangle {
-                    Layout.fillWidth: true
-                    visible: root.aiResult !== null
-                    implicitHeight: aiCol.implicitHeight + 20
-                    radius: Theme.spacing.radiusLarge
-                    color: Theme.colors.getColor(Theme.palette.primary, 0.08)
-                    border.color: Theme.colors.getColor(Theme.palette.primary, 0.5)
                     ColumnLayout {
-                        id: aiCol
-                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 10 }
-                        spacing: 6
-                        LogosText {
-                            Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textSecondary; elide: Text.ElideRight
-                            text: root.aiResult ? ("✨ " + root.aiResult.label
-                                  + (root.aiResult.model ? " · " + root.aiResult.model : "")
-                                  + (root.aiResult.privacy ? " · " + root.aiResult.privacy : "")
-                                  + " — review it, then choose where it goes") : ""
-                        }
-                        ScrollView {
-                            Layout.fillWidth: true
-                            Layout.preferredHeight: Math.min(aiText.implicitHeight + 8, 220)
-                            clip: true
-                            TextArea {
-                                id: aiText
-                                readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
-                                textFormat: TextEdit.MarkdownText; font.pixelSize: 14; font.family: Theme.typography.publicSans
-                                color: Theme.palette.text; background: Item {}
-                                text: root.aiResult ? root.aiResult.text : ""
-                            }
-                        }
-                        Flow {
-                            Layout.fillWidth: true
-                            spacing: Theme.spacing.small
-                            readonly property bool intact: root.aiRangeIntact(root.aiResult) && root.aiResult.a !== root.aiResult.b
-                            LogosButton { visible: !!root.aiResult && root.aiResult.how === "replace"; enabled: parent.intact; compact: true; variant: LogosButton.Variant.Primary; text: "Replace"; onClicked: root.aiApply("replace") }
-                            LogosButton { visible: !!root.aiResult && root.aiResult.how !== "cursor"; enabled: parent.intact; compact: true; variant: root.aiResult && root.aiResult.how === "below" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; text: "Insert below"; onClicked: root.aiApply("below") }
-                            LogosButton { compact: true; variant: root.aiResult && root.aiResult.how === "cursor" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; text: "Insert at cursor"; onClicked: root.aiApply("cursor") }
-                            LogosButton { compact: true; text: "Copy"; onClicked: root.copy(root.aiResult.text, "AI text") }
-                            LogosButton { compact: true; text: "Discard"; onClicked: root.aiResult = null }
-                        }
-                    }
-                }
-
-                // visual: the document as a page you type into
-                Card {
-                    visible: root.visualEdit
-                    color: root.paperBg
-                    border.color: root.paperBorder
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    ScrollView {
-                        id: richScroll
                         anchors.fill: parent
-                        anchors.margins: 1
-                        clip: true
-                        TextArea {
-                            id: richArea
-                            readonly property int side: Math.max(28, (richScroll.width - 760) / 2)
-                            textFormat: TextEdit.RichText
-                            wrapMode: TextEdit.Wrap
-                            selectByMouse: true
-                            persistentSelection: true
-                            color: root.paperText
-                            selectionColor: Theme.colors.getColor(Theme.palette.primary, 0.35)
-                            selectedTextColor: root.paperText
-                            placeholderTextColor: root.paperFaint
-                            palette.link: root.paperLink
-                            font.family: Theme.typography.publicSans
-                            font.pixelSize: 16
-                            leftPadding: side
-                            rightPadding: side
-                            topPadding: 28
-                            bottomPadding: 60
-                            placeholderText: "Start writing… (# heading, - list, [] task, > quote)"
-                            background: Item {}
-                            onTextChanged: { root.applyPendingFont(); root.inlineRule(); root.editorChanged() }
-                            onCursorPositionChanged: { root.updateBlockKind(); root.cursorMoved() }
-                            // others' carets (shared drafts)
-                            Repeater {
-                                model: root.isShared ? root.collabOnline : []
-                                Item {
-                                    readonly property int at: { root.collab; richArea.length; return root.peerCaretPos(modelData.caret) }
-                                    readonly property rect r: at >= 0 ? richArea.positionToRectangle(at) : Qt.rect(0, 0, 0, 0)
-                                    visible: at >= 0 && modelData.caret !== null && modelData.caret !== undefined
-                                    x: r.x; y: r.y; width: 2; height: Math.max(r.height, 14); z: 5
-                                    Rectangle { anchors.fill: parent; color: modelData.color }
-                                    Rectangle {
-                                        y: -14; width: peerName.implicitWidth + 8; height: 14; radius: 3; color: modelData.color
-                                        LogosText { id: peerName; x: 4; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; font.pixelSize: 10; color: "white"; text: modelData.name }
-                                    }
-                                }
-                            }
-
-                            // Ctrl+click opens a link (a plain click puts the cursor in it to edit)
-                            onReleased: function (ev) {
-                                if (!(ev.modifiers & Qt.ControlModifier)) return
-                                // (linkAt wants other coordinates in a padded TextArea; the hovered link is the one clicked)
-                                var l = String(richArea.hoveredLink || richArea.linkAt(ev.x - richArea.leftPadding, ev.y - richArea.topPadding))
-                                if (l) root.openLink(l)
-                            }
-                            HoverHandler { cursorShape: richArea.hoveredLink ? Qt.PointingHandCursor : Qt.IBeamCursor }
-                            ToolTip.visible: richArea.hoveredLink !== ""
-                            ToolTip.delay: 600
-                            ToolTip.text: "Ctrl+click to open the link"
-                            // Basecamp binds Ctrl+K (its search), and Tab moves the focus: take them
-                            // while the editor has focus
-                            Keys.onShortcutOverride: function (e) {
-                                if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_K || e.key === Qt.Key_B || e.key === Qt.Key_I || e.key === Qt.Key_Z || e.key === Qt.Key_Y)) e.accepted = true
-                                if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true
-                            }
-                            Keys.onTabPressed: function (e) { root.editorTab(false); e.accepted = true }
-                            Keys.onBacktabPressed: function (e) { root.editorTab(true); e.accepted = true }
-                            Keys.onPressed: function (e) {
-                                var ctrl = e.modifiers & Qt.ControlModifier
-                                // a word ends a step: the space or Enter after it starts the next one
-                                if (!ctrl && (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter)) root.commitStep()
-                                if (ctrl && e.key === Qt.Key_Z) { if (e.modifiers & Qt.ShiftModifier) root.redoStep(); else root.undoStep(); e.accepted = true }
-                                else if (ctrl && e.key === Qt.Key_Y) { root.redoStep(); e.accepted = true }
-                                else if (ctrl && e.key === Qt.Key_B) { root.toggleFont("bold"); e.accepted = true }
-                                else if (ctrl && e.key === Qt.Key_I) { root.toggleFont("italic"); e.accepted = true }
-                                else if (ctrl && e.key === Qt.Key_K) { root.askLink(); e.accepted = true }
-                                else if (!ctrl && e.key === Qt.Key_Space && root.typedShortcut()) e.accepted = true
-                                // Tab nests a list item, Shift+Tab lifts it; in code it indents. It
-                                // never moves the focus out of the editor.
-                                else if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) {
-                                    root.editorTab(e.key === Qt.Key_Backtab || (e.modifiers & Qt.ShiftModifier))
-                                    e.accepted = true
-                                }
-                                // Enter on an empty list item or quote line ends the list or quote; on
-                                // an empty last line of a code block it leaves the code block
-                                // (the block kind the editor keeps up to date, not a fresh ask of the
-                                // core: a call here lets the next typed key in before this Enter)
-                                else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && !(e.modifiers & Qt.ShiftModifier)
-                                         && root.isBlank(root.blockText())
-                                         && (/^(ul|ol|task|done|quote)$/.test(root.blockKind) || (root.blockKind === "code" && root.kindAfter() !== "code"))) {
-                                    // a nested item goes up one level, a top-level one leaves the list
-                                    root.setBlock(/^(ul|ol|task|done)$/.test(root.blockKind) ? "outdent" : "p")
-                                    e.accepted = true
-                                }
-                                // Enter at the end of a heading starts normal text, as in Fileverse
-                                else if ((e.key === Qt.Key_Return || e.key === Qt.Key_Enter) && !(e.modifiers & Qt.ShiftModifier)) {
-                                    // decided before Qt splits the block: is this a heading, and are we at its end?
-                                    var p = richArea.getText(0, richArea.length), c = richArea.cursorPosition
-                                    var atEnd = c === p.length || root.pieceBreak.test(p.charAt(c))
-                                    if (/^h[1-3]$/.test(root.blockKind) && atEnd) Qt.callLater(function () { root.setBlock("p") })
-                                }
-                            }
+                        anchors.margins: 10
+                        spacing: 8
+                        RowLayout {
+                            Layout.fillWidth: true
+                            LogosText { Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 15; font.weight: Theme.typography.weightBold; text: "💬 AI chat" }
+                            LogosButton { compact: true; text: "New chat"; enabled: root.chatMsgs.length > 0 && !root.chatBusy; onClicked: root.chatClear() }
+                            LogosButton { compact: true; text: "✕"; onClicked: root.chatToggle() }
                         }
-                    }
-                }
-
-                // markdown source + preview
-                SplitView {
-                    visible: !root.visualEdit
-                    Layout.fillWidth: true
-                    Layout.fillHeight: true
-                    orientation: Qt.Horizontal
-                    ScrollView {
-                        SplitView.preferredWidth: parent.width / 2
-                        SplitView.minimumWidth: 200
-                        TextArea {
-                            id: mdArea
-                            color: root.paperText
-                            font.pixelSize: 14
-                            font.family: Theme.typography.mono
-                            wrapMode: TextEdit.Wrap
-                            selectByMouse: true
-                            textFormat: TextEdit.PlainText
-                            padding: 14
-                            background: Rectangle { color: root.paperInset; radius: Theme.spacing.radiusLarge; border.color: root.paperBorder }
-                            onTextChanged: if (activeFocus) root.editorChanged()
-                            // Tab indents (nested lists are four spaces), never leaves the editor
-                            Keys.onShortcutOverride: function (e) {
-                                if (e.key === Qt.Key_Tab || e.key === Qt.Key_Backtab) e.accepted = true
-                                if ((e.modifiers & Qt.ControlModifier) && (e.key === Qt.Key_Z || e.key === Qt.Key_Y)) e.accepted = true
-                            }
-                            Keys.onPressed: function (e) {
-                                if (!(e.modifiers & Qt.ControlModifier)) {
-                                    if (e.key === Qt.Key_Space || e.key === Qt.Key_Return || e.key === Qt.Key_Enter) root.commitStep()
-                                    return
-                                }
-                                if (e.key === Qt.Key_Z) { if (e.modifiers & Qt.ShiftModifier) root.redoStep(); else root.undoStep(); e.accepted = true }
-                                else if (e.key === Qt.Key_Y) { root.redoStep(); e.accepted = true }
-                            }
-                            Keys.onTabPressed: function (e) { mdArea.insert(mdArea.cursorPosition, "    "); e.accepted = true }
-                            Keys.onBacktabPressed: function (e) {
-                                var t = mdArea.text, c = mdArea.cursorPosition, s0 = t.lastIndexOf("\n", c - 1) + 1
-                                var n = 0; while (n < 4 && t.charAt(s0 + n) === " ") n++
-                                if (n) mdArea.remove(s0, s0 + n)
-                                e.accepted = true
-                            }
-                            onCursorPositionChanged: root.cursorMoved()
-                            // others' carets (shared drafts)
-                            Repeater {
-                                model: root.isShared ? root.collabOnline : []
-                                Item {
-                                    readonly property int at: { root.collab; mdArea.length; return root.peerCaretPos(modelData.caret) }
-                                    readonly property rect r: at >= 0 ? mdArea.positionToRectangle(at) : Qt.rect(0, 0, 0, 0)
-                                    visible: at >= 0 && modelData.caret !== null && modelData.caret !== undefined
-                                    x: r.x; y: r.y; width: 2; height: Math.max(r.height, 14); z: 5
-                                    Rectangle { anchors.fill: parent; color: modelData.color }
-                                    Rectangle {
-                                        y: -14; width: peerName.implicitWidth + 8; height: 14; radius: 3; color: modelData.color
-                                        LogosText { id: peerName; x: 4; anchors.verticalCenter: parent.verticalCenter; textFormat: Text.PlainText; font.pixelSize: 10; color: "white"; text: modelData.name }
-                                    }
-                                }
-                            }
-
-                        }
-                    }
-                    Rectangle {
-                        SplitView.fillWidth: true
-                        color: root.paperBg
-                        radius: Theme.spacing.radiusLarge
-                        border.color: root.paperBorder
+                        Hint { text: "About this document. The AI sees it and what changes in it, and can propose edits; you decide what goes in. The chat stays on this device." }
                         ListView {
-                            id: previewList
-                            anchors.fill: parent
-                            anchors.margins: 16
+                            id: chatList
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
                             clip: true
                             spacing: 8
-                            model: root.mode === "edit" && !root.visualEdit ? root.blocks : []
-                            ScrollBar.vertical: ScrollBar {}
-                            delegate: Loader {
-                                width: previewList.width - 12
-                                property var b: modelData
-                                property real fs: 1
-                                sourceComponent: root.blockComponent(b)
+                            model: root.chatMsgs
+                            onCountChanged: Qt.callLater(function () { chatList.positionViewAtEnd() })
+                            delegate: Column {
+                                id: msgItem
+                                required property var modelData
+                                required property int index
+                                width: chatList.width
+                                spacing: 4
+                                // the document went to the AI: a small marker
+                                LogosText {
+                                    visible: msgItem.modelData.role === "doc"
+                                    width: parent.width; horizontalAlignment: Text.AlignHCenter
+                                    textFormat: Text.PlainText; font.pixelSize: 11; color: Theme.palette.textTertiary
+                                    text: msgItem.modelData.full ? "📄 the document went to the AI" : "📄 the changes in the document went to the AI"
+                                }
+                                Rectangle {
+                                    visible: msgItem.modelData.role === "user" || msgItem.modelData.role === "assistant"
+                                    readonly property bool mine: msgItem.modelData.role === "user"
+                                    width: Math.min(parent.width - 24, bubbleText.implicitWidth + 20)
+                                    x: mine ? parent.width - width : 0
+                                    height: bubbleText.implicitHeight + 14
+                                    radius: 10
+                                    color: mine ? Theme.colors.getColor(Theme.palette.primary, 0.22) : Theme.palette.backgroundInset
+                                    TextEdit {
+                                        id: bubbleText
+                                        x: 10; y: 7
+                                        width: Math.min(implicitWidth, chatList.width - 44)
+                                        readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
+                                        textFormat: parent.mine ? TextEdit.PlainText : TextEdit.MarkdownText
+                                        font.pixelSize: 13; font.family: Theme.typography.publicSans
+                                        color: Theme.palette.text
+                                        text: msgItem.modelData.text || (msgItem.modelData.edits && msgItem.modelData.edits.length ? "Proposed edits:" : "")
+                                    }
+                                }
+                                LogosText {
+                                    visible: msgItem.modelData.role === "assistant" && !!(msgItem.modelData.model || msgItem.modelData.privacy)
+                                    textFormat: Text.PlainText; font.pixelSize: 10; color: Theme.palette.textTertiary
+                                    text: (msgItem.modelData.model || "") + (msgItem.modelData.privacy ? " · " + msgItem.modelData.privacy : "")
+                                }
+                                // the AI's proposed edits
+                                Repeater {
+                                    model: msgItem.modelData.role === "assistant" ? (msgItem.modelData.edits || []) : []
+                                    Rectangle {
+                                        id: editCard
+                                        required property var modelData
+                                        required property int index
+                                        width: msgItem.width
+                                        height: editCol.implicitHeight + 16
+                                        radius: 8
+                                        color: Theme.palette.background
+                                        border.color: editCard.modelData.state === "applied" ? Theme.palette.success : editCard.modelData.state === "new" ? Theme.colors.getColor(Theme.palette.primary, 0.6) : Theme.palette.borderHairline
+                                        Column {
+                                            id: editCol
+                                            x: 8; y: 8; width: parent.width - 16
+                                            spacing: 4
+                                            LogosText {
+                                                width: parent.width; visible: editCard.modelData.find !== ""
+                                                textFormat: Text.PlainText; font.pixelSize: 12; font.strikeout: true; color: Theme.palette.textTertiary
+                                                wrapMode: Text.Wrap; maximumLineCount: 6; elide: Text.ElideRight
+                                                text: editCard.modelData.find
+                                            }
+                                            LogosText {
+                                                width: parent.width
+                                                textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.text
+                                                wrapMode: Text.Wrap; maximumLineCount: 12; elide: Text.ElideRight
+                                                text: editCard.modelData.replace !== "" ? editCard.modelData.replace : "(delete)"
+                                            }
+                                            Row {
+                                                spacing: 6
+                                                visible: editCard.modelData.state === "new"
+                                                LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Apply"; onClicked: root.chatApply(msgItem.index, editCard.index) }
+                                                LogosButton { compact: true; text: "Dismiss"; onClicked: root.chatSetEdit(msgItem.index, editCard.index, "dismissed") }
+                                            }
+                                            LogosText {
+                                                visible: editCard.modelData.state !== "new"
+                                                textFormat: Text.PlainText; font.pixelSize: 11
+                                                color: editCard.modelData.state === "missing" ? Theme.palette.warning : Theme.palette.textTertiary
+                                                text: editCard.modelData.state === "applied" ? "✓ Applied (Ctrl+Z undoes it)"
+                                                    : editCard.modelData.state === "missing" ? "This text is not in the document any more; edit it yourself or ask again."
+                                                    : "Dismissed"
+                                            }
+                                        }
+                                    }
+                                }
+                                LogosButton {
+                                    visible: msgItem.modelData.role === "assistant" && (msgItem.modelData.edits || []).filter(function (e) { return e.state === "new" }).length > 1
+                                    compact: true; text: "Apply all"
+                                    onClicked: root.chatApplyAll(msgItem.index)
+                                }
                             }
+                        }
+                        Rectangle {
+                            visible: root.chatBusy && root.chatPartial !== ""
+                            Layout.fillWidth: true
+                            Layout.maximumHeight: 200
+                            implicitHeight: Math.min(partialText.implicitHeight + 14, 200)
+                            radius: 10; clip: true
+                            color: Theme.palette.backgroundInset
+                            TextEdit {
+                                id: partialText
+                                x: 10; y: 7; width: parent.width - 20
+                                readOnly: true; wrapMode: TextEdit.Wrap; textFormat: TextEdit.MarkdownText
+                                font.pixelSize: 13; font.family: Theme.typography.publicSans; color: Theme.palette.text
+                                text: root.chatPartial
+                            }
+                        }
+                        Hint { visible: root.chatBusy && root.chatPartial === ""; text: root.chatSession ? "The AI is thinking…" : "Waiting for AI Gateway… (it asks you once to allow this chat)" }
+                        Hint {
+                            visible: !!root.chatSession && !root.chatBusy
+                            text: "Chat allowed in AI Gateway" + (root.chatSession && root.chatSession.model ? " · " + root.chatSession.model : "") + (root.chatSession && root.chatSession.privacy ? " · " + root.chatSession.privacy : "") + ". Closing the chat ends it."
+                        }
+                        Hint { visible: !root.chatBusy && root.chatNote !== ""; color: Theme.palette.warning; text: root.chatNote }
+                        Hint { visible: !root.chatBusy && root.chatMsgs.length === 0 && root.chatNote === ""; text: "Try: “What is unclear in this document?” or “Add a short introduction.”" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 6
+                            ScrollView {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: Math.min(Math.max(chatInput.implicitHeight, 36), 120)
+                                TextArea {
+                                    id: chatInput
+                                    placeholderText: "Ask about the document or ask for a change…"
+                                    wrapMode: TextEdit.Wrap
+                                    font.pixelSize: 13; font.family: Theme.typography.publicSans
+                                    color: Theme.palette.text
+                                    background: Rectangle { radius: 8; color: Theme.palette.backgroundInset; border.color: chatInput.activeFocus ? Theme.palette.primary : Theme.palette.borderHairline }
+                                    // Enter sends, Shift+Enter is a new line
+                                    Keys.onReturnPressed: function (e) {
+                                        if (e.modifiers & Qt.ShiftModifier) { e.accepted = false; return }
+                                        e.accepted = true
+                                        if (root.chatSend(chatInput.text)) chatInput.text = ""
+                                    }
+                                }
+                            }
+                            LogosButton { compact: true; variant: LogosButton.Variant.Primary; enabled: !root.chatBusy && chatInput.text.trim() !== ""; text: "Send"; onClicked: { if (root.chatSend(chatInput.text)) chatInput.text = "" } }
                         }
                     }
                 }

@@ -18,6 +18,9 @@ Window {
     property int slideAt: args.length > 2 ? parseInt(args[1]) : 0
     property var docJson: null
     property var lastJob: ""
+    property var chatRequests: []
+    property var turns: []
+    readonly property string chatReply: "Two small changes would make it clearer:\n\n```edit\n<<<<<<< FIND\n- Logos Storage\n=======\n- Logos Storage (backups)\n>>>>>>> REPLACE\n```\n\n```edit\n<<<<<<< FIND\nWe go **self-sovereign**\n=======\nWe go fully **self-sovereign**\n>>>>>>> REPLACE\n```"
 
     QtObject {
         id: logos
@@ -31,6 +34,18 @@ Window {
         function request(intent, params, cb) {
             console.log("REQUEST", intent, JSON.stringify(params).substring(0, 400))
             if (win.mode === "aiunavail") { Qt.callLater(function () { cb({ ok: false, error: "unavailable" }) }); return }
+            if (intent === "ai.session") {
+                console.log("SESSION title=" + params.title + " document=" + String(params.document).length + " system=" + String(params.system).length)
+                if (win.mode === "chatstateless") { Qt.callLater(function () { cb({ ok: false, error: "unavailable" }) }); return }
+                Qt.callLater(function () { cb({ ok: true, data: { sessionId: "s1", model: "llama-3.3-70b", connector: "venice", privacy: "no-retention" } }) })
+                return
+            }
+            if (intent === "ai.chat") {
+                win.chatRequests.push(params.messages)
+                var reply = "Two small changes would make it clearer:\n\n```edit\n<<<<<<< FIND\n- Logos Storage\n=======\n- Logos Storage (backups)\n>>>>>>> REPLACE\n```\n\n```edit\n<<<<<<< FIND\nWe go **self-sovereign**\n=======\nWe go fully **self-sovereign**\n>>>>>>> REPLACE\n```"
+                Qt.callLater(function () { cb({ ok: true, data: { text: reply, model: "llama-3.3-70b", connector: "venice", privacy: "no-retention", usage: {} } }) })
+                return
+            }
             Qt.callLater(function () { cb({ ok: true, data: { text: "```markdown\nLogos plan, **without servers**\n```", model: "llama-3.3-70b", connector: "venice", privacy: "no-retention", usage: {} } }) })
         }
     }
@@ -58,6 +73,15 @@ Window {
     }
 
     function answer(method, args) {
+        if (method === "chat_load") return { ok: true, chat: null }
+        if (method === "ai_call") {
+            var aa = JSON.parse(args[1])
+            if (args[0] === "sessionChat") { var t = JSON.parse(aa[1]); win.turns.push(t); console.log("TURN", aa[0], JSON.stringify(Object.keys(t)), t.messages ? t.messages.length + " messages" : "", t.document ? "document " + t.document.length : "no document"); return { ok: true, jobId: "job" + win.turns.length } }
+            if (args[0] === "job") return { state: "done", text: win.chatReply, model: "llama-3.3-70b" }
+            if (args[0] === "closeSession") { console.log("CLOSE", aa[0]); return { ok: true } }
+            return { ok: false, error: "?" }
+        }
+        if (method === "chat_save") return { ok: true }
         if (method === "snapshot") return { ok: true, prefs: { paper: win.paperArg }, version: "0.3.0", rpc: "eth_rpc_module (chain 100)", gateways: ["https://gateway.pinata.cloud"], storedBlocks: 6,
             node: { api: "", gateway: "" },
             recent: [ { url: "x", portal: "0x81fb962e2088De6925AffA4E068dd3FAF3EFE163", fileId: 57, title: "Fileverse Agents SDK - Docs 💛", kind: "ddoc", kept: ["a"], inStorage: ["a"] },
@@ -135,10 +159,11 @@ Window {
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
-            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail") {
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail" || win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless") {
                 it.section = "drafts"; it.openDraft("abc123")
-                if (win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editmdai") Qt.callLater(function () { it.setVisualEdit(false) })
+                if (win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editmdai" || win.mode === "chatmd") Qt.callLater(function () { it.setVisualEdit(false) })
                 if (win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail") aiTimer.start()
+                if (win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless") chatTimer.start()
             }
             else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
         })
@@ -186,6 +211,34 @@ Window {
             if (win.mode === "slidecols") view.item.imageSrc({ cid: "bafkreitest" })
         }
     }
+    // AI chat: open the panel, send a message; then apply the edits and send another; then report
+    Timer {
+        id: chatTimer; interval: 1500
+        onTriggered: { view.item.chatToggle(); view.item.chatSend("Can you make this clearer?"); chatTimer2.start() }
+    }
+    Timer {
+        id: chatTimer2; interval: 1800
+        onTriggered: {
+            var it = view.item
+            if (win.mode !== "chat") {
+                it.chatApplyAll(it.chatMsgs.length - 1)
+                console.log("AFTER APPLY:", JSON.stringify(it.editorMarkdown().substring(0, 160)))
+                console.log("EDIT STATES:", JSON.stringify(it.chatMsgs[it.chatMsgs.length - 1].edits.map(function (e) { return e.state })))
+                it.chatSend("Thanks. And now?")
+            }
+            chatTimer3.start()
+        }
+    }
+    Timer {
+        id: chatTimer3; interval: 1500
+        onTriggered: {
+            win.chatRequests.forEach(function (msgs, n) {
+                console.log("REQUEST " + (n + 1) + ": " + msgs.length + " messages; " + msgs.map(function (m) { return m.role + "(" + m.content.length + "):" + JSON.stringify(m.content.substring(0, 60)) }).join(" | "))
+            })
+            console.log("MSGS:", JSON.stringify(view.item.chatMsgs.map(function (m) { return m.role })))
+            if (win.mode === "chatmd") { view.item.chatToggle() }
+        }
+    }
     // AI: open the row, "Clearer" on the paragraph the cursor is in (the title), then maybe Replace
     Timer {
         id: aiTimer; interval: 1500
@@ -201,7 +254,7 @@ Window {
         }
     }
     Timer {
-        interval: 3500; running: true
+        interval: win.mode.indexOf("chat") === 0 ? 6500 : 3500; running: true
         onTriggered: {
             if (win.mode === "slides" || win.mode === "editslides" || win.mode === "slidecols" || win.mode === "diagram" || win.mode === "diagramonly") {
                 console.log("deck", view.item.deck.length, "slides; showing", view.item.slideIndex + 1, "kind", view.item.slide ? view.item.slide.kind : "-")

@@ -126,6 +126,12 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// state, create_document, join_document, set_text, set_cursor, settings;
     /// `args_json` a JSON array of strings. Returns reflection_core's answer, or an error.
     fn reflection_call(&self, method: String, args_json: String) -> String;
+    /// Call AI Gateway's core (ai_gateway_core, when installed) for the AI chat: `method` one
+    /// of sessionChat, job, cancel, closeSession, sessions; `args_json` a JSON array of
+    /// strings. A session is opened by the view through the ai.session intent, which the user
+    /// confirms; its turns come here, without a dialog each. AI Gateway's answer, or an error
+    /// with `absent: true` when it is not installed.
+    fn ai_call(&self, method: String, args_json: String) -> String;
     /// The visual editor's HTML as Markdown (as `draft_save_rich` would store it), for a
     /// draft whose text another module keeps: `{ markdown }`.
     fn rich_md(&self, draft_id: String, html: String) -> String;
@@ -133,6 +139,12 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     fn draft_get(&self, draft_id: String) -> String;
     /// Delete a draft (published copies stay where they are).
     fn draft_delete(&self, draft_id: String) -> String;
+    /// The AI chat about a draft, kept on this device only (never shared or published):
+    /// `{ ok, chat }`, `chat` the JSON value last saved, or null.
+    fn chat_load(&self, draft_id: String) -> String;
+    /// Replace a draft's AI chat with `chat_json` (any JSON value, at most 4 MB); "null"
+    /// deletes it.
+    fn chat_save(&self, draft_id: String, chat_json: String) -> String;
     /// Encrypt a draft and publish it to your IPFS node and Logos Storage. Returns a job.
     fn publish(&self, draft_id: String) -> String;
 
@@ -844,6 +856,17 @@ impl FileverseCoreModuleImpl {
         let dir = self.state.lock().unwrap().drafts_dir().ok_or("module not ready")?;
         let rel = local_image_path(local).ok_or("bad image reference")?;
         std::fs::read(dir.join(rel)).map_err(|_| "this draft's picture is no longer on this device".to_string())
+    }
+
+    /// `<module data>/chats/<draft id>.json`: beside the drafts, not among them (agents and the
+    /// drafts list read every .json in drafts/).
+    fn chat_path(&self, id: &str) -> Result<PathBuf, String> {
+        if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric()) {
+            return Err("bad draft id".into());
+        }
+        let dir = self.state.lock().unwrap().drafts_dir().ok_or("module not ready")?;
+        let base = dir.parent().ok_or("module not ready")?.to_path_buf();
+        Ok(base.join("chats").join(format!("{id}.json")))
     }
 
     fn load_draft(&self, id: &str) -> Result<(PathBuf, Value), String> {
@@ -1592,6 +1615,35 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         }
     }
 
+    fn ai_call(&self, method: String, args_json: String) -> String {
+        const ALLOWED: &[&str] = &["sessionChat", "job", "cancel", "closeSession", "sessions"];
+        if !ALLOWED.contains(&method.as_str()) {
+            return err(format!("not an AI Gateway call Fileverse makes: {method}"));
+        }
+        let args: Value = match serde_json::from_str(&args_json) {
+            Ok(v @ Value::Array(_)) => v,
+            _ => return err("arguments must be a JSON array"),
+        };
+        // as reflection_call: not from the module's own thread
+        let (tx, rx) = std::sync::mpsc::channel();
+        let m = method.clone();
+        let spawned = std::thread::Builder::new().name("fileverse-ai".into()).spawn(move || {
+            let r = logos_rust_sdk::LogosModuleSDK::new()
+                .plugin("ai_gateway_core")
+                .call_json_with_timeout(&m, &args, Duration::from_secs(15));
+            let _ = tx.send(r);
+        });
+        if spawned.is_err() {
+            return err("could not reach AI Gateway");
+        }
+        match rx.recv_timeout(Duration::from_secs(17)) {
+            Ok(Ok(Value::String(s))) => s,
+            Ok(Ok(v)) => v.to_string(),
+            Ok(Err(e)) => json!({ "ok": false, "absent": true, "error": format!("AI Gateway is not installed or not answering ({e:?})") }).to_string(),
+            Err(_) => err("AI Gateway did not answer in time"),
+        }
+    }
+
     fn rich_md(&self, draft_id: String, html: String) -> String {
         let saved = self.load_draft(&draft_id).ok().and_then(|(_, d)| d["markdown"].as_str().map(str::to_string)).unwrap_or_default();
         let refs = self.draft_images(&draft_id, &saved);
@@ -1615,9 +1667,51 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         match self.load_draft(&draft_id) {
             Ok((p, _)) => {
                 let _ = std::fs::remove_file(p);
+                if let Ok(c) = self.chat_path(&draft_id) {
+                    let _ = std::fs::remove_file(c);
+                }
                 json!({ "ok": true }).to_string()
             }
             Err(e) => err(e),
+        }
+    }
+
+    fn chat_load(&self, draft_id: String) -> String {
+        let p = match self.chat_path(&draft_id) {
+            Ok(p) => p,
+            Err(e) => return err(e),
+        };
+        let chat: Value = std::fs::read(&p).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(Value::Null);
+        json!({ "ok": true, "chat": chat }).to_string()
+    }
+
+    fn chat_save(&self, draft_id: String, chat_json: String) -> String {
+        let p = match self.chat_path(&draft_id) {
+            Ok(p) => p,
+            Err(e) => return err(e),
+        };
+        if chat_json.len() > 4 * 1024 * 1024 {
+            return err("the chat is too long to keep (over 4 MB)");
+        }
+        let v: Value = match serde_json::from_str(&chat_json) {
+            Ok(v) => v,
+            Err(e) => return err(format!("not JSON: {e}")),
+        };
+        if v.is_null() {
+            let _ = std::fs::remove_file(&p);
+            return json!({ "ok": true }).to_string();
+        }
+        if let Some(d) = p.parent() {
+            let _ = std::fs::create_dir_all(d);
+        }
+        // a temporary file of its own: two saves can run at once (the view saves when it
+        // sends and again when the answer comes)
+        static SAVES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = SAVES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let tmp = p.with_extension(format!("json.{}.{n}.tmp", std::process::id()));
+        match std::fs::write(&tmp, v.to_string()).and_then(|_| std::fs::rename(&tmp, &p)) {
+            Ok(()) => json!({ "ok": true }).to_string(),
+            Err(e) => err(format!("could not keep the chat: {e}")),
         }
     }
 

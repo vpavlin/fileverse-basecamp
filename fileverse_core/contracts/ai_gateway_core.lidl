@@ -1,0 +1,30 @@
+module ai_gateway_core {
+  version "0.1.2"
+  description "AI Gateway core: one OpenAI-compatible way in to AI for every Logos app. Connectors to local runtimes (Ollama, llama.cpp, LM Studio) and private or decentralised providers (Venice, NEAR AI, Nillion nilAI, Morpheus, AkashML, any OpenAI-compatible endpoint), routing that never goes below the privacy a caller asks for, streaming jobs, per-app usage, keys in a private file, and an optional local OpenAI endpoint on 127.0.0.1."
+  category "productivity"
+  depends []
+
+  method about() -> tstr
+  method presets() -> tstr
+  method connectors() -> tstr
+  method saveConnector(connectorJson: tstr) -> tstr
+  method removeConnector(id: tstr) -> tstr
+  method testConnector(id: tstr) -> tstr
+  method models() -> tstr
+  method refreshModels() -> tstr
+  method chat(caller: tstr, requestJson: tstr) -> tstr
+  method job(jobId: tstr) -> tstr
+  method cancel(jobId: tstr) -> tstr
+  method settings() -> tstr
+  method setSettings(settingsJson: tstr) -> tstr
+  method serverInfo() -> tstr
+  method rotateServerToken() -> tstr
+  method usage() -> tstr
+  method openSession(caller: tstr, sessionJson: tstr) -> tstr
+  method sessionChat(sessionId: tstr, turnJson: tstr) -> tstr
+  method sessions() -> tstr
+  method closeSession(sessionId: tstr) -> tstr
+
+  event jobUpdate(jobId: tstr, updateJson: tstr)
+  event modelsChanged(modelsJson: tstr)
+}
