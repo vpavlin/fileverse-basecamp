@@ -1,5 +1,47 @@
 # What was tested, and how to repeat it
 
+## 0.17.0 (view, draft on branch ai-gateway-draft): write with AI through AI Gateway (2026-11-22)
+
+"✨ Write with AI" (under the title, next to Download Markdown) opens a row of actions:
+Continue writing, Clearer, Shorter, More formal, Fix grammar, Summarize, Translate… and
+Ask AI…. Each sends one `ai.ask` request to AI Gateway (`logos.request`; the view's
+metadata.json declares `"uses": [{ "intent": "ai.ask" }]`). Basecamp asks the user first, and
+AI Gateway shows exactly what is sent and lets them choose the model and its privacy tier.
+- Content: the selection, else the paragraph the cursor is in, as Markdown (the visual editor's
+  selection via `getFormattedText` + the core's `rich_md`). Continue writing sends the text
+  before the cursor; Summarize and Ask AI send the whole document when nothing is selected.
+  Each string is capped at 60 000 bytes (Basecamp's limit is 64 KB).
+- The answer is shown first, rendered, with the model and privacy tier. Nothing changes until
+  the user picks Replace, Insert below, Insert at cursor, Copy or Discard. Replace and Insert
+  below check that the text the AI worked on is still unchanged. Each insertion is one undo
+  step; shared documents send it like typing.
+- A code fence around the whole answer is removed.
+- `unavailable` (no AI Gateway) leaves a note under the actions: "Writing with AI needs the AI
+  Gateway app. Install it in Basecamp, then try again." `cancelled` says "Not sent to the AI";
+  `timeout` and failures say so.
+
+Qt details:
+- an HTML fragment's first block joins the block it lands in, and Qt drops an empty first
+  block, so Insert below starts with a block holding only a zero-width space (the core drops
+  zero-width spaces when it saves);
+- Qt drops a leading plain space, so Insert at cursor's separating space is a
+  `white-space: pre` span.
+
+The builder at this pin does not put `uses` into the package manifest, but Basecamp reads
+intents from the module's metadata.json, which the package keeps.
+
+- Harness: editai (the preview), editaiapply / editmdai (Replace in visual / Markdown), aiunavail.
+- Basecamp t (0.3.2), with no AI Gateway installed: the broker logs "nothing installed provides
+  ai.ask and the catalog knows no package that would", and the note shows.
+- Basecamp t with a canned answer patched into the installed copy only (no model reachable
+  from the rig):
+  - Replace saved `This sentence is clearer and **much** shorter.`; Ctrl+Z and Ctrl+Y each
+    took one step;
+  - Insert at cursor added the continuation after a space;
+  - Insert below made new paragraphs.
+- Not tried: a real model through AI Gateway (Venice), which needs AI Gateway installed and a
+  provider key.
+
 ## 0.16.2 (view): "catching up…" also while changes wait for a missing one (2026-11-11)
 
 reflection_core 0.6.3 adds `delivery.loroPending`: received changes held back because they

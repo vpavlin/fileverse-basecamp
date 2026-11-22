@@ -27,6 +27,12 @@ Window {
         function callModuleAsync(module, method, args, cb, timeout) {
             Qt.callLater(function () { cb(JSON.stringify(win.answer(method, args))) })
         }
+        // Basecamp's intents (AI Gateway's ai.ask): "aiunavail" = not installed
+        function request(intent, params, cb) {
+            console.log("REQUEST", intent, JSON.stringify(params).substring(0, 400))
+            if (win.mode === "aiunavail") { Qt.callLater(function () { cb({ ok: false, error: "unavailable" }) }); return }
+            Qt.callLater(function () { cb({ ok: true, data: { text: "```markdown\nLogos plan, **without servers**\n```", model: "llama-3.3-70b", connector: "venice", privacy: "no-retention", usage: {} } }) })
+        }
     }
 
     function draft() {
@@ -129,9 +135,10 @@ Window {
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
-            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd") {
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail") {
                 it.section = "drafts"; it.openDraft("abc123")
-                if (win.mode === "sharedmd" || win.mode === "editmd") Qt.callLater(function () { it.setVisualEdit(false) })
+                if (win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editmdai") Qt.callLater(function () { it.setVisualEdit(false) })
+                if (win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail") aiTimer.start()
             }
             else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
         })
@@ -177,6 +184,20 @@ Window {
                    : win.mode === "diagramonly" ? view.item.deck.length - 2 + win.slideAt : win.slideAt
             for (var i = 0; i < to; i++) view.item.nextSlide()
             if (win.mode === "slidecols") view.item.imageSrc({ cid: "bafkreitest" })
+        }
+    }
+    // AI: open the row, "Clearer" on the paragraph the cursor is in (the title), then maybe Replace
+    Timer {
+        id: aiTimer; interval: 1500
+        onTriggered: {
+            var it = view.item
+            it.aiOpen = true
+            it.aiRun("Clearer", "Rewrite this text to be clearer.", "target", "replace")
+            if (win.mode === "editaiapply" || win.mode === "editmdai") Qt.callLater(function () { Qt.callLater(function () {
+                it.aiApply("replace")
+                console.log("AFTER REPLACE:", JSON.stringify(it.editorMarkdown().substring(0, 120)))
+            }) })
+            if (win.mode === "aiunavail") Qt.callLater(function () { Qt.callLater(function () { console.log("note:", it.aiNote, "| toast:", it.toast, "| error:", it.error) }) })
         }
     }
     Timer {

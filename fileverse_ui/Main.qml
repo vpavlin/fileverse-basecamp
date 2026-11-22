@@ -1302,6 +1302,148 @@ Item {
             else root.fail("Could not save the file: " + ((r && r.error) || "no answer from the core"))
         })
     }
+    // ── Write with AI (AI Gateway's "ai.ask" intent) ─────────────────────────────────
+    // Basecamp asks the user first: AI Gateway shows exactly what is sent and lets them
+    // pick the model and its privacy. Nothing is written into the document until the user
+    // chooses Replace or Insert. Without AI Gateway the request answers "unavailable" and
+    // Basecamp offers to install it, so Fileverse needs no dependency on it.
+    property bool aiOpen: false
+    property bool aiBusy: false
+    property string aiNote: ""           // stays under the AI actions (e.g. AI Gateway missing)
+    property string aiField: ""          // "", "ask" or "translate": the row's text field is for that
+    property var aiResult: null           // { text, model, privacy, connector, label, how, a, b, orig, visual }
+    readonly property int aiMaxBytes: 60000   // Basecamp's limit is 64 KB a string
+    readonly property string aiSystem: "You help someone write a document in a Markdown editor. Answer in Markdown, in the language of the text unless asked otherwise. Reply with only the text asked for: no introduction, no commentary, no code fences around the answer."
+    readonly property var aiActions: [
+        // label, prompt, what it works on, how the answer goes in
+        ["Continue writing", "Continue the text from where it ends: write the next paragraph or two in the same language, voice and formatting. Reply with only the new text.", "before", "cursor"],
+        ["Clearer", "Rewrite this text to be clearer and easier to read. Keep its meaning, language and Markdown formatting.", "target", "replace"],
+        ["Shorter", "Make this text shorter. Keep the important points, its language and Markdown formatting.", "target", "replace"],
+        ["More formal", "Rewrite this text in a more formal tone. Keep its meaning, language and Markdown formatting.", "target", "replace"],
+        ["Fix grammar", "Fix spelling, grammar and punctuation in this text. Change nothing else; keep the Markdown formatting.", "target", "replace"],
+        ["Summarize", "Summarize this text in a few sentences.", "targetOrAll", "below"]
+    ]
+    function utf8Len(t) { return unescape(encodeURIComponent(t)).length }
+    // At most aiMaxBytes of `t`: its end (`keepEnd`, for "continue") or its start.
+    function aiCap(t, keepEnd) {
+        t = String(t || "")
+        if (root.utf8Len(t) <= root.aiMaxBytes) return t
+        var lo = 0, hi = t.length
+        while (lo < hi) {       // the longest piece that fits
+            var mid = Math.ceil((lo + hi) / 2)
+            var piece = keepEnd ? t.substring(t.length - mid) : t.substring(0, mid)
+            if (root.utf8Len(piece) <= root.aiMaxBytes) lo = mid; else hi = mid - 1
+        }
+        return keepEnd ? t.substring(t.length - lo) : t.substring(0, lo)
+    }
+    // The editor's plain text (what positions count) and Markdown of a range.
+    function aiPlain() { return root.visualEdit ? richArea.getText(0, richArea.length) : mdArea.text }
+    function aiMarkdown(a, b) {
+        if (!root.visualEdit) return mdArea.text.substring(a, b)
+        if (a >= b) return ""
+        var r = root.coreSync("rich_md", [root.draft.id, richArea.getFormattedText(a, b)])
+        return (r && r.markdown !== undefined) ? r.markdown : richArea.getText(a, b)
+    }
+    // What an action works on: the selection, else the paragraph the cursor is in.
+    function aiTarget() {
+        var ed = root.visualEdit ? richArea : mdArea
+        var a = ed.selectionStart, b = ed.selectionEnd
+        if (a !== b) return { a: a, b: b, what: "the selection" }
+        var t = root.aiPlain(), c = ed.cursorPosition
+        if (root.visualEdit) {
+            a = c; while (a > 0 && !root.pieceBreak.test(t.charAt(a - 1))) a--
+            b = c; while (b < t.length && !root.pieceBreak.test(t.charAt(b))) b++
+        } else {
+            a = t.lastIndexOf("\n\n", c - 1); a = a < 0 ? 0 : a + 2
+            b = t.indexOf("\n\n", c); if (b < 0) b = t.length
+        }
+        return { a: a, b: b, what: "this paragraph" }
+    }
+    function aiRun(label, prompt, on, how) {
+        if (!root.draft || root.aiBusy) return
+        if (typeof logos === "undefined" || logos === null || typeof logos.request !== "function") {
+            root.fail("This Basecamp cannot ask other apps yet. Writing with AI needs Basecamp 0.3.2 or newer and the AI Gateway app.")
+            return
+        }
+        var ed = root.visualEdit ? richArea : mdArea
+        var t, content
+        if (on === "before") {
+            t = { a: ed.cursorPosition, b: ed.cursorPosition, what: "the text before the cursor" }
+            content = root.aiCap(root.aiMarkdown(0, ed.cursorPosition), true)
+        } else {
+            // the answer goes with the selection or the cursor's paragraph; Summarize and Ask
+            // read the whole document when nothing is selected
+            t = root.aiTarget()
+            var whole = on === "targetOrAll" && ed.selectionStart === ed.selectionEnd
+            content = root.aiCap(whole ? root.aiMarkdown(0, ed.length) : root.aiMarkdown(t.a, t.b), false)
+        }
+        if (!String(content).trim()) { root.fail("There is no text to work on: select some, or put the cursor in a paragraph."); return }
+        var plain = root.aiPlain()
+        var job = { label: label, how: how, a: t.a, b: t.b, orig: plain.substring(t.a, t.b), visual: root.visualEdit, draftId: root.draft.id }
+        root.commitStep()
+        root.aiBusy = true
+        root.aiNote = ""
+        root.aiResult = null
+        logos.request("ai.ask", { prompt: root.aiCap(prompt, false), content: content, system: root.aiSystem }, function (res) {
+            root.aiBusy = false
+            if (typeof res === "string") res = root.j(res)
+            if (!res || !res.ok) {
+                var e = res ? String(res.error || "failed") : "failed"
+                if (e === "unavailable") root.aiNote = "Writing with AI needs the AI Gateway app. Install it in Basecamp, then try again."
+                else if (e === "cancelled") root.say("Not sent to the AI")
+                else if (e === "timeout") root.fail("The AI did not answer in time. Try again, or pick a faster model in AI Gateway.")
+                else root.fail("The AI could not answer (" + e + ")" + (res && res.message ? ": " + res.message : "") + ".")
+                return
+            }
+            if (!root.draft || root.draft.id !== job.draftId) return
+            var d = res.data || {}
+            job.text = root.aiClean(String(d.text || ""))
+            job.model = d.model || ""; job.privacy = d.privacy || ""; job.connector = d.connector || ""
+            if (!job.text.trim()) { root.fail("The AI answered with no text."); return }
+            root.aiResult = job
+        })
+    }
+    // Models like to wrap answers in a code fence; the document wants the text.
+    function aiClean(t) {
+        var m = t.trim().match(/^```[a-zA-Z]*\n([\s\S]*)\n```$/)
+        return m ? m[1] : t.trim()
+    }
+    // Whether the text the AI worked on is still where it was.
+    function aiRangeIntact(r) {
+        return r && r.visual === root.visualEdit && root.aiPlain().substring(r.a, r.b) === r.orig
+    }
+    // Put the answer in: "replace" the text it worked on, "below" it as new paragraphs,
+    // or at the "cursor". One undo step; shared documents send it like typing.
+    function aiApply(how) {
+        var r = root.aiResult
+        if (!r || !root.draft) return
+        var ed = root.visualEdit ? richArea : mdArea
+        if (how !== "cursor" && !root.aiRangeIntact(r)) { root.fail("The text changed while the AI was writing. Use Insert at cursor or Copy instead."); return }
+        var md = r.text
+        root.commitStep()
+        var at = how === "cursor" ? ed.cursorPosition : how === "below" ? r.b : r.a
+        if (how === "replace") ed.remove(r.a, r.b)
+        if (root.visualEdit) {
+            var h = root.coreSync("rich_html", [md, root.draft.id, root.viewDir])
+            if (!h || !h.ok) { root.fail("Could not put the answer in the editor. Use Copy instead."); return }
+            var body = String(h.html).replace(/^[\s\S]*?<body[^>]*>/i, "").replace(/<\/body>[\s\S]*$/i, "")
+            // a fragment's first block joins the block it lands in, and Qt drops an empty one:
+            // a zero-width space (which the core drops when it saves) starts the new block below
+            if (how === "below") body = "<p>\u200b</p>" + body
+            // a space between the text before the cursor and the answer (Qt drops a plain leading space)
+            else if (how === "cursor" && at > 0 && !/\s/.test(root.aiPlain().charAt(at - 1))) body = body.replace(/^(\s*<p[^>]*>)/i, '$1<span style="white-space:pre"> </span>')
+            richArea.insert(at, body)
+            richArea.forceActiveFocus()
+        } else {
+            var text = how === "below" ? "\n\n" + md : how === "cursor" && at > 0 && !/\s/.test(mdArea.text.charAt(at - 1)) ? " " + md : md
+            mdArea.insert(at, text)
+            mdArea.forceActiveFocus()
+        }
+        root.editorChanged()
+        root.commitStep()
+        root.aiResult = null
+        root.say("Added the AI's text. Undo (Ctrl+Z) takes it out again.")
+    }
     // A draft's title is kept apart from its text; a downloaded file starts with it.
     function withTitle(title, md) {
         var t = String(title || "").trim(), first = String(md || "").replace(/^\s+/, "").split("\n")[0]
@@ -2211,6 +2353,15 @@ Item {
                     spacing: Theme.spacing.small
                     LogosButton { visible: root.isShared; compact: true; text: "Copy id"; onClicked: root.copy(root.collab.id, "Shared document id") }
                     LogosButton { compact: true; text: "Download Markdown"; onClicked: root.downloadMarkdown(titleField.text, root.withTitle(titleField.text, root.editorMarkdown())) }
+                    LogosButton {
+                        compact: true
+                        variant: root.aiOpen ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                        text: root.aiBusy ? "✨ AI is writing…" : "✨ Write with AI"
+                        onClicked: { root.aiOpen = !root.aiOpen; root.aiField = ""; root.aiNote = "" }
+                        HoverHandler { id: aiHover }
+                        ToolTip.visible: aiHover.hovered
+                        ToolTip.text: "Continue, rewrite, summarize, translate or ask about the selection or this paragraph. Uses the AI Gateway app, which shows what is sent and lets you pick the model."
+                    }
                     // shared: who else has it open (a dot each), and the transport
                     Row {
                         visible: root.isShared
@@ -2364,6 +2515,89 @@ Item {
                     }
                     LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Add link"; onClicked: root.applyLink() }
                     LogosButton { compact: true; text: "Cancel"; onClicked: { root.linkRange = null; richArea.forceActiveFocus() } }
+                }
+
+                // Write with AI: the actions, then the answer to review
+                Flow {
+                    Layout.fillWidth: true
+                    visible: root.aiOpen
+                    spacing: Theme.spacing.small
+                    Repeater {
+                        model: root.aiActions
+                        LogosButton { compact: true; enabled: !root.aiBusy; text: modelData[0]; onClicked: root.aiRun(modelData[0], modelData[1], modelData[2], modelData[3]) }
+                    }
+                    LogosButton { compact: true; enabled: !root.aiBusy; text: "Translate…"; onClicked: { root.aiField = "translate"; aiInput.text = ""; aiInput.forceActiveFocus() } }
+                    LogosButton { compact: true; enabled: !root.aiBusy; text: "Ask AI…"; onClicked: { root.aiField = "ask"; aiInput.text = ""; aiInput.forceActiveFocus() } }
+                    Hint { visible: !root.aiBusy && root.aiField === "" && root.aiNote === ""; text: "Works on the selection, or the paragraph the cursor is in (Summarize and Ask AI read the whole document when nothing is selected). You see the answer before anything changes." }
+                    Hint { visible: !root.aiBusy && root.aiNote !== ""; color: Theme.palette.warning; text: root.aiNote }
+                    Hint { visible: root.aiBusy; text: "Waiting for the AI… (AI Gateway shows what is sent and asks you first)" }
+                }
+                RowLayout {
+                    Layout.fillWidth: true
+                    visible: root.aiOpen && root.aiField !== ""
+                    spacing: Theme.spacing.small
+                    Field {
+                        id: aiInput
+                        Layout.fillWidth: true
+                        placeholderText: root.aiField === "translate" ? "Into which language? e.g. Czech" : "What should the AI do? e.g. Turn this into a bulleted list"
+                        onAccepted: aiGo.clicked()
+                        Keys.onEscapePressed: root.aiField = ""
+                    }
+                    LogosButton {
+                        id: aiGo
+                        compact: true; variant: LogosButton.Variant.Primary; enabled: !root.aiBusy && aiInput.text.trim() !== ""
+                        text: root.aiField === "translate" ? "Translate" : "Ask"
+                        onClicked: {
+                            var q = aiInput.text.trim()
+                            if (!q) return
+                            if (root.aiField === "translate") root.aiRun("Translate", "Translate this text into " + q + ". Keep the Markdown formatting.", "target", "replace")
+                            else root.aiRun("Ask AI", q, "targetOrAll", "below")
+                            root.aiField = ""
+                        }
+                    }
+                    LogosButton { compact: true; text: "Cancel"; onClicked: root.aiField = "" }
+                }
+                Rectangle {
+                    Layout.fillWidth: true
+                    visible: root.aiResult !== null
+                    implicitHeight: aiCol.implicitHeight + 20
+                    radius: Theme.spacing.radiusLarge
+                    color: Theme.colors.getColor(Theme.palette.primary, 0.08)
+                    border.color: Theme.colors.getColor(Theme.palette.primary, 0.5)
+                    ColumnLayout {
+                        id: aiCol
+                        anchors { left: parent.left; right: parent.right; top: parent.top; margins: 10 }
+                        spacing: 6
+                        LogosText {
+                            Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textSecondary; elide: Text.ElideRight
+                            text: root.aiResult ? ("✨ " + root.aiResult.label
+                                  + (root.aiResult.model ? " · " + root.aiResult.model : "")
+                                  + (root.aiResult.privacy ? " · " + root.aiResult.privacy : "")
+                                  + " — review it, then choose where it goes") : ""
+                        }
+                        ScrollView {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: Math.min(aiText.implicitHeight + 8, 220)
+                            clip: true
+                            TextArea {
+                                id: aiText
+                                readOnly: true; selectByMouse: true; wrapMode: TextEdit.Wrap
+                                textFormat: TextEdit.MarkdownText; font.pixelSize: 14; font.family: Theme.typography.publicSans
+                                color: Theme.palette.text; background: Item {}
+                                text: root.aiResult ? root.aiResult.text : ""
+                            }
+                        }
+                        Flow {
+                            Layout.fillWidth: true
+                            spacing: Theme.spacing.small
+                            readonly property bool intact: root.aiRangeIntact(root.aiResult) && root.aiResult.a !== root.aiResult.b
+                            LogosButton { visible: !!root.aiResult && root.aiResult.how === "replace"; enabled: parent.intact; compact: true; variant: LogosButton.Variant.Primary; text: "Replace"; onClicked: root.aiApply("replace") }
+                            LogosButton { visible: !!root.aiResult && root.aiResult.how !== "cursor"; enabled: parent.intact; compact: true; variant: root.aiResult && root.aiResult.how === "below" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; text: "Insert below"; onClicked: root.aiApply("below") }
+                            LogosButton { compact: true; variant: root.aiResult && root.aiResult.how === "cursor" ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; text: "Insert at cursor"; onClicked: root.aiApply("cursor") }
+                            LogosButton { compact: true; text: "Copy"; onClicked: root.copy(root.aiResult.text, "AI text") }
+                            LogosButton { compact: true; text: "Discard"; onClicked: root.aiResult = null }
+                        }
+                    }
                 }
 
                 // visual: the document as a page you type into
