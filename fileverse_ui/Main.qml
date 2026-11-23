@@ -1428,18 +1428,68 @@ Item {
     }
     // Put the answer in: "replace" the text it worked on, "below" it as new paragraphs,
     // or at the "cursor". One undo step; shared documents send it like typing.
+    // The answer panel closes first and the text changes once the editor has its new size:
+    // changed while the panel was still open, Qt drew only the part of the text then in view,
+    // and the part the closing panel uncovered stayed blank (vpavlin, a Replace on a long
+    // answer; scrolling did not help, a redo did).
     function aiApply(how) {
         var r = root.aiResult
         if (!r || !root.draft) return
+        if (how !== "cursor" && !root.aiRangeIntact(r)) { root.fail("The text changed while the AI was writing. Use Insert at cursor or Copy instead."); return }
+        root.aiResult = null
+        aiApplyLater.job = { r: r, how: how }
+        aiApplyLater.restart()
+    }
+    Timer {
+        id: aiApplyLater
+        property var job: null
+        interval: 60
+        onTriggered: if (job && root.draft && root.draft.id === job.r.draftId) root.aiApplyNow(job.r, job.how)
+    }
+    function aiApplyNow(r, how) {
         var ed = root.visualEdit ? richArea : mdArea
         if (how !== "cursor" && !root.aiRangeIntact(r)) { root.fail("The text changed while the AI was writing. Use Insert at cursor or Copy instead."); return }
         var md = r.text
         root.commitStep()
         var at = how === "cursor" ? ed.cursorPosition : how === "below" ? r.b : r.a
-        if (how === "replace") ed.remove(r.a, r.b)
+        if (root.visualEdit) {
+            var htmlBefore = richArea.text, len0 = richArea.length
+            // Whole paragraphs (Replace of whole blocks, Insert below): build the new Markdown
+            // from the text before, the answer and the text after, and load it, as opening
+            // does. Qt's fragment insert merged the answer's first paragraph into the block
+            // left at the cut (a list item) and left paragraphs it did not draw.
+            var pl = root.aiPlain()
+            var whole = how === "below" || (how === "replace"
+                        && (r.a === 0 || root.pieceBreak.test(pl.charAt(r.a - 1)))
+                        && (r.b >= pl.length || root.pieceBreak.test(pl.charAt(r.b))))
+            if (whole) {
+                // the Markdown on either side, without the paragraph break at the cut (it came
+                // back as an empty paragraph, "&nbsp;")
+                var preEnd = how === "below" ? r.b : r.a - 1
+                var pre = preEnd > 0 ? root.aiMarkdown(0, preEnd).replace(/\s+$/, "") : ""
+                var post = r.b + 1 < richArea.length ? root.aiMarkdown(r.b + 1, richArea.length).replace(/^\s+/, "") : ""
+                var next = (pre ? pre + "\n\n" : "") + md.trim() + (post ? "\n\n" + post : "") + "\n"
+                root.loadEditor(next)
+                var where = root.cursorFor(richArea.getText(0, richArea.length), md.trim().split("\n").pop().replace(/^\s*([-*+]|\d+[.)]|#+|>)\s+/, "").replace(/[*_`~]/g, ""), 0.5)
+                richArea.cursorPosition = Math.min(where, richArea.length)
+                root.histBase = htmlBefore; root.stepOpen = true; root.stepCaret = at
+                root.commitStep()
+                richArea.forceActiveFocus()
+                root.editorChanged()
+                root.commitStep()
+                root.aiResult = null
+                root.say("Added the AI's text. Undo (Ctrl+Z) takes it out again.")
+                return
+            }
+            // Inside a paragraph: Qt's fragment insert joins the answer to the text around it;
+            // then the editor is rebuilt from the Markdown (Qt can leave paragraphs it does
+            // not draw), and the whole change is one undo step from the text before it.
+            root.loadingEditor = true
+            if (how === "replace") richArea.remove(r.a, r.b)
+        } else if (how === "replace") ed.remove(r.a, r.b)
         if (root.visualEdit) {
             var h = root.coreSync("rich_html", [md, root.draft.id, root.viewDir])
-            if (!h || !h.ok) { root.fail("Could not put the answer in the editor. Use Copy instead."); return }
+            if (!h || !h.ok) { richArea.text = htmlBefore; root.loadingEditor = false; root.fail("Could not put the answer in the editor. Use Copy instead."); return }
             var body = String(h.html).replace(/^[\s\S]*?<body[^>]*>/i, "").replace(/<\/body>[\s\S]*$/i, "")
             // a fragment's first block joins the block it lands in, and Qt drops an empty one:
             // a zero-width space (which the core drops when it saves) starts the new block below
@@ -1447,6 +1497,12 @@ Item {
             // a space between the text before the cursor and the answer (Qt drops a plain leading space)
             else if (how === "cursor" && at > 0 && !/\s/.test(root.aiPlain().charAt(at - 1))) body = body.replace(/^(\s*<p[^>]*>)/i, '$1<span style="white-space:pre"> </span>')
             richArea.insert(at, body)
+            var caret = Math.max(0, at + richArea.length - (how === "replace" ? len0 - (r.b - r.a) : len0))
+            root.loadingEditor = false
+            root.loadEditor(root.editorMarkdown())
+            richArea.cursorPosition = Math.min(caret, richArea.length)
+            root.histBase = htmlBefore; root.stepOpen = true; root.stepCaret = at
+            root.commitStep()
             richArea.forceActiveFocus()
         } else {
             var text = how === "below" ? "\n\n" + md : how === "cursor" && at > 0 && !/\s/.test(mdArea.text.charAt(at - 1)) ? " " + md : md

@@ -1,5 +1,30 @@
 # What was tested, and how to repeat it
 
+## 0.18.2 (view): Write with AI no longer leaves text the editor does not draw (2026-11-23)
+
+vpavlin: after an AI edit, part of the document (the top of it) was blank in the visual editor
+while the Markdown view had it all. Restyling the blank part and undoing brought it back.
+
+Reproduced in Basecamp t with a fake model behind the real AI Gateway, on vpavlin's kind of
+document (a heading, `===`, `&nbsp;` lines, a list): select from "Václav Pavlín" down to the
+list, Clearer, Replace. Three faults:
+1. **Blank top.** The editor's text changed while the answer panel was still open above it.
+   Qt drew only the part then in view, and the part the closing panel uncovered stayed blank
+   (scrolling did not help; a redo did). The panel now closes first, and the text changes
+   60 ms later, once the editor has its new size.
+2. **"Václav Pavlín" became a list item.** Qt's fragment insert merged the answer's first
+   paragraph into the list block left at the cut. Replacing whole paragraphs and Insert below
+   now build the new Markdown from the text before, the answer and the text after, and load
+   it, as opening a document does; one undo step. Inside a paragraph, the fragment insert is
+   still used, followed by the same reload.
+3. **An extra empty paragraph** (`&nbsp;`) on each side of the replaced part: the cut included
+   the paragraph breaks. It no longer does.
+
+After the fix, in the same document:
+- Replace drew the whole document and saved exactly the original's Markdown around the answer;
+- Ctrl+Z restored the original byte for byte, and Ctrl+Y brought the answer back;
+- Insert below (Summarize from a paragraph) put the answer right after it.
+
 ## 0.18.1 (view) + core 0.17.1: the IPFS node only when needed (2026-11-23)
 
 vpavlin: the IPFS node eats a lot of bandwidth when it runs. Fileverse used to start it as soon

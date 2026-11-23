@@ -239,6 +239,7 @@ Window {
             if (win.mode === "chatmd") { view.item.chatToggle() }
         }
     }
+    Timer { id: aiPrint; interval: 400; onTriggered: console.log("AFTER REPLACE:", JSON.stringify(view.item.editorMarkdown().substring(0, 120))) }
     // AI: open the row, "Clearer" on the paragraph the cursor is in (the title), then maybe Replace
     Timer {
         id: aiTimer; interval: 1500
@@ -248,7 +249,7 @@ Window {
             it.aiRun("Clearer", "Rewrite this text to be clearer.", "target", "replace")
             if (win.mode === "editaiapply" || win.mode === "editmdai") Qt.callLater(function () { Qt.callLater(function () {
                 it.aiApply("replace")
-                console.log("AFTER REPLACE:", JSON.stringify(it.editorMarkdown().substring(0, 120)))
+                aiPrint.start()
             }) })
             if (win.mode === "aiunavail") Qt.callLater(function () { Qt.callLater(function () { console.log("note:", it.aiNote, "| toast:", it.toast, "| error:", it.error) }) })
         }
