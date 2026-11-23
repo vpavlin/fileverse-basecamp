@@ -24,6 +24,7 @@ Basecamp t (0.3.2, the IPFS Node module installed, kubo stopped first):
   pictures) never started kubo. Keep on my IPFS started it (about 10 s) and pinned.
 - **Always on:** kubo started (about 16 s); Settings showed 5 peers.
 - **Off:** kubo stopped within 4 s; the sidebar said "off".
+- **When needed, idle stop:** Keep on "A little image test" started kubo at 08:18:36; it stopped by itself at 08:28:47, 10 minutes after the Keep ended.
 - Found and fixed there: Keep was hidden while the node was stopped, and the document did not
   show as kept after Keep, because the view still had the stopped node's empty peer id.
 
