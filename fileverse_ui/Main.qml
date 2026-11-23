@@ -732,6 +732,29 @@ Item {
         root.updateBlockKind()
         root.histLoaded()
         root.fetchEditorImages(r.pending || [])
+        editorRedraw.restart()
+    }
+    // After the visual editor's text is replaced, Qt sometimes leaves part of it undrawn
+    // (vpavlin, after AI edits: the top of the document blank while the Markdown had it;
+    // an undo, which sets the text again, brought it back). When the layout and scrolling
+    // have settled, set the same text once more, keeping the cursor, the selection, the scroll
+    // position and the undo history.
+    Timer {
+        id: editorRedraw
+        interval: 150
+        onTriggered: {
+            if (!root.visualEdit || root.loadingEditor) return
+            var f = richScroll.contentItem, y = f ? f.contentY : 0
+            var a = richArea.selectionStart, b = richArea.selectionEnd, c = richArea.cursorPosition
+            var html = richArea.text, base = root.histBase === html
+            root.loadingEditor = true; root.histApplying = true
+            richArea.text = html
+            root.histApplying = false; root.loadingEditor = false
+            if (a !== b) richArea.select(c === a ? b : a, c)
+            else richArea.cursorPosition = Math.min(c, richArea.length)
+            if (f) f.contentY = y
+            if (base) root.histBase = richArea.text
+        }
     }
     // Images the editor shows but the cache does not have yet (a copy of a Fileverse
     // document): fetch them, then show the document again where the cursor was.
@@ -3336,6 +3359,7 @@ Item {
                                             }
                                             LogosText {
                                                 visible: editCard.modelData.state !== "new"
+                                                width: parent.width; wrapMode: Text.Wrap
                                                 textFormat: Text.PlainText; font.pixelSize: 11
                                                 color: editCard.modelData.state === "missing" ? Theme.palette.warning : Theme.palette.textTertiary
                                                 text: editCard.modelData.state === "applied" ? "✓ Applied (Ctrl+Z undoes it)"

@@ -1,5 +1,23 @@
 # What was tested, and how to repeat it
 
+## 0.18.3 (view): the visual editor redraws itself after every reload (2026-11-23)
+
+vpavlin, on 0.18.2: applying the AI chat's edits left the top of the document blank again.
+The chat's Apply reloads the editor from the Markdown, and so do opening, switching modes and
+shared edits arriving. In vpavlin's Basecamp (GPU drawing), Qt sometimes leaves part of a
+freshly set text undrawn. Undo, which sets the text again, brought it back. My Basecamp
+(software drawing under Xvfb) never showed it for the chat, even scrolled down, so no fix
+could rely on reproducing the exact trigger.
+
+So after every reload of the visual editor, it sets the same text once more, 150 ms later,
+when layout and scrolling have settled, keeping the cursor, the selection, the scroll
+position and the undo history.
+
+Basecamp t:
+- typing right after opening a document was kept, and undo then took it back word by word;
+- chat Apply all while scrolled to the middle of a long document drew the whole document;
+- an edit card whose text is gone says so (the message now wraps).
+
 ## 0.18.2 (view): Write with AI no longer leaves text the editor does not draw (2026-11-23)
 
 vpavlin: after an AI edit, part of the document (the top of it) was blank in the visual editor
