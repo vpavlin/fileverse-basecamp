@@ -1,5 +1,37 @@
 # What was tested, and how to repeat it
 
+## 0.18.4 (view): AI chat edits apply when the model quotes loosely (2026-11-23)
+
+vpavlin, with Venice (deepseek-v4): every edit card said "This text is not in the document
+any more", although the FIND text clearly came from the document. Models quote the way they
+read:
+- without the ** _ ` ~ marks;
+- without the `&nbsp;` lines of empty paragraphs;
+- with other dashes and quotes, and other spacing;
+- shortened with "..." ("### Features...").
+
+The exact match failed on all of these.
+
+Now a FIND that is not found exactly is looked up loosely: both sides with those marks and
+`&nbsp;` lines left out, dashes and quotes made the same, and spaces collapsed; "..." stands
+for the rest of its line. The formatting marks just outside the match go with it, so a
+replaced bold word stays bold if the new text has it. A quote that fits more than one place is
+not applied ("in the document more than once").
+
+The instructions to the model now ask it to copy FIND with its marks and `&nbsp;` lines,
+never shortened, a few whole lines at a time, and one block per change.
+
+A card that does not fit has Copy new text, and can be tried again with Apply (cards that
+failed before 0.18.4 apply now).
+
+Tests:
+- A QML test of the matcher on a document like vpavlin's (bold list items, `&nbsp;` lines, em
+  dashes): six cases, all pass (unmarked quote, other dash, a multi-line quote with
+  "### Features...", a twice-found line refused, a missing line, an exact heading).
+- Basecamp t through AI Gateway, with the fake model quoting `- Privacy – talking, …` for
+  `- **Privacy** — talking, …`: Apply replaced exactly that line (`- **Privacy** — no
+  middleman reads along`), and the document stayed fully drawn.
+
 ## 0.18.3 (view): the visual editor redraws itself after every reload (2026-11-23)
 
 vpavlin, on 0.18.2: applying the AI chat's edits left the top of the document blank again.

@@ -1551,7 +1551,7 @@ Item {
     property string chatDocSent: ""  // the document as the AI last saw it
     property string chatNote: ""
     readonly property int chatMaxBytes: 60000
-    readonly property string chatSystem: "You are a co-author in Fileverse, a Markdown document editor. You and the user talk about the document they are writing. Its Markdown is in the messages that start with [Document]; messages that start with [Document changes] say what changed since. Answer in the user's language, briefly and to the point.\n\nWhen the user asks you to change the document, or a change clearly helps, propose it with blocks of exactly this form, one block per change:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```\n\nFIND must be copied character for character from the current document and occur in it only once: short, but unique. To add text, FIND a nearby line and repeat it in the new text together with the addition. To delete, leave the new text empty. The user reviews every block before it is applied. Outside the blocks, talk normally and do not repeat the blocks in prose."
+    readonly property string chatSystem: "You are a co-author in Fileverse, a Markdown document editor. You and the user talk about the document they are writing. Its Markdown is in the messages that start with [Document]; messages that start with [Document changes] say what changed since. Answer in the user's language, briefly and to the point.\n\nWhen the user asks you to change the document, or a change clearly helps, propose it with blocks of exactly this form, one block per change:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```\n\nFIND must be copied character for character from the current Markdown, with its ** and other marks and its &nbsp; lines (empty paragraphs), never shortened with ..., and occur in it only once: a few whole lines, short but unique. For several changes far apart, use several blocks rather than one large one. To add text, FIND a nearby line and repeat it in the new text together with the addition. To delete, leave the new text empty. The user reviews every block before it is applied. Outside the blocks, talk normally and do not repeat the blocks in prose."
     function chatSave() {
         if (!root.chatDraftId) return
         var c = root.chatMsgs.length ? JSON.stringify({ v: 1, msgs: root.chatMsgs, docSent: root.chatDocSent }) : "null"
@@ -1830,19 +1830,59 @@ Item {
     // trailing spaces on lines. -1 when it is not there (any more).
     function chatFind(md, find) {
         var i = md.indexOf(find)
-        if (i >= 0 || !find.trim()) return { at: i, len: find.length }
-        var norm = function (t) { return t.split("\n").map(function (l) { return l.replace(/[ \t]+$/, "") }).join("\n") }
-        var nf = norm(find).trim(), lines = md.split("\n"), off = 0, flat = norm(md)
-        var j = flat.indexOf(nf)
-        if (j < 0) return { at: -1, len: 0 }
-        // map back: count characters of md up to the same line/column (lines only lose trailing blanks)
-        var before = flat.substring(0, j).split("\n"), pos = 0
-        for (var k = 0; k < before.length - 1; k++) pos += lines[k].length + 1
-        pos += before[before.length - 1].length
-        var endFlat = j + nf.length, upto = flat.substring(0, endFlat).split("\n"), end = 0
-        for (var k2 = 0; k2 < upto.length - 1; k2++) end += lines[k2].length + 1
-        end += upto[upto.length - 1].length
-        return { at: pos, len: end - pos }
+        if (i >= 0 && find.trim() && md.indexOf(find, i + 1) < 0) return { at: i, len: find.length }
+        return root.chatFindLoose(md, find)
+    }
+    // Where a quote from the AI is in the Markdown, the way models quote: without the
+    // formatting marks (** _ ` ~ \), without the "&nbsp;" lines of empty paragraphs, with
+    // other dashes and quotes, other spacing, and with "..." for the rest of a line. Only a
+    // quote that fits exactly one place counts. { at, len } in md, at -1 when none (or
+    // `ambiguous` when several).
+    function chatFindLoose(md, find) {
+        var fold = function (t, withMap) {
+            var out = [], map = []
+            var push = function (c, k) { out.push(c); if (withMap) map.push(k) }
+            for (var k = 0; k < t.length; k++) {
+                var c = t.charAt(k)
+                if (c === "&" && t.substr(k, 6) === "&nbsp;") { k += 5; continue }
+                if ("*_`~\\\\​".indexOf(c) >= 0) continue
+                if ("—–‒−".indexOf(c) >= 0) c = "-"
+                else if ("“”„«»".indexOf(c) >= 0) c = '"'
+                else if ("‘’".indexOf(c) >= 0) c = "'"
+                else if (c === "…") { push(".", k); push(".", k); c = "." }
+                else if (c === " " || c === "\t" || c === "\r") c = " "
+                push(c, k)
+            }
+            // spaces: one between words, none around line ends; blank lines go
+            var o2 = [], m2 = []
+            for (var j = 0; j < out.length; j++) {
+                var ch = out[j]
+                if (ch === " ") {
+                    if (!o2.length || o2[o2.length - 1] === " " || o2[o2.length - 1] === "\n") continue
+                } else if (ch === "\n") {
+                    while (o2.length && o2[o2.length - 1] === " ") { o2.pop(); m2.pop() }
+                    if (!o2.length || o2[o2.length - 1] === "\n") continue
+                }
+                o2.push(ch); if (withMap) m2.push(map[j])
+            }
+            while (o2.length && (o2[o2.length - 1] === " " || o2[o2.length - 1] === "\n")) { o2.pop(); m2.pop() }
+            return { text: o2.join(""), map: m2 }
+        }
+        var doc = fold(md, true), q = fold(find, false).text
+        if (!q) return { at: -1, len: 0 }
+        var esc = function (t) { return t.replace(/[.*+?^${}()|[\]\\]/g, "\\$&") }
+        // "..." stands for the rest of its line (or the text up to what follows it on the line)
+        var pattern = q.split("\n").map(function (line) {
+            return line.split("...").map(esc).join("[^\\n]*?") + (/\.\.\.\s*$/.test(line) ? "[^\\n]*" : "")
+        }).join("\n")
+        var re = new RegExp(pattern, "g"), hits = [], m
+        while ((m = re.exec(doc.text)) !== null) { hits.push(m); if (!m[0].length) re.lastIndex++ ; if (hits.length > 1) break }
+        if (hits.length !== 1 || !hits[0][0].length) return { at: -1, len: 0, ambiguous: hits.length > 1 }
+        var h = hits[0], at = doc.map[h.index], end = doc.map[h.index + h[0].length - 1] + 1
+        // take the formatting marks just outside the quote with it (the ** around a bold word)
+        while (at > 0 && "*_`~".indexOf(md.charAt(at - 1)) >= 0) at--
+        while (end < md.length && "*_`~".indexOf(md.charAt(end)) >= 0) end++
+        return { at: at, len: end - at }
     }
     // Apply edit `ei` of message `mi`: one undo step, saved and (when shared) sent like typing.
     function chatApply(mi, ei) {
@@ -1851,7 +1891,7 @@ Item {
         var md = root.editorMarkdown()
         var hit = root.chatFind(md, e.find)
         // the title line the AI saw is the draft's title, not part of its text
-        if (hit.at < 0) { root.chatSetEdit(mi, ei, "missing"); return false }
+        if (hit.at < 0) { root.chatSetEdit(mi, ei, hit.ambiguous ? "ambiguous" : "missing"); return false }
         var next = md.substring(0, hit.at) + e.replace + md.substring(hit.at + hit.len)
         root.commitStep()
         if (root.visualEdit) {
@@ -3351,9 +3391,15 @@ Item {
                                                 wrapMode: Text.Wrap; maximumLineCount: 12; elide: Text.ElideRight
                                                 text: editCard.modelData.replace !== "" ? editCard.modelData.replace : "(delete)"
                                             }
+                                            LogosButton {
+                                                visible: editCard.modelData.state === "missing" || editCard.modelData.state === "ambiguous"
+                                                compact: true; text: "Copy new text"
+                                                onClicked: root.copy(editCard.modelData.replace, "New text")
+                                            }
                                             Row {
                                                 spacing: 6
-                                                visible: editCard.modelData.state === "new"
+                                                // a card that did not fit can be tried again (the matching got looser in 0.18.4)
+                                                visible: editCard.modelData.state === "new" || editCard.modelData.state === "missing"
                                                 LogosButton { compact: true; variant: LogosButton.Variant.Primary; text: "Apply"; onClicked: root.chatApply(msgItem.index, editCard.index) }
                                                 LogosButton { compact: true; text: "Dismiss"; onClicked: root.chatSetEdit(msgItem.index, editCard.index, "dismissed") }
                                             }
@@ -3361,9 +3407,10 @@ Item {
                                                 visible: editCard.modelData.state !== "new"
                                                 width: parent.width; wrapMode: Text.Wrap
                                                 textFormat: Text.PlainText; font.pixelSize: 11
-                                                color: editCard.modelData.state === "missing" ? Theme.palette.warning : Theme.palette.textTertiary
+                                                color: editCard.modelData.state === "missing" || editCard.modelData.state === "ambiguous" ? Theme.palette.warning : Theme.palette.textTertiary
                                                 text: editCard.modelData.state === "applied" ? "✓ Applied (Ctrl+Z undoes it)"
-                                                    : editCard.modelData.state === "missing" ? "This text is not in the document any more; edit it yourself or ask again."
+                                                    : editCard.modelData.state === "missing" ? "Could not find this text in the document. Copy the new text and paste it yourself, or ask again."
+                                                    : editCard.modelData.state === "ambiguous" ? "This text is in the document more than once. Copy the new text and paste it where it belongs, or ask again with more context."
                                                     : "Dismissed"
                                             }
                                         }
