@@ -168,6 +168,8 @@ const NODE_PROBE: Duration = Duration::from_millis(800);
 const NODE_START: Duration = Duration::from_secs(60);
 /// A dependency that is not installed fails its call only after this; remember it.
 const ABSENT_FOR: Duration = Duration::from_secs(60);
+/// "When needed": the IPFS node stops this long after the last job that needed it.
+const IPFS_IDLE: Duration = Duration::from_secs(600);
 const STORAGE_CALL: Duration = Duration::from_secs(30);
 const STORAGE_WAIT: Duration = Duration::from_secs(90);
 const MAX_PORTAL_FILES: u64 = 200;
@@ -485,6 +487,10 @@ struct State {
     seq: u64,
     chain_seeded: bool,
     ipfs_module_absent_until: Option<Instant>,
+    /// Jobs using the IPFS node right now (Keep, Back up, Publish), and when the last ended:
+    /// in "When needed" mode the node stops IPFS_IDLE after that.
+    ipfs_users: u32,
+    ipfs_last_use: Option<Instant>,
     /// The view's own preferences (e.g. the paper's colours), kept with the settings.
     prefs: serde_json::Map<String, Value>,
 }
@@ -664,6 +670,53 @@ fn seed_gnosis() -> Result<(), String> {
         .map_err(|e| format!("could not configure Gnosis in eth_rpc_module: {e}"))
 }
 
+/// The IPFS node setting: "off" (never start it), "needed" (start it for Keep, Back up and
+/// Publish, stop it IPFS_IDLE after; the default) or "always" (start it whenever asked).
+fn ipfs_mode(s: &State) -> &'static str {
+    match s.prefs.get("ipfsNode").and_then(|v| v.as_str()) {
+        Some("off") => "off",
+        Some("always") => "always",
+        _ => "needed",
+    }
+}
+
+fn stop_ipfs_module() {
+    let _ = std::thread::Builder::new().name("fileverse-ipfs-stop".into()).spawn(|| {
+        let _ = ipfs_module::IpfsModuleClient::new().stop_with_timeout(Duration::from_secs(15));
+    });
+}
+
+/// A job's use of the IPFS node (see `need_node`). When the last one ends, the node stops
+/// IPFS_IDLE later in "When needed" mode, unless another job needed it meanwhile.
+struct NodeUse {
+    state: Arc<Mutex<State>>,
+    counted: bool,
+}
+
+impl Drop for NodeUse {
+    fn drop(&mut self) {
+        if !self.counted {
+            return;
+        }
+        {
+            let mut s = self.state.lock().unwrap();
+            s.ipfs_users = s.ipfs_users.saturating_sub(1);
+            s.ipfs_last_use = Some(Instant::now());
+        }
+        let state = self.state.clone();
+        let _ = std::thread::Builder::new().name("fileverse-ipfs-idle".into()).spawn(move || {
+            std::thread::sleep(IPFS_IDLE + Duration::from_secs(2));
+            let idle = {
+                let s = state.lock().unwrap();
+                s.ipfs_users == 0 && ipfs_mode(&s) == "needed" && s.ipfs_last_use.map(|t| t.elapsed() >= IPFS_IDLE).unwrap_or(true)
+            };
+            if idle {
+                stop_ipfs_module();
+            }
+        });
+    }
+}
+
 #[derive(Clone, Default)]
 struct NodeInfo {
     source: String,
@@ -673,14 +726,50 @@ struct NodeInfo {
 }
 
 impl FileverseCoreModuleImpl {
-    /// The IPFS node to use: ipfs_module's (started on demand) when installed,
-    /// else the one configured in Settings, if it answers.
+    /// The IPFS node to use for reading: ipfs_module's if it is running (or "Always on"),
+    /// else the one configured in Settings, if it answers. Reading never starts the node in
+    /// "When needed" mode: public gateways and Logos Storage serve it too.
     fn node(&self, probe: Duration) -> Option<NodeInfo> {
-        let try_module = {
-            let s = self.state.lock().unwrap();
-            s.ipfs_module_absent_until.map(|t| Instant::now() > t).unwrap_or(true)
+        self.node_start(probe, false)
+    }
+
+    /// For a job that needs the node (Keep, Back up, Publish): starts it unless the user turned
+    /// it off. Keep the guard for the whole job; the node stops IPFS_IDLE after the last one.
+    fn need_node(&self, probe: Duration) -> (Option<NodeInfo>, NodeUse) {
+        let counted = {
+            let mut s = self.state.lock().unwrap();
+            let on = ipfs_mode(&s) != "off";
+            if on {
+                s.ipfs_users += 1;
+            }
+            on
         };
-        if try_module {
+        (self.node_start(probe, true), NodeUse { state: self.state.clone(), counted })
+    }
+
+    fn node_start(&self, probe: Duration, need: bool) -> Option<NodeInfo> {
+        let (try_module, mode) = {
+            let s = self.state.lock().unwrap();
+            (s.ipfs_module_absent_until.map(|t| Instant::now() > t).unwrap_or(true), ipfs_mode(&s))
+        };
+        if try_module && mode != "off" && !(need || mode == "always") {
+            // only if it is already running: status never starts it
+            match ipfs_module::IpfsModuleClient::new().status_with_timeout(Duration::from_secs(3)) {
+                Ok(raw) => {
+                    if let Ok(v) = serde_json::from_str::<Value>(&raw) {
+                        if v["running"] == true && !v["api"].as_str().unwrap_or("").is_empty() {
+                            return Some(NodeInfo {
+                                source: "ipfs_module".into(),
+                                api: v["api"].as_str().unwrap_or("").into(),
+                                gateway: v["gateway"].as_str().unwrap_or("").into(),
+                                peer_id: v["peerId"].as_str().unwrap_or("").into(),
+                            });
+                        }
+                    }
+                }
+                Err(_) => self.state.lock().unwrap().ipfs_module_absent_until = Some(Instant::now() + ABSENT_FOR),
+            }
+        } else if try_module && mode != "off" {
             match ipfs_module::IpfsModuleClient::new().endpoints_with_timeout(NODE_START) {
                 Ok(raw) => {
                     if let Ok(v) = serde_json::from_str::<Value>(&raw) {
@@ -1044,9 +1133,13 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         if key.is_empty() || key.len() > 64 {
             return err("bad preference name");
         }
+        let off = key == "ipfsNode" && v.as_str() == Some("off");
         let mut s = self.state.lock().unwrap();
         s.prefs.insert(key, v);
         s.save();
+        if off {
+            stop_ipfs_module();
+        }
         json!({ "ok": true, "prefs": s.prefs }).to_string()
     }
 
@@ -1089,7 +1182,8 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
     fn node_status(&self) -> String {
         match self.node(Duration::from_secs(2)) {
             Some(n) => {
-                let mut v = json!({ "ok": true, "reachable": true, "source": n.source, "api": n.api, "gateway": n.gateway, "peerId": n.peer_id });
+                let mode = ipfs_mode(&self.state.lock().unwrap());
+                let mut v = json!({ "ok": true, "reachable": true, "mode": mode, "source": n.source, "api": n.api, "gateway": n.gateway, "peerId": n.peer_id });
                 if n.source == "ipfs_module" {
                     if let Ok(raw) = ipfs_module::IpfsModuleClient::new().status_with_timeout(Duration::from_secs(5)) {
                         if let Ok(st) = serde_json::from_str::<Value>(&raw) {
@@ -1101,7 +1195,16 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 }
                 v
             }
-            None => json!({ "ok": true, "reachable": false, "error": "no IPFS node: install the IPFS Node module, or run Kubo and set it in Settings" }),
+            None => {
+                let mode = ipfs_mode(&self.state.lock().unwrap());
+                let why = match mode {
+                    "off" => "the IPFS node is off (Settings)",
+                    _ if self.state.lock().unwrap().ipfs_module_absent_until.map(|t| Instant::now() <= t).unwrap_or(false) => "no IPFS node: install the IPFS Node module, or run Kubo and set it in Settings",
+                    "needed" => "the IPFS node starts when needed (Keep, Back up, Publish)",
+                    _ => "no IPFS node: install the IPFS Node module, or run Kubo and set it in Settings",
+                };
+                json!({ "ok": true, "reachable": false, "mode": mode, "error": why })
+            }
         }
         .to_string()
     }
@@ -1194,7 +1297,8 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         let u2 = url.clone();
         self.run_job(
             move |me, _job| {
-                let n = me.node(Duration::from_secs(2)).ok_or("no IPFS node is available")?;
+                let (n, _use) = me.need_node(Duration::from_secs(2));
+                let n = n.ok_or("no IPFS node is available (Settings → IPFS node: When needed or Always on)")?;
                 let gw = me.gateways(Some(&n));
                 let count = Node::new(&n.api, Duration::from_secs(60)).keep(&gw, &roots, &blocks)?;
                 Ok(json!({ "ok": true, "blocks": count, "pinned": roots.len(), "node": n.source, "peerId": n.peer_id, "roots": roots }))
@@ -1338,7 +1442,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         let portal2 = portal.clone();
         self.run_job(
             move |me, job| {
-                let node = me.node(Duration::from_secs(2));
+                let (node, _use) = me.need_node(Duration::from_secs(2));
                 let gw = me.gateways(node.as_ref());
                 // 1. every block onto this device (the verified block cache)
                 let fetched = backup::fetch_files(&gw, &files, &|done, all| me.set_progress(job, format!("fetching files {done}/{all}")));
@@ -1736,7 +1840,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         built.blocks.extend(image_blocks);
         self.run_job(
             move |me, _job| {
-                let node = me.node(Duration::from_secs(2));
+                let (node, _use) = me.need_node(Duration::from_secs(2));
                 let gw = me.gateways(node.as_ref());
                 for (cid, bytes) in &built.blocks {
                     gw.cache_block(&Cid::parse(cid)?, bytes);

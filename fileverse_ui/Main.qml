@@ -177,10 +177,11 @@ Item {
         return null
     }
     // Pinned on the node in use now (a copy on some other node does not count).
-    readonly property bool kept: root.recentEntry !== null && !!root.recentEntry.kept && !!root.node.peerId && root.recentEntry.keptOn === root.node.peerId
+    // pinned on this device's node; while the node is stopped ("When needed") the record counts
+    readonly property bool kept: root.recentEntry !== null && !!root.recentEntry.kept && (!root.node.peerId || root.recentEntry.keptOn === root.node.peerId)
     readonly property bool inStorage: root.recentEntry !== null && !!root.recentEntry.inStorage
     function keepCopy() {
-        root.startJob("keep", [root.docUrl], "keep", function (r) { root.say("Pinned on your IPFS node (" + r.node + "): " + r.blocks + " blocks") })
+        root.startJob("keep", [root.docUrl], "keep", function (r) { root.say("Pinned on your IPFS node (" + r.node + "): " + r.blocks + " blocks"); root.refreshNode() })
     }
     function copyToStorage() {
         root.startJob("copy_to_storage", [root.docUrl], "storage", function (r) { root.say("In Logos Storage: " + r.copied + " copied, " + r.alreadyThere + " already there") })
@@ -216,7 +217,7 @@ Item {
     }
     function backupPortal() {
         var p = root.portal
-        root.startJob("backup_portal", [p], "backup", function (r) {
+        root.startJob("backup_portal", [p], "backup", function (r) { root.refreshNode();
             var where = ["this device"]
             if (r.ipfs) where.push("your IPFS node")
             if (r.storage) where.push("Logos Storage")
@@ -1015,6 +1016,19 @@ Item {
     readonly property color paperCodeText: root.paperLight ? "#b3361b" : Theme.palette.primary
     readonly property color paperBorder: root.paperLight ? "#dadce0" : root.paperDark ? "#3a3a3c" : Theme.palette.borderHairline
     readonly property color paperLink: root.paperLight ? "#c2410c" : Theme.palette.primary
+    // The IPFS node: "off", "needed" (the default) or "always" (core pref ipfsNode).
+    readonly property string ipfsMode: (root.snap && root.snap.prefs && root.snap.prefs.ipfsNode) || "needed"
+    // a node Keep / Back up / Publish can use: running, or the IPFS Node module that starts when needed
+    readonly property bool ipfsUsable: !!root.node.reachable || (root.ipfsMode !== "off" && !/install/.test(root.node.error || ""))
+    function setIpfsMode(mode) {
+        root.core("set_pref", ["ipfsNode", JSON.stringify(mode)], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok) { root.fail((r && r.error) || "Could not save the setting"); return }
+            var sn = JSON.parse(JSON.stringify(root.snap)); sn.prefs = r.prefs; root.snap = sn
+            root.say(mode === "off" ? "The IPFS node is off" : mode === "needed" ? "The IPFS node starts only when needed" : "The IPFS node stays on")
+            root.refreshNode()
+        })
+    }
     function setPaper(kind) {
         root.core("set_pref", ["paper", JSON.stringify(kind)], function (raw) {
             var r = root.j(raw)
@@ -1192,7 +1206,7 @@ Item {
 
     function publishDraft() {
         root.saveDraft(function () {
-            root.startJob("publish", [root.draft.id], "publish", function (r) {
+            root.startJob("publish", [root.draft.id], "publish", function (r) { root.refreshNode();
                 var where = []
                 if (r.ipfs) where.push("IPFS (" + r.ipfs + ")")
                 if (r.storage) where.push("Logos Storage")
@@ -2196,7 +2210,7 @@ Item {
                         Repeater {
                             model: [
                                 ["Core " + (root.snap.version || ""), root.coreReachable, root.coreReachable ? "" : "not answering"],
-                                ["IPFS node", !!root.node.reachable, root.node.reachable ? (root.node.peers !== undefined ? root.node.peers + " peers" : "on") : "off"],
+                                ["IPFS node", !!root.node.reachable, root.node.reachable ? (root.node.peers !== undefined ? root.node.peers + " peers" : "on") : (root.ipfsMode === "needed" && !/install/.test(root.node.error || "") ? "when needed" : "off")],
                                 ["Logos Storage", !!root.storage.available, root.storage.available ? "on" : "off"]
                             ]
                             RowLayout {
@@ -2323,14 +2337,27 @@ Item {
                         LogosButton { compact: true; text: "Restore defaults"; onClicked: root.act("set_gateways", ["[]"], "Defaults restored", function (r) { gwField.text = r.gateways.join("\n") }) }
                     }
                     Caption { text: "IPFS NODE"; Layout.topMargin: 8 }
+                    Hint { text: "A running IPFS node takes part in the IPFS network and uses bandwidth. Documents also open without it (public gateways and Logos Storage). Off: never started; publishing then goes to Logos Storage only. When needed: started for Keep on my IPFS, Back up and Publish, and stopped 10 minutes after. Always on: started whenever Fileverse runs." }
+                    RowLayout {
+                        Repeater {
+                            model: [{ k: "off", t: "Off" }, { k: "needed", t: "When needed" }, { k: "always", t: "Always on" }]
+                            LogosButton {
+                                compact: true; text: modelData.t
+                                variant: root.ipfsMode === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                onClicked: root.setIpfsMode(modelData.k)
+                            }
+                        }
+                    }
                     LogosText {
                         Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 12
                         color: root.node.reachable ? Theme.palette.success : Theme.palette.textTertiary
                         text: root.node.reachable
-                              ? ((root.node.source === "ipfs_module" ? "The IPFS Node module" : "Your Kubo") + " · " + root.shortId(root.node.peerId)
+                              ? ((root.node.source === "ipfs_module" ? "The IPFS Node module is running" : "Your Kubo") + " · " + root.shortId(root.node.peerId)
                                  + (root.node.peers !== undefined ? " · " + root.node.peers + " peers · " + root.node.pins + " pinned · " + Math.round((root.node.repoSize || 0) / 1048576) + " MB" : "")
                                  + ". Read from first; Keep, Back up and Publish pin there.")
-                              : "No IPFS node. Install the IPFS Node module (recommended), or run Kubo and enter its API and gateway below."
+                              : root.ipfsMode === "off" ? "Off: Fileverse does not start the IPFS node."
+                              : root.ipfsMode === "needed" && !/install/.test(root.node.error || "") ? "Not running now; it starts when Keep, Back up or Publish needs it."
+                              : "No IPFS node. Install the IPFS Node module, or run Kubo and enter its API and gateway below."
                     }
                     RowLayout {
                         Layout.fillWidth: true
@@ -2561,9 +2588,9 @@ Item {
                 LogosButton { visible: root.docDraftId === "" && root.docCopyId !== ""; compact: true; text: "Edit my copy"; onClicked: { root.section = "drafts"; root.openDraft(root.docCopyId) } }
                 LogosButton { visible: root.docv && root.docv.markdown !== undefined && root.docDraftId === ""; compact: true; text: root.docCopyId !== "" ? "New copy" : "Edit a copy"; onClicked: root.newDraft(root.docv.title || "Untitled", root.docv.markdownBody !== undefined ? root.docv.markdownBody : root.docv.markdown, root.docUrl) }
                 LogosButton {
-                    visible: (root.node.reachable || root.kept) && !root.kept
+                    visible: root.ipfsUsable && !root.kept
                     compact: true
-                    enabled: root.node.reachable && !root.busyWith("keep")
+                    enabled: root.ipfsUsable && !root.busyWith("keep")
                     text: root.busyWith("keep") ? "Pinning…" : "Keep on my IPFS"
                     onClicked: root.keepCopy()
                 }

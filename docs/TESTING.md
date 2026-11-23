@@ -1,5 +1,32 @@
 # What was tested, and how to repeat it
 
+## 0.18.1 (view) + core 0.17.1: the IPFS node only when needed (2026-11-23)
+
+vpavlin: the IPFS node eats a lot of bandwidth when it runs. Fileverse used to start it as soon
+as it opened: the status poll asked ipfs_module for its endpoints, and that call starts the
+daemon. Settings → IPFS NODE now has three choices (core pref `ipfsNode`):
+- **Off:** never started, and stopped at once when chosen. Documents open from public
+  gateways and Logos Storage; Publish goes to Logos Storage only.
+- **When needed** (default): started only by Keep on my IPFS, Back up and Publish
+  (`need_node`), and stopped 10 minutes after the last of them ends, unless another job
+  needed it meanwhile. Reading uses the node only if it is already running (`status`,
+  which never starts it).
+- **Always on:** started whenever Fileverse asks, as before.
+
+In the view:
+- the sidebar says "when needed" or "off";
+- Keep on my IPFS shows whenever the node can be started;
+- a document pinned earlier counts as kept while the node is stopped;
+- the node status is read again after Keep, Back up and Publish.
+
+Basecamp t (0.3.2, the IPFS Node module installed, kubo stopped first):
+- **When needed:** opening Fileverse, waiting, and opening two Fileverse documents (one with
+  pictures) never started kubo. Keep on my IPFS started it (about 10 s) and pinned.
+- **Always on:** kubo started (about 16 s); Settings showed 5 peers.
+- **Off:** kubo stopped within 4 s; the sidebar said "off".
+- Found and fixed there: Keep was hidden while the node was stopped, and the document did not
+  show as kept after Keep, because the view still had the stopped node's empty peer id.
+
 ## 0.18.0 (view) + core 0.17.0, draft on branch ai-gateway-draft: AI chat (2026-11-22)
 
 "💬 AI chat" (under the title) opens a panel beside the editor: a conversation with an AI
