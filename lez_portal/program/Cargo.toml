@@ -1,0 +1,15 @@
+[package]
+name = "portal_program"
+version = "0.1.0"
+edition = "2021"
+description = "Fileverse portal on LEZ: the actor handlers."
+
+[dependencies]
+# Not `workspace = true`: that would inherit the `host` feature into the guest build.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+portal_core = { path = "../core" }
+borsh = { version = "1.5", features = ["derive"] }
+
+[dev-dependencies]
+# `host` derives `Debug`/`PartialEq` on `Response`, for assertions.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3", features = ["host"] }

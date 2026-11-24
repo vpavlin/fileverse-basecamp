@@ -1,0 +1,22 @@
+[package]
+name = "portal-guest"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[profile.release]
+debug = 0
+strip = "symbols"
+
+[[bin]]
+name = "portal"
+path = "src/bin/portal.rs"
+
+[dependencies]
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+risc0-zkvm = { version = "=3.0.5", default-features = false }
+# Pin ruint (transitive via risc0-binfmt) below 1.18, which raised its MSRV to rustc 1.90.
+# The risc0 guest toolchain ships rustc 1.88; 1.17.0 is the newest compatible release.
+ruint = { version = "=1.17.0", default-features = false }
+portal_program = { path = "../../program" }

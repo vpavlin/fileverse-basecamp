@@ -1,0 +1,10 @@
+[package]
+name = "portal_client"
+version = "0.1.0"
+edition = "2021"
+description = "Fileverse portal on LEZ: build messages and access lists, derive addresses, decode state. No network code: submit through the LEZ wallet."
+
+[dependencies]
+portal_core = { path = "../core" }
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+borsh = { version = "1.5", features = ["derive"] }

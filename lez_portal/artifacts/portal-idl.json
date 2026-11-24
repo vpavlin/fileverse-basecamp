@@ -1,0 +1,775 @@
+{
+  "version": "2",
+  "name": "portal",
+  "messages": [
+    {
+      "name": "CreatePortal",
+      "tag": 0,
+      "docs": "Create a portal owned by the receiving actor's account.\n\nSent to the caller's own actor, which must be authorized. The portal lands at\n`Addresses::portal(owner, i)` where `i` is the owner head's current count, and is\nlisted in the registry and under its owner.",
+      "fields": [
+        {
+          "name": "owner_did",
+          "type": "string"
+        },
+        {
+          "name": "metadata_cid",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "Act",
+      "tag": 1,
+      "docs": "Do `op` on `portal` as the receiving actor's account.\n\nSent to the caller's own actor (the account of the owner or collaborator), which\nmust be authorized. The portal checks the caller against its owner and collaborators.",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "op",
+          "type": {
+            "defined": "PortalOp"
+          }
+        }
+      ]
+    }
+  ],
+  "state_types": [
+    "PortalState"
+  ],
+  "events": [
+    {
+      "name": "PortalCreated",
+      "selector": "23117416dad14b12",
+      "type": {
+        "defined": "PortalCreated"
+      }
+    },
+    {
+      "name": "AddedCollaborator",
+      "selector": "67ce24b0cac262f0",
+      "type": {
+        "defined": "AddedCollaborator"
+      }
+    },
+    {
+      "name": "RemovedCollaborator",
+      "selector": "cadebc55ec95bad9",
+      "type": {
+        "defined": "RemovedCollaborator"
+      }
+    },
+    {
+      "name": "RegisteredCollaboratorKeys",
+      "selector": "36f600733e7f4f5d",
+      "type": {
+        "defined": "RegisteredCollaboratorKeys"
+      }
+    },
+    {
+      "name": "RemovedCollaboratorKeys",
+      "selector": "0dd8b5c6f74a894b",
+      "type": {
+        "defined": "RemovedCollaboratorKeys"
+      }
+    },
+    {
+      "name": "UpdatedKeyVerifiers",
+      "selector": "bcfd869000beee82",
+      "type": {
+        "defined": "UpdatedKeyVerifiers"
+      }
+    },
+    {
+      "name": "UpdatedPortalMetadata",
+      "selector": "3b02afe04674d6f6",
+      "type": {
+        "defined": "UpdatedPortalMetadata"
+      }
+    },
+    {
+      "name": "UpdatedOwnerDid",
+      "selector": "da83c2edb24bda96",
+      "type": {
+        "defined": "UpdatedOwnerDid"
+      }
+    },
+    {
+      "name": "OwnershipTransferStarted",
+      "selector": "58be82b52274739b",
+      "type": {
+        "defined": "OwnershipTransferStarted"
+      }
+    },
+    {
+      "name": "OwnershipTransferred",
+      "selector": "679b9f8ce6bab493",
+      "type": {
+        "defined": "OwnershipTransferred"
+      }
+    },
+    {
+      "name": "AddedFile",
+      "selector": "0c095b82acff435f",
+      "type": {
+        "defined": "AddedFile"
+      }
+    },
+    {
+      "name": "EditedFile",
+      "selector": "1ab5a3ad82929afc",
+      "type": {
+        "defined": "EditedFile"
+      }
+    },
+    {
+      "name": "DeletedFile",
+      "selector": "915f4526c0b10a73",
+      "type": {
+        "defined": "DeletedFile"
+      }
+    }
+  ],
+  "types": [
+    {
+      "name": "AddedCollaborator",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "who",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "AddedFile",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "index",
+          "type": "u64"
+        },
+        {
+          "name": "app_file_id",
+          "type": "string"
+        },
+        {
+          "name": "editor",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "AppFile",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "index",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "CollaboratorKeys",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "account",
+          "type": "account_id"
+        },
+        {
+          "name": "view_did",
+          "type": "string"
+        },
+        {
+          "name": "edit_did",
+          "type": "string"
+        }
+      ]
+    },
+    {
+      "name": "DeletedFile",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "index",
+          "type": "u64"
+        },
+        {
+          "name": "editor",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "EditedFile",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "index",
+          "type": "u64"
+        },
+        {
+          "name": "editor",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "File",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "index",
+          "type": "u64"
+        },
+        {
+          "name": "app_file_id",
+          "type": "string"
+        },
+        {
+          "name": "file_type",
+          "type": {
+            "defined": "FileType"
+          }
+        },
+        {
+          "name": "metadata_cid",
+          "type": "string"
+        },
+        {
+          "name": "content_cid",
+          "type": "string"
+        },
+        {
+          "name": "gate_cid",
+          "type": "string"
+        },
+        {
+          "name": "version",
+          "type": "u32"
+        },
+        {
+          "name": "deleted",
+          "type": "bool",
+          "docs": "Set on delete; the CIDs are then empty."
+        },
+        {
+          "name": "last_editor",
+          "type": "account_id",
+          "docs": "The account that last added, edited or deleted the file."
+        }
+      ]
+    },
+    {
+      "name": "FileType",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "Public"
+        },
+        {
+          "name": "Private"
+        },
+        {
+          "name": "Gated"
+        }
+      ]
+    },
+    {
+      "name": "OwnerHead",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "owner",
+          "type": "account_id"
+        },
+        {
+          "name": "count",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "OwnershipTransferStarted",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "new_owner",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "OwnershipTransferred",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "old_owner",
+          "type": "account_id"
+        },
+        {
+          "name": "new_owner",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "Portal",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "owner",
+          "type": "account_id"
+        },
+        {
+          "name": "pending_owner",
+          "type": {
+            "option": "account_id"
+          },
+          "docs": "Set by `TransferOwnership`, cleared by the new owner's `AcceptOwnership`."
+        },
+        {
+          "name": "owner_did",
+          "type": "string"
+        },
+        {
+          "name": "metadata_cid",
+          "type": "string",
+          "docs": "CID of the portal's metadata."
+        },
+        {
+          "name": "collaborators",
+          "type": {
+            "vec": "account_id"
+          },
+          "docs": "Accounts that may add and edit files, besides the owner."
+        },
+        {
+          "name": "collaborator_keys",
+          "type": {
+            "vec": {
+              "defined": "CollaboratorKeys"
+            }
+          },
+          "docs": "Public keys collaborators (and the owner) registered to wrap file keys."
+        },
+        {
+          "name": "key_verifiers",
+          "type": {
+            "vec": {
+              "array": [
+                "u8",
+                32
+              ]
+            }
+          },
+          "docs": "Hashes of the portal keys, one entry per key version (index = version)."
+        },
+        {
+          "name": "file_count",
+          "type": "u64",
+          "docs": "Number of files ever added; file ids are `0..file_count`, tombstones included."
+        }
+      ]
+    },
+    {
+      "name": "PortalCreated",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "owner",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "PortalOp",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "AddCollaborator",
+          "fields": [
+            {
+              "name": "who",
+              "type": "account_id"
+            }
+          ]
+        },
+        {
+          "name": "RemoveCollaborator",
+          "fields": [
+            {
+              "name": "who",
+              "type": "account_id"
+            }
+          ]
+        },
+        {
+          "name": "RegisterKeys",
+          "fields": [
+            {
+              "name": "view_did",
+              "type": "string"
+            },
+            {
+              "name": "edit_did",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "name": "RemoveKeys",
+          "fields": [
+            {
+              "name": "who",
+              "type": "account_id"
+            }
+          ]
+        },
+        {
+          "name": "UpdateKeyVerifiers",
+          "fields": [
+            {
+              "name": "verifiers",
+              "type": {
+                "vec": {
+                  "array": [
+                    "u8",
+                    32
+                  ]
+                }
+              }
+            }
+          ]
+        },
+        {
+          "name": "UpdateMetadata",
+          "fields": [
+            {
+              "name": "metadata_cid",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "name": "SetOwnerDid",
+          "fields": [
+            {
+              "name": "owner_did",
+              "type": "string"
+            }
+          ]
+        },
+        {
+          "name": "TransferOwnership",
+          "fields": [
+            {
+              "name": "new_owner",
+              "type": "account_id"
+            }
+          ]
+        },
+        {
+          "name": "AcceptOwnership"
+        },
+        {
+          "name": "AddFile",
+          "fields": [
+            {
+              "name": "app_file_id",
+              "type": "string"
+            },
+            {
+              "name": "file_type",
+              "type": {
+                "defined": "FileType"
+              }
+            },
+            {
+              "name": "metadata_cid",
+              "type": "string"
+            },
+            {
+              "name": "content_cid",
+              "type": "string"
+            },
+            {
+              "name": "gate_cid",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "u32"
+            }
+          ]
+        },
+        {
+          "name": "EditFile",
+          "fields": [
+            {
+              "name": "index",
+              "type": "u64"
+            },
+            {
+              "name": "file_type",
+              "type": {
+                "defined": "FileType"
+              }
+            },
+            {
+              "name": "metadata_cid",
+              "type": "string"
+            },
+            {
+              "name": "content_cid",
+              "type": "string"
+            },
+            {
+              "name": "gate_cid",
+              "type": "string"
+            },
+            {
+              "name": "version",
+              "type": "u32"
+            }
+          ]
+        },
+        {
+          "name": "DeleteFile",
+          "fields": [
+            {
+              "name": "index",
+              "type": "u64"
+            }
+          ]
+        },
+        {
+          "name": "DeleteFileByAppFileId",
+          "fields": [
+            {
+              "name": "app_file_id",
+              "type": "string"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "PortalRef",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "PortalState",
+      "kind": "enum",
+      "variants": [
+        {
+          "name": "Portal",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "Portal"
+              }
+            }
+          ]
+        },
+        {
+          "name": "File",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "File"
+              }
+            }
+          ]
+        },
+        {
+          "name": "AppFile",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "AppFile"
+              }
+            }
+          ]
+        },
+        {
+          "name": "RegistryHead",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "RegistryHead"
+              }
+            }
+          ]
+        },
+        {
+          "name": "AllEntry",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "PortalRef"
+              }
+            }
+          ]
+        },
+        {
+          "name": "OwnerHead",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "OwnerHead"
+              }
+            }
+          ]
+        },
+        {
+          "name": "OwnerEntry",
+          "fields": [
+            {
+              "name": "0",
+              "type": {
+                "defined": "PortalRef"
+              }
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "RegisteredCollaboratorKeys",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "who",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "RegistryHead",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal_count",
+          "type": "u64"
+        }
+      ]
+    },
+    {
+      "name": "RemovedCollaborator",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "who",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "RemovedCollaboratorKeys",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "who",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "UpdatedKeyVerifiers",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "UpdatedOwnerDid",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        }
+      ]
+    },
+    {
+      "name": "UpdatedPortalMetadata",
+      "kind": "struct",
+      "fields": [
+        {
+          "name": "portal",
+          "type": "account_id"
+        },
+        {
+          "name": "metadata_cid",
+          "type": "string"
+        }
+      ]
+    }
+  ]
+}

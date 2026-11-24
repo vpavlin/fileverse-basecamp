@@ -1,0 +1,13 @@
+# Adapted from logos-blockchain/lez-programs tools/risc0-packager (MIT/Apache-2.0).
+# Wraps a raw guest ELF with the risc0 kernel into the `.bin` LEZ's program loader accepts.
+[package]
+name = "risc0-packager"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+anyhow = "1"
+risc0-binfmt = "=3.0.4"
+risc0-build = "=3.0.5"

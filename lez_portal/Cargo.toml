@@ -1,0 +1,11 @@
+[workspace]
+members = ["core", "program", "client"]
+# The guest is built with the risc0 toolchain (see README), never as part of the workspace.
+exclude = ["methods", "methods/guest"]
+resolver = "2"
+
+[workspace.dependencies]
+# The LEZ release this program targets. `host` adds Debug/PartialEq on `Response` etc.
+lee_core = { git = "https://github.com/logos-blockchain/logos-execution-zone.git", tag = "v0.4.0-rc3" }
+borsh = { version = "1.5", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
