@@ -1,5 +1,20 @@
 # What was tested, and how to repeat it
 
+## 0.18.5 (view): removing something asks first (2026-11-24)
+
+vpavlin: deleting a file needs a confirmation. The × on a row removed it at once. Now all
+three removals ask, in a dialog that says what is lost and what stays:
+- **Delete a draft** (Local): it is deleted from this device with its AI chat; the published
+  copy stays, and the others in a shared document keep theirs.
+- **Remove from Recent:** the link, with its key, is forgotten; you need the link again.
+- **Remove a portal's keys:** the backup keys go; you need the backup-key file again.
+
+Cancel, Escape or a click outside the dialog keeps everything.
+
+- Harness: confirmdel.
+- Basecamp t: the × on a draft showed the dialog. Cancel left the draft file in place;
+  Delete removed it ("Deleted from this device").
+
 ## 0.18.4 (view): AI chat edits apply when the model quotes loosely (2026-11-23)
 
 vpavlin, with Venice (deepseek-v4): every edit card said "This text is not in the document

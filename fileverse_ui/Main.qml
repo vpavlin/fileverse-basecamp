@@ -82,6 +82,9 @@ Item {
     property string docUrl: ""
     property string error: ""
     property string toast: ""
+    // A question before something is removed for good: { title, text, button, run }
+    property var confirmAsk: null
+    function confirm(title, text, button, run) { root.confirmAsk = { title: title, text: text, button: button, run: run } }
     property int tabIndex: 0
     property int sheetIndex: 0
     property bool showDetails: false
@@ -2233,7 +2236,9 @@ Item {
                                     active: root.mode === "doc" && root.docUrl === modelData.url
                                     removable: true
                                     onClicked: { var did = root.draftIdFor(modelData.url); if (did) { root.section = "drafts"; root.openDraft(did) } else root.open(modelData.url) }
-                                    onRemoved: root.act("forget", [modelData.url], "")
+                                    onRemoved: { var u = modelData.url; root.confirm("Remove “" + (modelData.title || "Untitled") + "” from Recent?",
+                                        "Its link, with the key that opens it, is forgotten on this device. To open it again you need the link again (a copy you edited stays in Local).",
+                                        "Remove", function () { root.act("forget", [u], "Removed from Recent") }) }
                                 }
                             }
                             Hint { visible: (root.snap.recent || []).length === 0; text: "Documents you open appear here." }
@@ -2261,7 +2266,9 @@ Item {
                                     active: root.mode === "portal" && root.portal === modelData.portal
                                     removable: true
                                     onClicked: root.showPortal(modelData.portal)
-                                    onRemoved: root.act("forget_portal", [modelData.portal], "Keys removed from this device")
+                                    onRemoved: { var pt = modelData.portal; root.confirm("Remove this portal's keys?",
+                                        "The backup keys of " + root.shortId(pt) + " are deleted from this device. To list and open its files again you need the backup-key file again. The files themselves are not touched.",
+                                        "Remove keys", function () { root.act("forget_portal", [pt], "Keys removed from this device") }) }
                                 }
                             }
                             LogosButton { Layout.fillWidth: true; Layout.topMargin: 6; compact: true; text: "Import backup key…"; onClicked: root.mode = "import" }
@@ -2308,7 +2315,12 @@ Item {
                                     active: root.mode === "edit" && root.draft && root.draft.id === modelData.id
                                     removable: true
                                     onClicked: root.openDraft(modelData.id)
-                                    onRemoved: root.act("draft_delete", [modelData.id], "Deleted from this device", function () { if (root.draft && root.draft.id === modelData.id) { root.draft = null; root.mode = "home" } })
+                                    onRemoved: { var did = modelData.id, shared = !!modelData.shared, published = !!modelData.link
+                                        root.confirm("Delete “" + (modelData.title || "Untitled") + "”?",
+                                            "It is deleted from this device, with its AI chat. This cannot be undone."
+                                            + (published ? " The published copy stays where it was published." : "")
+                                            + (shared ? " The others in the shared document keep their copies." : ""),
+                                            "Delete", function () { root.act("draft_delete", [did], "Deleted from this device", function () { if (root.draft && root.draft.id === did) { root.draft = null; root.mode = "home" } }) }) }
                                 }
                             }
                         }
@@ -4165,6 +4177,46 @@ Item {
             spacing: 8
             LogosIcon { Layout.preferredWidth: 14; Layout.preferredHeight: 14; source: LogosIcons.check; color: Theme.palette.success }
             LogosText { id: toastText; Layout.maximumWidth: root.width - 160; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13; text: root.toast }
+        }
+    }
+
+    // confirmation before removing something
+    Rectangle {
+        anchors.fill: parent
+        visible: root.confirmAsk !== null
+        z: 1000
+        color: Qt.rgba(0, 0, 0, 0.55)
+        MouseArea { anchors.fill: parent; onClicked: root.confirmAsk = null }   // a click outside cancels
+        Keys.onEscapePressed: root.confirmAsk = null
+        onVisibleChanged: if (visible) confirmCancel.forceActiveFocus()
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(460, parent.width - 60)
+            height: confirmCol.implicitHeight + 40
+            radius: Theme.spacing.radiusLarge
+            color: Theme.palette.surfaceRaised
+            border.color: Theme.palette.borderSubtle
+            MouseArea { anchors.fill: parent }   // clicks inside do not cancel
+            ColumnLayout {
+                id: confirmCol
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: 20 }
+                spacing: 12
+                LogosText { Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold
+                            text: root.confirmAsk ? root.confirmAsk.title : "" }
+                LogosText { Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13; color: Theme.palette.textSecondary
+                            text: root.confirmAsk ? root.confirmAsk.text : "" }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacing.small
+                    Item { Layout.fillWidth: true }
+                    LogosButton { id: confirmCancel; compact: true; text: "Cancel"; onClicked: root.confirmAsk = null }
+                    LogosButton {
+                        compact: true; variant: LogosButton.Variant.Primary
+                        text: root.confirmAsk ? root.confirmAsk.button : ""
+                        onClicked: { var run = root.confirmAsk.run; root.confirmAsk = null; run() }
+                    }
+                }
+            }
         }
     }
 
