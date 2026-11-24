@@ -13,11 +13,11 @@ share link  ->  files(id) on the portal contract (Gnosis, via eth_rpc_module)
 
 | Package | Type | What it does |
 |---|---|---|
-| `fileverse_core` | core, Rust (`cdylib`) | The engine: chain reads, trustless IPFS fetch, decryption, Yjs rendering, backup keys, Markdown drafts and publishing, copies on IPFS and Logos Storage. Depends on the official `eth_rpc_module`; uses `ipfs_module` and `storage_module` when present. |
+| `fileverse_core` | core, Rust (`cdylib`) | The engine: chain reads, trustless IPFS fetch, decryption, Yjs rendering, backup keys, Markdown drafts and publishing, copies on IPFS and Logos Storage, AI chat history and AI Gateway sessions. Depends on the official `eth_rpc_module` and `reflection_core`; uses `ipfs_module`, `storage_module` and `ai_gateway_core` when present. |
 | `fileverse_ui` | ui_qml, pure QML | Recent / My files / Drafts, document and sheet views, slide decks, the editor with live preview, settings. |
-| `ipfs_module` | core, Rust (`cdylib`) | An IPFS node for every Logos app: a bundled static Kubo run on loopback ports, started on first use, stopped with its host. |
+| `ipfs_module` | core, Rust (`cdylib`) | An IPFS node for every Logos app: a bundled static Kubo run on loopback ports, started on first use, stopped with its host. Fileverse starts it only when it needs it (Settings → IPFS node). |
 
-What it does (0.7.0):
+What it does (core 0.17, view 0.18):
 
 - **Read share links** from the legacy portal (`docs.fileverse.io`) and the v3 App contract
   (`ddocs.new`, `dsheets.new`), in every form Fileverse hands out: `…/<portal>/<fileId>#key=…`,
@@ -44,6 +44,22 @@ What it does (0.7.0):
   presence and cursors, published on Logos Delivery, p2panda or both (Settings). See
   [docs/COLLAB.md](docs/COLLAB.md).
 - **Keep on my IPFS** pins a document's blocks on your node (`ipfs_module`, or a Kubo you set).
+- **IPFS node: Off / When needed / Always on** (Settings). A running node takes part in the
+  IPFS network and uses bandwidth. *When needed* (the default) starts it only for Keep on my
+  IPFS, Back up and Publish, and stops it 10 minutes after the last of them; documents are read
+  through it only while it runs, otherwise from public gateways and Logos Storage. *Off* never
+  starts it (publishing then goes to Logos Storage only). *Always on* starts it whenever
+  Fileverse runs, as before.
+- **Download Markdown** saves a document or draft as a `.md` file in your Downloads folder.
+- **Write with AI** (through the AI Gateway app, `ai.ask`): continue, rewrite (clearer, shorter,
+  more formal), fix grammar, summarize, translate or ask about the selection or the paragraph
+  you are in. The answer is shown first; nothing changes until you choose Replace, Insert below
+  or Insert at cursor (one undo step each).
+- **AI chat** (through AI Gateway, `ai.session`): a panel beside the editor to talk with an AI
+  about the open document. You allow the chat once in AI Gateway (and pick the model); after
+  that each message goes without a dialog, and the document only when it changed. The AI
+  proposes edits as cards you Apply or Dismiss. Without AI Gateway these buttons say how to get
+  it.
 - **Copy to Logos Storage** uploads each block to `storage_module`; when IPFS has nothing,
   blocks are read back from Storage and hash-checked like any other source.
 - Rendering: headings, paragraphs, lists, tasks, quotes, callouts, code, tables, links;
@@ -63,7 +79,7 @@ private IPFS lane, images, writing back to Fileverse's chain records, pictures i
   there is no light client for Gnosis in Basecamp yet.
 - **IPFS:** not trusted. Blocks are requested as trustless raw blocks
   (`?format=raw`), hashed and compared to the CID; UnixFS files are reassembled from
-  verified leaves. Order: your own node (ipfs_module), then gateways, then Logos Storage.
+  verified leaves. Order: your own node (ipfs_module, when it runs), then gateways, then Logos Storage.
   A source can refuse or watch, never alter.
 - **Keys:** the `#key=` stays on this device. Recent links (with their keys) are kept
   in the module's own data directory so documents reopen; decrypted text is not
@@ -71,6 +87,16 @@ private IPFS lane, images, writing back to Fileverse's chain records, pictures i
 - **Rendering:** the core escapes every character of document text; the only markup
   that reaches Qt's StyledText is markup the core wrote (`b i u s code br`, and `a`
   limited to http/https/mailto). Links open only on click.
+- **IPFS reads:** with the IPFS node set to *When needed* or *Off*, blocks come from public
+  gateways when your node is not running, so those gateways can see which CIDs you fetch
+  (not what they contain: the content stays encrypted). Choose *Always on* to read through
+  your own node.
+- **AI:** Fileverse never talks to a model itself. Write with AI and AI chat go through the AI
+  Gateway app, which shows exactly what is sent, lets you pick the model and its privacy tier,
+  and asks you first (once per chat). What goes out: the selection or paragraph (Write with AI),
+  or your messages and the document's Markdown (AI chat). AI edits change the document only when
+  you apply them. The chat history is kept per document on this device only, unencrypted like
+  the drafts themselves (`<module data>/chats/`), and is never shared or published.
 
 ## Agents
 
