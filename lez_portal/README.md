@@ -6,8 +6,8 @@ portal, who may write to it, the collaborators' wrapping keys, and the list of f
 CIDs. No secret is on chain: content and keys are encrypted blobs in Logos Storage / IPFS,
 as before.
 
-Status: **the logic is tested in-process (30 tests); it has not run on a chain yet.** See
-[What is not verified](#what-is-not-verified).
+Status: **tested in-process (30 tests) and `scripts/e2e.sh` passes end to end on a local
+LEZ v0.4.0-rc3 chain** (run by atlas/fileverse: every step included in a block).
 
 ## Layout
 
@@ -126,8 +126,14 @@ spel generate-idl core --events event > artifacts/portal-idl.json
 
 1. A LEZ v0.4.0-rc3 sequencer (standalone) and wallet, `LEE_WALLET_HOME_DIR` set.
 2. `spel` from logos-co/spel branch `refactor/lez-v0.4.x` (`cargo install --path spel-cli`).
-3. Public accounts labelled `alice`, `bob`, `payer` (payer funded); export `ALICE_ID`, `BOB_ID`.
-4. `scripts/build-guest.sh && scripts/e2e.sh`.
+3. Public accounts labelled `alice`, `bob`, `payer` (payer funded); export `ALICE_ID`, `BOB_ID`, `PAYER_ID`.
+   Notes from the run that worked: the standalone sequencer is
+   `cargo build --release --features standalone -p sequencer_service`, then `setup` with a custom
+   networks JSON whose genesis `supply_account` funds the wallet's public keys; set
+   `LEE_WALLET_PASSWORD` for non-interactive wallet use; on glibc 2.36 the LEZ build needs
+   libclang (bindgen/librocksdb-sys) and pcsc-lite (pcsc-sys).
+4. `spel deploy` needs the segment-count fix below until it lands upstream.
+5. `scripts/build-guest.sh && scripts/e2e.sh`.
 
 ## Using the client from Rust
 
@@ -144,15 +150,14 @@ let plan = client.add_file(caller, portal, file_count, "doc-1".into(),
 Submitting the transaction (and reading actor state) is the wallet's job: follow
 `logos-co/logos-rln-lez-module`, which owns a wallet through LEZ `core_ffi`.
 
-## What is not verified
+## Known issues and what is not verified
 
-* **Nothing has run on a chain.** Handlers are tested through an in-process simulator that
-  applies the runtime's rules as I read them from `lee_core` (seed grants authorize exactly
-  the derived PDA; sync messages run depth-first). If the runtime differs (e.g. a limit on
-  conversation depth: create-portal is five actors deep, owner actor → owner head → portal →
-  registry → all entry), the first e2e run will show it.
-* `scripts/e2e.sh` has never been run; CLI details (JSON enum arguments, `--actor` handling)
-  follow `docs/reference/cli.md` of the spel branch.
-* `scripts/build-guest.sh` is derived from lez-programs' Docker build and untested here.
+* **`spel deploy` on refactor/lez-v0.4.x (d7444f8)** counts segments over the whole `.bin`
+  (kernel included), while the wallet's program loader segments only the user ELF, so deploy
+  fails with "Program bytecode splits into 3 segment(s) but 4 were supplied". Fix: count over
+  `risc0_binfmt::ProgramBinary::decode(&bytes).user_elf`. A PR against the spel branch carries it.
+* Verified on a local chain by atlas/fileverse: the whole `scripts/e2e.sh` flow and
+  `scripts/build-guest.sh` (portal.bin 297,832 bytes). Not exercised: a testnet, concurrent
+  writers racing on a counter, portals with many collaborators or files.
 * The v4 state layout is **append-only from here**: variants of `PortalState`, `PortalOp`,
   `Message` and `Internal` must only be added at the end.

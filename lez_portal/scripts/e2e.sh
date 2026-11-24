@@ -9,7 +9,8 @@
 #   * `spel` built from logos-co/spel branch refactor/lez-v0.4.x (rev d7444f84 or newer);
 #   * a running v0.4.0-rc3 sequencer and a wallet in $LEE_WALLET_HOME_DIR whose config
 #     points at it, holding three PUBLIC accounts labelled alice, bob and payer, payer funded;
-#     ALICE_ID, BOB_ID: their base58 ids (labels do not resolve inside JSON arguments);
+#     ALICE_ID, BOB_ID, PAYER_ID: their base58 ids (labels do not resolve inside JSON
+#     arguments, and --fee-payer wants an id);
 #   * target/guest/portal.bin (scripts/build-guest.sh) or PORTAL_BIN=<path to the .bin>;
 #   * jq, and a Rust toolchain (the address helper is `cargo run -p portal_client --example addr`).
 #
@@ -24,7 +25,8 @@ cd "$here"
 : "${LEE_WALLET_HOME_DIR:?wallet home}"
 bin="${PORTAL_BIN:-target/guest/portal.bin}"
 IDL=artifacts/portal-idl.json
-payer=payer
+# `--fee-payer` takes a base58 id, not a wallet label.
+payer="${PAYER_ID:-payer}"
 
 say() { printf '\n== %s\n' "$*"; }
 die() { echo "FAIL: $*" >&2; exit 1; }
@@ -107,7 +109,7 @@ send --root alice --signer alice --actor "$PORTAL" -- act --portal "$PORTAL" \
 bob_count=$(inspect "$(addr owner "$BOB_ID")" 2>/dev/null | jq -r '.OwnerHead.count // 0')
 send --root bob --signer bob --actor "$PORTAL" --actor "$(addr owner "$BOB_ID")" \
   --actor "$(addr owned "$BOB_ID" "$bob_count")" \
-  -- act --portal "$PORTAL" --op '"AcceptOwnership"'
+  -- act --portal "$PORTAL" --op AcceptOwnership
 [ "$(inspect "$PORTAL" | jq -r '.Portal.owner')" = "$BOB_ID" ] || die "ownership"
 
 say "OK"
