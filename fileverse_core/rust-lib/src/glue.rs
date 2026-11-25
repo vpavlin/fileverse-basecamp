@@ -126,11 +126,12 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// state, create_document, join_document, set_text, set_cursor, settings;
     /// `args_json` a JSON array of strings. Returns reflection_core's answer, or an error.
     fn reflection_call(&self, method: String, args_json: String) -> String;
-    /// Call AI Gateway's core (ai_gateway_core, when installed) for the AI chat: `method` one
-    /// of sessionChat, job, jobDelta (AI Gateway 0.1.10), cancel, closeSession, sessions; `args_json` a JSON array of
+    /// Call the app that opened an AI chat session (the provider the ai.session intent's answer
+    /// names, ai-session/1 contract): `method` one of sessionChat, job, jobDelta, cancel,
+    /// closeSession, sessions; `args_json` `{ provider, args }` with `args` a JSON array of
     /// strings. A session is opened by the view through the ai.session intent, which the user
-    /// confirms; its turns come here, without a dialog each. AI Gateway's answer, or an error
-    /// with `absent: true` when it is not installed.
+    /// confirms; its turns come here, without a dialog each. The provider's answer, or an error
+    /// with `absent: true` when it is not installed or not answering.
     fn ai_call(&self, method: String, args_json: String) -> String;
     /// The visual editor's HTML as Markdown (as `draft_save_rich` would store it), for a
     /// draft whose text another module keeps: `{ markdown }`.
@@ -1724,27 +1725,39 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
         if !ALLOWED.contains(&method.as_str()) {
             return err(format!("not an AI Gateway call Fileverse makes: {method}"));
         }
-        let args: Value = match serde_json::from_str(&args_json) {
-            Ok(v @ Value::Array(_)) => v,
-            _ => return err("arguments must be a JSON array"),
+        // `{ provider, args }`: the module that answered the ai.session intent (its result names
+        // it) and the arguments, as the ai-session/1 contract defines them. Any app that offers
+        // ai.session and implements the contract works; Fileverse depends on none of them.
+        // A bare array is how views before 0.22 called: AI Gateway's core, then the only provider.
+        let (provider, args) = match serde_json::from_str::<Value>(&args_json) {
+            Ok(v @ Value::Array(_)) => ("ai_gateway_core".to_string(), v),
+            Ok(Value::Object(mut o)) => match (o.remove("provider"), o.remove("args")) {
+                (Some(Value::String(p)), Some(a @ Value::Array(_))) => (p, a),
+                _ => return err("arguments must be { provider, args: [...] }"),
+            },
+            _ => return err("arguments must be { provider, args: [...] }"),
         };
+        if provider.is_empty() || provider.len() > 64 || !provider.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+            return err(format!("not a module name: {provider}"));
+        }
         // as reflection_call: not from the module's own thread
         let (tx, rx) = std::sync::mpsc::channel();
         let m = method.clone();
+        let target = provider.clone();
         let spawned = std::thread::Builder::new().name("fileverse-ai".into()).spawn(move || {
             let r = logos_rust_sdk::LogosModuleSDK::new()
-                .plugin("ai_gateway_core")
+                .plugin(&target)
                 .call_json_with_timeout(&m, &args, Duration::from_secs(15));
             let _ = tx.send(r);
         });
         if spawned.is_err() {
-            return err("could not reach AI Gateway");
+            return err("could not reach the AI app");
         }
         match rx.recv_timeout(Duration::from_secs(17)) {
             Ok(Ok(Value::String(s))) => s,
             Ok(Ok(v)) => v.to_string(),
-            Ok(Err(e)) => json!({ "ok": false, "absent": true, "error": format!("AI Gateway is not installed or not answering ({e:?})") }).to_string(),
-            Err(_) => err("AI Gateway did not answer in time"),
+            Ok(Err(e)) => json!({ "ok": false, "absent": true, "error": format!("the AI app ({provider}) is not installed or not answering ({e:?})") }).to_string(),
+            Err(_) => err(format!("the AI app ({provider}) did not answer in time")),
         }
     }
 

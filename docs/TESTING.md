@@ -1,5 +1,32 @@
 # What was tested, and how to repeat it
 
+## core 0.18.0 + view 0.22.0: no dependency on AI Gateway (2026-11-25)
+
+vpavlin: Fileverse should only use the intents; anything can offer them, not just AI Gateway.
+Write with AI already did (ai.ask). The AI chat opened through ai.session but then sent every
+turn to `ai_gateway_core` by name, declared as an optional dependency with its LIDL file.
+
+Now (agreed with whisperbox, contract `ai-session/1` in ai-gateway-basecamp
+docs/ai-session-contract.md):
+- the ai.session answer names the module that runs the session (`provider`) and the contract
+  (`api`); AI Gateway sends both from view 0.1.13;
+- the view sends every turn (sessionChat, job, jobDelta, closeSession) to that module through
+  the core's `ai_call`, now `{ provider, args }`; a module name is checked to be one;
+- an `api` other than ai-session/1: the chat goes one ai.chat request per message instead;
+- no `api`/`provider` (AI Gateway before 0.1.13): ai-session/1 at `ai_gateway_core`, as it
+  was the only provider; a bare argument array to `ai_call` (views before 0.22) the same;
+- fileverse_core no longer lists ai_gateway_core (optional dependency, LIDL override and
+  contracts/ai_gateway_core.lidl removed); jobDelta is allowed.
+
+Basecamp has no follow-up intents bound to a session and no remembered choice, so a per-
+message intent would show the app chooser every time; whisperbox may draft that upstream ask.
+
+- Harness: chat (no provider named: ai_gateway_core), chatprovider (`other_ai_core` gets
+  sessionChat, jobDelta, job), chatapi (ai-session/2: ai.chat per message), chatdelta.
+- Basecamp 0.3.2 t, AI Gateway core 0.1.6: core 0.18.0 without ai_gateway_core in its
+  manifest reached it (Basecamp does not check declared dependencies for this call); the
+  fake model got the turn, the reply streamed and ended in an edit card. Sidebar "Core 0.18.0".
+
 ## 0.21.0 (view): AI chat answers stream in (2026-11-25)
 
 Václav, through whisperbox: make the chat stream. AI Gateway's job text grows while the

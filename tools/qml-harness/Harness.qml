@@ -40,7 +40,8 @@ Window {
             if (intent === "ai.session") {
                 console.log("SESSION title=" + params.title + " document=" + String(params.document).length + " system=" + String(params.system).length)
                 if (win.mode === "chatstateless") { Qt.callLater(function () { cb({ ok: false, error: "unavailable" }) }); return }
-                Qt.callLater(function () { cb({ ok: true, data: { sessionId: "s1", model: "llama-3.3-70b", connector: "venice", privacy: "no-retention" } }) })
+                Qt.callLater(function () { cb({ ok: true, data: Object.assign({ sessionId: "s1", model: "llama-3.3-70b", connector: "venice", privacy: "no-retention" },
+                    win.mode === "chatprovider" ? { provider: "other_ai_core", api: "ai-session/1" } : win.mode === "chatapi" ? { provider: "other_ai_core", api: "ai-session/2" } : {}) }) })
                 return
             }
             if (intent === "ai.chat") {
@@ -78,7 +79,9 @@ Window {
     function answer(method, args) {
         if (method === "chat_load") return { ok: true, chat: null }
         if (method === "ai_call") {
-            var aa = JSON.parse(args[1])
+            var pl = JSON.parse(args[1])
+            var aa = Array.isArray(pl) ? pl : pl.args
+            console.log("AICALL", args[0], "provider=" + (Array.isArray(pl) ? "(bare array)" : pl.provider))
             if (args[0] === "sessionChat") {
                 var t = JSON.parse(aa[1]); win.turns.push(t)
                 console.log("TURN", aa[0], JSON.stringify(Object.keys(t)), t.messages ? t.messages.length + " messages" : "", t.document ? "document " + t.document.length : "no document", "| context:", JSON.stringify(String(t.context || "").substring(0, 60)), "| schema:", !!t.responseFormat, "| reset:", !!t.resetHistory)
@@ -201,11 +204,11 @@ Window {
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
             else if (win.mode === "confirmdel") { it.section = "drafts"; it.openDraft("abc123"); Qt.callLater(function () { it.confirm("Delete “Logos plan”?", "It is deleted from this device, with its AI chat. This cannot be undone. The published copy stays where it was published.", "Delete", function () { console.log("DELETED") }) }) }
-            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail" || win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset" || win.mode === "chatstream" || win.mode === "chatdelta") {
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail" || win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset" || win.mode === "chatstream" || win.mode === "chatdelta" || win.mode === "chatprovider" || win.mode === "chatapi") {
                 it.section = "drafts"; it.openDraft("abc123")
                 if (win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editmdai" || win.mode === "chatmd") Qt.callLater(function () { it.setVisualEdit(false) })
                 if (win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail") aiTimer.start()
-                if (win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset" || win.mode === "chatstream" || win.mode === "chatdelta") chatTimer.start()
+                if (win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset" || win.mode === "chatstream" || win.mode === "chatdelta" || win.mode === "chatprovider" || win.mode === "chatapi") chatTimer.start()
             }
             else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
         })

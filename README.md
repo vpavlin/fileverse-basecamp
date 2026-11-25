@@ -13,11 +13,11 @@ share link  ->  files(id) on the portal contract (Gnosis, via eth_rpc_module)
 
 | Package | Type | What it does |
 |---|---|---|
-| `fileverse_core` | core, Rust (`cdylib`) | The engine: chain reads, trustless IPFS fetch, decryption, Yjs rendering, backup keys, Markdown drafts and publishing, copies on IPFS and Logos Storage, AI chat history and AI Gateway sessions. Depends on the official `eth_rpc_module` and `reflection_core`; uses `ipfs_module`, `storage_module` and `ai_gateway_core` when present. |
+| `fileverse_core` | core, Rust (`cdylib`) | The engine: chain reads, trustless IPFS fetch, decryption, Yjs rendering, backup keys, Markdown drafts and publishing, copies on IPFS and Logos Storage, AI chat history and AI Gateway sessions. Depends on the official `eth_rpc_module` and `reflection_core`; uses `ipfs_module` and `storage_module` when present, and whichever app opened an AI chat session. |
 | `fileverse_ui` | ui_qml, pure QML | Recent / My files / Drafts, document and sheet views, slide decks, the editor with live preview, settings. |
 | `ipfs_module` | core, Rust (`cdylib`) | An IPFS node for every Logos app: a bundled static Kubo run on loopback ports, started on first use, stopped with its host. Fileverse starts it only when it needs it (Settings → IPFS node). |
 
-What it does (core 0.17, view 0.21):
+What it does (core 0.18, view 0.22):
 
 - **Read share links** from the legacy portal (`docs.fileverse.io`) and the v3 App contract
   (`ddocs.new`, `dsheets.new`), in every form Fileverse hands out: `…/<portal>/<fileId>#key=…`,
@@ -94,9 +94,10 @@ private IPFS lane, images, writing back to Fileverse's chain records, pictures i
   gateways when your node is not running, so those gateways can see which CIDs you fetch
   (not what they contain: the content stays encrypted). Choose *Always on* to read through
   your own node.
-- **AI:** Fileverse never talks to a model itself. Write with AI and AI chat go through the AI
-  Gateway app, which shows exactly what is sent, lets you pick the model and its privacy tier,
-  and asks you first (once per chat). What goes out: the selection or paragraph (Write with AI),
+- **AI:** Fileverse never talks to a model itself, and depends on no AI app: Write with AI and
+  AI chat use Basecamp's intents (ai.ask, ai.session), answered by an app such as AI Gateway,
+  which shows exactly what is sent, lets you pick the model and its privacy tier, and asks you
+  first (once per chat). What goes out: the selection or paragraph (Write with AI),
   or your messages and the document's Markdown (AI chat). AI edits change the document only when
   you apply them. The chat history is kept per document on this device only, unencrypted like
   the drafts themselves (`<module data>/chats/`), and is never shared or published.

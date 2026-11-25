@@ -1775,12 +1775,13 @@ Item {
         root.chatSave()
         return true
     }
-    // ── AI chat through an AI Gateway session (ai.session) ──
-    // The view asks once (Basecamp and AI Gateway confirm, the user picks the model); then
-    // fileverse_core sends each turn to ai_gateway_core without a dialog. AI Gateway keeps
-    // the conversation and the latest document; Fileverse sends the new message, and the
-    // whole document only when it changed. Without sessions it falls back to ai.chat.
-    property var chatSession: null        // { id, model, privacy, doc }: doc = what AI Gateway has
+    // ── AI chat through an ai.session intent ──
+    // The view asks once (Basecamp and the providing app, e.g. AI Gateway, confirm; the user
+    // picks the model); then fileverse_core sends each turn, without a dialog, to the module
+    // the intent's answer names (the ai-session/1 contract). Fileverse depends on no provider.
+    // The provider keeps the conversation and the latest document; Fileverse sends the new
+    // message, and the whole document only when it changed. Without sessions: ai.chat.
+    property var chatSession: null        // { id, provider, model, privacy, doc }: doc = what the provider has
     property bool chatStateless: false
     property string chatPartial: ""       // the answer as it streams in
     property var chatDeltaOk: null        // jobDelta: null not tried yet, false refused (older core or AI Gateway)
@@ -1867,7 +1868,18 @@ Item {
                 return
             }
             var d = res.data || {}
-            root.chatSession = { id: String(d.sessionId || ""), model: d.model || "", privacy: d.privacy || "", connector: d.connector || "", doc: docNow, prose: false, reset: false }
+            // Whichever app answered ai.session runs the chat; its answer names the module to
+            // send the turns to and the contract they follow. AI Gateway before 0.1.13 named
+            // neither: it was the only provider, and spoke ai-session/1.
+            var api = String(d.api || "ai-session/1")
+            if (api !== "ai-session/1") {
+                root.chatUndoSend("")
+                root.chatStateless = true   // a session this view cannot talk to: one ai.chat request per message
+                if (root.chatSendStateless(p.text)) chatInput.text = ""
+                return
+            }
+            root.chatSession = { id: String(d.sessionId || ""), provider: String(d.provider || "ai_gateway_core"),
+                                 model: d.model || "", privacy: d.privacy || "", connector: d.connector || "", doc: docNow, prose: false, reset: false }
             root.chatTurn(true)
         })
     }
@@ -1895,7 +1907,7 @@ Item {
         p.fresh = fresh
         p.structured = !sess.prose
         if (p.structured) turn.responseFormat = root.chatSchema
-        root.core("ai_call", ["sessionChat", JSON.stringify([sess.id, JSON.stringify(turn)])], function (raw) {
+        root.aiSessionCall(sess, "sessionChat", [sess.id, JSON.stringify(turn)], function (raw) {
             if (root.chatPending !== p) return
             var r = root.j(raw)
             if (r && r.ok === false && p.structured && /unsupported/.test(String(r.code || r.error || ""))) {
@@ -1903,7 +1915,7 @@ Item {
                 root.chatProse(); root.chatTurn(fresh); return
             }
             if (r && r.absent) {
-                // no ai_gateway_core to talk to: one ai.chat request per message
+                // the session's app is not there to talk to: one ai.chat request per message
                 root.chatSession = null
                 root.chatUndoSend("")
                 root.chatStateless = true
@@ -1938,7 +1950,7 @@ Item {
             // While the answer runs: only the new text (AI Gateway 0.1.10's jobDelta, which the
             // core allows from 0.17.2). An older core or gateway refuses it: job() from then on.
             if (root.chatDeltaOk !== false && !p.deltaDone) {
-                root.core("ai_call", ["jobDelta", JSON.stringify([job, String(p.since || 0)])], function (raw) {
+                root.aiSessionCall(root.chatSession, "jobDelta", [job, String(p.since || 0)], function (raw) {
                     p.polling = false
                     if (root.chatPending !== p || root.chatJob !== job) return
                     var d = root.j(raw) || {}
@@ -1957,7 +1969,7 @@ Item {
                 })
                 return
             }
-            root.core("ai_call", ["job", JSON.stringify([job])], function (raw) {
+            root.aiSessionCall(root.chatSession, "job", [job], function (raw) {
                 p.polling = false
                 if (root.chatPending !== p || root.chatJob !== job) return
                 var r = root.j(raw) || {}
@@ -2010,8 +2022,13 @@ Item {
         var n = ei < 0 ? 0 : (t.substring(ei).match(/"find"\s*:/g) || []).length
         return out + (n ? (out ? "\n\n" : "") + "_Writing " + (n === 1 ? "an edit" : n + " edits") + "…_" : "")
     }
+    // A call to the app running the chat session (ai-session/1), through the core.
+    function aiSessionCall(sess, method, args, cb) {
+        if (!sess || !sess.provider) { cb(JSON.stringify({ ok: false, absent: true, error: "no AI chat session" })); return }
+        root.core("ai_call", [method, JSON.stringify({ provider: sess.provider, args: args })], cb)
+    }
     function chatCloseSession() {
-        if (root.chatSession && root.chatSession.id) root.core("ai_call", ["closeSession", JSON.stringify([root.chatSession.id])], function () {})
+        if (root.chatSession && root.chatSession.id) root.aiSessionCall(root.chatSession, "closeSession", [root.chatSession.id], function () {})
         root.chatSession = null
     }
     // Where an edit's FIND text is in the document's Markdown: exactly, else ignoring
