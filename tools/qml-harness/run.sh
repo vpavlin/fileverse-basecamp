@@ -7,4 +7,4 @@ QS=/nix/store/36ndhs8khvj8960qbhvw8h3bld1kc06g-qtsvg-6.9.2
 DS=${DS:-/home/vpavlin/fileverse/logos/logos-design-system/src/qml}
 cd "$(dirname "$0")"
 QML_XHR_ALLOW_FILE_READ=1 LANG=C.UTF-8 QT_FORCE_STDERR_LOGGING=1 QT_QPA_PLATFORM=offscreen QT_PLUGIN_PATH=$QB/lib/qt-6/plugins:$QS/lib/qt-6/plugins:$QD/lib/qt-6/plugins \
-QML_IMPORT_PATH=$DS:$QD/lib/qt-6/qml timeout 60 $QD/bin/qml Harness.qml -- "$@" 2>&1 | grep -v Fontconfig
+QML_IMPORT_PATH=$DS:$QD/lib/qt-6/qml timeout 90 $QD/bin/qml Harness.qml -- "$@" 2>&1 | grep -v Fontconfig

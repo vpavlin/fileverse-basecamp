@@ -17,7 +17,7 @@ share link  ->  files(id) on the portal contract (Gnosis, via eth_rpc_module)
 | `fileverse_ui` | ui_qml, pure QML | Recent / My files / Drafts, document and sheet views, slide decks, the editor with live preview, settings. |
 | `ipfs_module` | core, Rust (`cdylib`) | An IPFS node for every Logos app: a bundled static Kubo run on loopback ports, started on first use, stopped with its host. Fileverse starts it only when it needs it (Settings → IPFS node). |
 
-What it does (core 0.17, view 0.20):
+What it does (core 0.17, view 0.21):
 
 - **Read share links** from the legacy portal (`docs.fileverse.io`) and the v3 App contract
   (`ddocs.new`, `dsheets.new`), in every form Fileverse hands out: `…/<portal>/<fileId>#key=…`,
@@ -57,7 +57,8 @@ What it does (core 0.17, view 0.20):
   or Insert at cursor (one undo step each).
 - **AI chat** (through AI Gateway, `ai.session`): a panel beside the editor to talk with an AI
   about the open document. You allow the chat once in AI Gateway (and pick the model); after
-  that each message goes without a dialog, and the document only when it changed. The AI
+  that each message goes without a dialog, and the document only when it changed. Answers
+  appear as they are written. The AI
   proposes edits as cards you Apply or Dismiss. Without AI Gateway these buttons say how to get
   it.
 - **Your own AI prompts** (Settings → AI prompts): edit any prompt Write with AI and AI chat

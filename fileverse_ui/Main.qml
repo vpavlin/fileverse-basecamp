@@ -1927,7 +1927,7 @@ Item {
     }
     Timer {
         id: chatPoll
-        interval: 700; repeat: true
+        interval: 350; repeat: true   // the answer streams in: AI Gateway's job text grows as it arrives
         onTriggered: {
             var p = root.chatPending, job = root.chatJob
             if (!p || !job) { stop(); return }
@@ -1936,7 +1936,7 @@ Item {
                 var r = root.j(raw) || {}
                 var st = String(r.state || (r.job && r.job.state) || "")
                 var text = String(r.text !== undefined ? r.text : (r.result && r.result.text) || "")
-                if (st === "running" || st === "queued" || st === "") { root.chatPartial = text; return }
+                if (st === "running" || st === "queued" || st === "") { root.chatPartial = p.structured ? root.chatReplySoFar(text) : text; return }
                 chatPoll.stop()
                 if (st === "error" && p.structured && !p.proseRetry) {
                     // a provider that refused the json_schema format: the same turn once more, in prose
@@ -1957,6 +1957,31 @@ Item {
                 root.chatSave()
             })
         }
+    }
+    // A JSON answer while it streams in is unfinished JSON: show the "reply" text written so
+    // far, and how many edits are being written. Edit cards come only from the finished answer.
+    function chatReplySoFar(t) {
+        t = String(t || "")
+        if (!/^\s*(```(json)?\s*)?\{/.test(t)) return t   // not JSON after all: show it as it is
+        var m = /"reply"\s*:\s*"/.exec(t)
+        var out = ""
+        if (m) {
+            for (var i = m.index + m[0].length; i < t.length; i++) {
+                var c = t.charAt(i)
+                if (c === '"') break
+                if (c !== "\\") { out += c; continue }
+                if (i + 1 >= t.length) break   // an escape cut in half
+                var e = t.charAt(++i)
+                if (e === "n") out += "\n"
+                else if (e === "t") out += "\t"
+                else if (e === "r") continue
+                else if (e === "u") { if (i + 4 >= t.length) break; out += String.fromCharCode(parseInt(t.substr(i + 1, 4), 16) || 63); i += 4 }
+                else out += e   // \" \\ \/
+            }
+        }
+        var ei = t.indexOf('"edits"')
+        var n = ei < 0 ? 0 : (t.substring(ei).match(/"find"\s*:/g) || []).length
+        return out + (n ? (out ? "\n\n" : "") + "_Writing " + (n === 1 ? "an edit" : n + " edits") + "…_" : "")
     }
     function chatCloseSession() {
         if (root.chatSession && root.chatSession.id) root.core("ai_call", ["closeSession", JSON.stringify([root.chatSession.id])], function () {})
@@ -3510,7 +3535,49 @@ Item {
                             clip: true
                             spacing: 8
                             model: root.chatMsgs
-                            onCountChanged: Qt.callLater(function () { chatList.positionViewAtEnd() })
+                            onCountChanged: { Qt.callLater(function () { chatList.positionViewAtEnd() }); chatEndAgain.restart() }
+                            // once more after the new message and the closing stream bubble have their heights
+                            Timer { id: chatEndAgain; interval: 80; onTriggered: chatList.positionViewAtEnd() }
+                            // the answer as it streams in, under the last message
+                            footer: Item {
+                                width: chatList.width
+                                height: partialBox.visible ? partialBox.height + 8 : 0
+                            Rectangle {
+                                y: 8
+                                id: partialBox
+                                visible: root.chatBusy && root.chatPartial !== ""
+                                width: chatList.width
+                                readonly property real cap: Math.max(160, chatList.height * 0.6)
+                                height: visible ? Math.min(partialText.implicitHeight + 14, cap) : 0
+                                radius: 10; clip: true
+                                color: Theme.palette.backgroundInset
+                                Flickable {
+                                    id: partialFlick
+                                    anchors.fill: parent
+                                    anchors.margins: 7
+                                    contentWidth: width
+                                    contentHeight: partialText.implicitHeight
+                                    clip: true
+                                    boundsBehavior: Flickable.StopAtBounds
+                                    // follow the newest text, unless the reader scrolled up
+                                    property bool follow: true
+                                    onMovementEnded: follow = contentY >= contentHeight - height - 4
+                                    onContentHeightChanged: if (follow) contentY = Math.max(0, contentHeight - height)
+                                    TextEdit {
+                                        id: partialText
+                                        x: 3; width: partialFlick.width - 6
+                                        readOnly: true; wrapMode: TextEdit.Wrap; textFormat: TextEdit.MarkdownText
+                                        font.pixelSize: 13; font.family: Theme.typography.publicSans; color: Theme.palette.text
+                                        text: root.chatPartial
+                                    }
+                                }
+                                onVisibleChanged: if (visible) partialFlick.follow = true
+                            }
+                            }
+                            Connections {
+                                target: root
+                                function onChatPartialChanged() { Qt.callLater(function () { chatList.positionViewAtEnd() }) }
+                            }
                             delegate: Column {
                                 id: msgItem
                                 required property var modelData
@@ -3612,21 +3679,6 @@ Item {
                                     compact: true; text: "Apply all"
                                     onClicked: root.chatApplyAll(msgItem.index)
                                 }
-                            }
-                        }
-                        Rectangle {
-                            visible: root.chatBusy && root.chatPartial !== ""
-                            Layout.fillWidth: true
-                            Layout.maximumHeight: 200
-                            implicitHeight: Math.min(partialText.implicitHeight + 14, 200)
-                            radius: 10; clip: true
-                            color: Theme.palette.backgroundInset
-                            TextEdit {
-                                id: partialText
-                                x: 10; y: 7; width: parent.width - 20
-                                readOnly: true; wrapMode: TextEdit.Wrap; textFormat: TextEdit.MarkdownText
-                                font.pixelSize: 13; font.family: Theme.typography.publicSans; color: Theme.palette.text
-                                text: root.chatPartial
                             }
                         }
                         Hint { visible: root.chatBusy && root.chatPartial === ""; text: root.chatSession ? "The AI is thinking…" : "Waiting for AI Gateway… (it asks you once to allow this chat)" }

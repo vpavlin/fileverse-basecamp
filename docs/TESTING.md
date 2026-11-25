@@ -1,5 +1,30 @@
 # What was tested, and how to repeat it
 
+## 0.21.0 (view): AI chat answers stream in (2026-11-25)
+
+Václav, through whisperbox: make the chat stream. AI Gateway's job text grows while the
+model answers; the chat now polls it every 0.35 s (was 0.7 s) and shows it as it comes:
+- **Prose turns:** the answer as Markdown.
+- **JSON turns** (structured edits): the unfinished JSON is never shown. The `reply` text
+  written so far is pulled out of it (escapes, \u and a cut escape at the end handled),
+  then "Writing an edit…" / "Writing N edits…" while the edits arrive. Edit cards come only
+  from the finished answer, parsed as before.
+- The answer grows in a bubble right under your message (the chat list's footer), which
+  follows the newest text unless you scroll up in it; the list follows too. When the answer
+  is done the list scrolls to the end once more, after the edit cards have their height.
+
+Not used yet: AI Gateway 0.1.10's jobDelta (only the new text over IPC). It needs the core
+to allow it (fileverse_core's ai_call list), so it waits for the next core release; whole
+job text every 0.35 s is a few KB at most.
+
+- Harness: chatstream (an answer in 40 pieces: the partial reply text, never JSON),
+  chatstream-end (the final message has the full reply and both edits; nothing left
+  streaming), chat, chatprose, chatbadjson, chatreset, chatmd unchanged.
+- Basecamp t, AI Gateway 0.1.6 and a fake model streaming 4 characters every 0.25 s:
+  mid-answer the chat showed "Shorter, with a reason this time." and "Writing an edit…";
+  at the end the edit card with its reason, the list scrolled to it. A prose turn (after a
+  broken JSON answer switched the session to prose) streamed too.
+
 ## 0.20.1 (view): Settings can always be closed (2026-11-25)
 
 vpavlin, on 0.20.0: no way to close the settings. Settings opened over a document or draft

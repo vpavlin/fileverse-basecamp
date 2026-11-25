@@ -13,7 +13,7 @@ Window {
 
     readonly property var args: Qt.application.arguments.slice(Qt.application.arguments.indexOf("--") + 1)
     // MODE or MODE-light / MODE-dark: the paper colours to show
-    property string mode: String(args[0]).replace(/-(light|dark)$/, "")
+    property string mode: String(args[0]).replace(/-(light|dark)$/, "").replace("chatstream-end", "chatstream")
     property string paperArg: (String(args[0]).match(/-(light|dark)$/) || [null, "basecamp"])[1]
     property int slideAt: args.length > 2 ? parseInt(args[1]) : 0
     property var docJson: null
@@ -22,6 +22,7 @@ Window {
     property var turns: []
     property bool lastStructured: false
     property var prefs: ({})
+    property int polls: 0
     readonly property string chatReply: "Two small changes would make it clearer:\n\n```edit\n<<<<<<< FIND\n- Logos Storage\n=======\n- Logos Storage (backups)\n>>>>>>> REPLACE\n```\n\n```edit\n<<<<<<< FIND\nWe go **self-sovereign**\n=======\nWe go fully **self-sovereign**\n>>>>>>> REPLACE\n```"
 
     QtObject {
@@ -86,6 +87,17 @@ Window {
                 return { ok: true, jobId: "job" + win.turns.length }
             }
             if (args[0] === "job") {
+                if (win.mode === "chatstream") {
+                    // the answer arrives in 40 pieces, one per poll (~14 s): the screenshot is mid-stream
+                    var full = JSON.stringify({ reply: "Here is a longer answer, so you can watch it arrive.\n\n- First, the \"title\" could say what the plan is for.\n- Second, the steps could be numbered.\n- Third, ünïcödé ✓ and a tab\there.\n\nTwo edits follow.", edits: [
+                        { find: "- Logos Storage", replace: "- Logos Storage (backups)", why: "Says what Storage is for." },
+                        { find: "We go **self-sovereign**", replace: "We go fully **self-sovereign**", why: "Stronger opening." } ] })
+                    win.polls++
+                    var it = view.item
+                    if (win.polls > 1) console.log("PARTIAL", win.polls - 1, JSON.stringify(it.chatPartial).substring(0, 200))
+                    if (win.polls < 40) return { state: "running", text: full.substring(0, Math.round(full.length * win.polls / 40)) }
+                    return { state: "done", text: full, model: "llama-3.3-70b", connector: "venice", privacy: "no-retention" }
+                }
                 if (win.lastStructured && win.mode === "chatprose") return { state: "error", error: "provider: response_format not supported" }
                 if (win.lastStructured && win.mode === "chatbadjson") return { state: "done", text: "Sure! Here you go: " + win.chatReply, model: "m" }
                 if (win.lastStructured) return { state: "done", text: JSON.stringify({ reply: "Two small changes would make it clearer:", edits: [
@@ -177,11 +189,11 @@ Window {
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
             else if (win.mode === "confirmdel") { it.section = "drafts"; it.openDraft("abc123"); Qt.callLater(function () { it.confirm("Delete “Logos plan”?", "It is deleted from this device, with its AI chat. This cannot be undone. The published copy stays where it was published.", "Delete", function () { console.log("DELETED") }) }) }
-            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail" || win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset") {
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail" || win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset" || win.mode === "chatstream") {
                 it.section = "drafts"; it.openDraft("abc123")
                 if (win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editmdai" || win.mode === "chatmd") Qt.callLater(function () { it.setVisualEdit(false) })
                 if (win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail") aiTimer.start()
-                if (win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset") chatTimer.start()
+                if (win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset" || win.mode === "chatstream") chatTimer.start()
             }
             else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
         })
@@ -239,7 +251,7 @@ Window {
         onTriggered: {
             var it = view.item
             if (win.mode === "chatreset") { it.chatClear(); it.chatSend("Start over, please."); chatTimer3.start(); return }
-            if (win.mode !== "chat") {
+            if (win.mode !== "chat" && win.mode !== "chatstream") {
                 it.chatApplyAll(it.chatMsgs.length - 1)
                 console.log("AFTER APPLY:", JSON.stringify(it.editorMarkdown().substring(0, 160)))
                 console.log("EDIT STATES:", JSON.stringify(it.chatMsgs[it.chatMsgs.length - 1].edits.map(function (e) { return e.state })))
@@ -302,8 +314,9 @@ Window {
         }
     }
     Timer {
-        interval: win.mode.indexOf("chat") === 0 ? 6500 : 3500; running: true
+        interval: String(win.args[0]) === "chatstream-end" ? 17000 : win.mode.indexOf("chat") === 0 ? 6500 : 3500; running: true
         onTriggered: {
+            if (String(win.args[0]) === "chatstream-end") { var lm = view.item.chatMsgs[view.item.chatMsgs.length - 1]; console.log("FINAL", lm.role, JSON.stringify(lm.text), "edits:", JSON.stringify((lm.edits || []).map(function (e) { return e.why })), "partial:", JSON.stringify(view.item.chatPartial), "busy:", view.item.chatBusy) }
             if (win.mode === "slides" || win.mode === "editslides" || win.mode === "slidecols" || win.mode === "diagram" || win.mode === "diagramonly") {
                 console.log("deck", view.item.deck.length, "slides; showing", view.item.slideIndex + 1, "kind", view.item.slide ? view.item.slide.kind : "-")
                 console.log("slides:", JSON.stringify(view.item.deck.map(function (d) { return d.blocks })))
