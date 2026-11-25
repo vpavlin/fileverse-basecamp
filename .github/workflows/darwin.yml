@@ -1,0 +1,67 @@
+# darwin-arm64 (Apple Silicon) builds of the native modules (fileverse_core, ipfs_module), merged
+# afterwards into the Linux packages as another variant (lgx-merge-platforms). fileverse_ui is pure
+# QML: its darwin variant is the same files, added with `lgx add`, so it is not built here.
+#
+# Push a tag `darwin-<version>` (in a push after the one that adds this file) or run it by hand;
+# the packages and their sha256 sums are attached to a release named after the tag.
+name: darwin-arm64 packages
+
+on:
+  push:
+    tags: ["darwin-*"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-14
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: DeterminateSystems/nix-installer-action@main
+        with:
+          extra-conf: |
+            extra-substituters = https://cache.nix.logos.co/public
+            extra-trusted-public-keys = public:Z1wyVBEx8PHbXujYB52Mysv9Rd8rWIhyQ3bQyef9yy4=
+            accept-flake-config = true
+      - name: Build
+        shell: bash
+        run: |
+          set -u -o pipefail
+          mkdir -p out
+          for m in ipfs_module fileverse_core; do
+            echo "::group::$m"
+            if ! nix build --accept-flake-config "./$m#lgx-portable" -o "res-$m" > "$m.log" 2>&1; then
+              tail -100 "$m.log"; exit 1
+            fi
+            cp res-$m/*.lgx "out/$m-darwin-arm64.lgx"
+            echo "::endgroup::"
+          done
+          (cd out && shasum -a 256 *.lgx > SHA256SUMS && cat SHA256SUMS)
+      # A Mac without Nix has no /nix/store: every library and binary in a package may only
+      # point at the system (/usr/lib, /System) or at files next to it (@rpath, @loader_path).
+      - name: No /nix/store references
+        shell: bash
+        run: |
+          set -eu -o pipefail
+          bad=0
+          for f in out/*.lgx; do
+            d=$(mktemp -d); tar xzf "$f" -C "$d"
+            echo "== $(basename "$f")"; find "$d/variants" -type f | sed "s|$d/||"
+            while read -r b; do
+              if file "$b" | grep -q Mach-O; then
+                refs=$(otool -L "$b" | tail -n +2 | awk '{print $1}')
+                echo "$(basename "$b"):"; echo "$refs" | sed 's/^/    /'
+                if echo "$refs" | grep -q '^/nix/store'; then echo "!! $(basename "$b") needs /nix/store"; bad=1; fi
+              fi
+            done < <(find "$d/variants" -type f)
+          done
+          exit $bad
+      - uses: softprops/action-gh-release@v2
+        if: startsWith(github.ref, 'refs/tags/')
+        with:
+          files: |
+            out/*.lgx
+            out/SHA256SUMS
