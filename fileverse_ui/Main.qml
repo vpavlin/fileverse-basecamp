@@ -1363,6 +1363,75 @@ Item {
         ["Fix grammar", "Fix spelling, grammar and punctuation in this text. Change nothing else; keep the Markdown formatting.", "target", "replace"],
         ["Summarize", "Summarize this text in a few sentences.", "targetOrAll", "below"]
     ]
+    readonly property string aiTranslateDefault: "Translate this text into {language}. Keep the Markdown formatting."
+    // The user's own prompts (Settings → AI prompts), kept in this device's preferences only:
+    // { system, translate, chat, actions: { label: prompt }, mine: [{ name, prompt, how }] }.
+    // An empty or missing entry means Fileverse's default.
+    // aiPSaved: what was last sent to the core, so quick edits in a row build on each other
+    property var aiPSaved: null
+    readonly property var aiP: root.aiPSaved || (root.snap && root.snap.prefs && root.snap.prefs.aiPrompts) || ({})
+    function aiOwn(key) { var v = root.aiP[key]; return typeof v === "string" && v.trim() !== "" ? v : "" }
+    readonly property string aiSystemNow: root.aiOwn("system") || root.aiSystem
+    readonly property string aiTranslateNow: root.aiOwn("translate") || root.aiTranslateDefault
+    readonly property var aiMine: Array.isArray(root.aiP.mine) ? root.aiP.mine : []
+    readonly property var aiActionsNow: root.aiActions.map(function (a) {
+        var own = root.aiP.actions && typeof root.aiP.actions[a[0]] === "string" && root.aiP.actions[a[0]].trim() !== "" ? root.aiP.actions[a[0]] : ""
+        return [a[0], own || a[1], a[2], a[3]]
+    }).concat(root.aiMine.map(function (m) {
+        return [m.name, m.prompt, m.how === "replace" ? "target" : m.how === "cursor" ? "before" : "targetOrAll", m.how === "cursor" ? "cursor" : m.how === "replace" ? "replace" : "below"]
+    }))
+    // the prompts Settings lists: key, title, Fileverse's default
+    readonly property var aiPromptList: [["system", "Write with AI: how to answer", root.aiSystem]]
+        .concat(root.aiActions.map(function (a) { return ["a:" + a[0], a[0], a[1]] }))
+        .concat([["translate", "Translate ({language} is the language you type)", root.aiTranslateDefault],
+                 ["chat", "AI chat: who the AI is and how it talks", root.chatRole]])
+    function aiPromptNow(key, def) {
+        if (key.indexOf("a:") === 0) { var acts = root.aiP.actions || {}; var v = acts[key.substring(2)]; return typeof v === "string" && v.trim() !== "" ? v : def }
+        return root.aiOwn(key) || def
+    }
+    function aiPromptEdited(key, def) { return root.aiPromptNow(key, def) !== def }
+    function aiSavePrompts(p, msg) {
+        root.aiPSaved = p
+        root.core("set_pref", ["aiPrompts", JSON.stringify(p)], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok) { root.aiPSaved = null; root.fail((r && r.error) || "Could not save the prompt"); return }
+            var sn = JSON.parse(JSON.stringify(root.snap)); sn.prefs = r.prefs; root.snap = sn
+            root.say(msg)
+        })
+    }
+    // text "" (or the default) = back to Fileverse's prompt
+    function aiSetPrompt(key, def, text) {
+        var p = JSON.parse(JSON.stringify(root.aiP))
+        var t = String(text || "")
+        var own = t.trim() !== "" && t !== def
+        if (key.indexOf("a:") === 0) {
+            p.actions = p.actions || {}
+            if (own) p.actions[key.substring(2)] = t; else delete p.actions[key.substring(2)]
+        } else if (own) p[key] = t
+        else delete p[key]
+        root.aiSavePrompts(p, own ? "Prompt saved on this device" + (key === "chat" && root.chatSession ? ". It applies from the next AI chat you open" : "") : "Fileverse's prompt restored")
+    }
+    // index -1 adds; prompt "" removes
+    function aiSetMine(index, name, prompt, how) {
+        var p = JSON.parse(JSON.stringify(root.aiP))
+        var mine = Array.isArray(p.mine) ? p.mine : []
+        if (prompt === "") { mine.splice(index, 1); p.mine = mine; root.aiSavePrompts(p, "Action removed"); return true }
+        name = String(name).trim(); prompt = String(prompt)
+        if (!name || !prompt.trim()) { root.fail("An action needs a name and a prompt."); return false }
+        var taken = root.aiActions.some(function (a) { return a[0].toLowerCase() === name.toLowerCase() })
+                    || ["translate…", "ask ai…"].indexOf(name.toLowerCase()) >= 0
+                    || mine.some(function (m, i) { return i !== index && m.name.toLowerCase() === name.toLowerCase() })
+        if (taken) { root.fail("There is already an action called " + name + "."); return false }
+        var m = { name: name.substring(0, 40), prompt: prompt, how: how }
+        if (index < 0) { if (mine.length >= 20) { root.fail("At most 20 actions of your own."); return false } mine.push(m) } else mine[index] = m
+        p.mine = mine
+        root.aiSavePrompts(p, index < 0 ? "Action added to Write with AI" : "Action saved")
+        return true
+    }
+    // The prompt being edited in the dialog: { key, title, def, text } or, for an action
+    // of your own, { mine: index (-1 new), name, text, how }.
+    property var promptEdit: null
+    property string promptHow: "replace"
     function utf8Len(t) { return unescape(encodeURIComponent(t)).length }
     // At most aiMaxBytes of `t`: its end (`keepEnd`, for "continue") or its start.
     function aiCap(t, keepEnd) {
@@ -1424,7 +1493,7 @@ Item {
         root.aiBusy = true
         root.aiNote = ""
         root.aiResult = null
-        logos.request("ai.ask", { prompt: root.aiCap(prompt, false), content: content, system: root.aiSystem }, function (res) {
+        logos.request("ai.ask", { prompt: root.aiCap(prompt, false), content: content, system: root.aiSystemNow }, function (res) {
             root.aiBusy = false
             if (typeof res === "string") res = root.j(res)
             if (!res || !res.ok) {
@@ -1554,7 +1623,10 @@ Item {
     property string chatDocSent: ""  // the document as the AI last saw it
     property string chatNote: ""
     readonly property int chatMaxBytes: 60000
-    readonly property string chatSystem: "You are a co-author in Fileverse, a Markdown document editor. You and the user talk about the document they are writing. Its Markdown is in the messages that start with [Document]; messages that start with [Document changes] say what changed since. Answer in the user's language, briefly and to the point.\n\nWhen the user asks you to change the document, or a change clearly helps, propose it with blocks of exactly this form, one block per change:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```\n\nFIND must be copied character for character from the current Markdown, with its ** and other marks and its &nbsp; lines (empty paragraphs), never shortened with ..., and occur in it only once: a few whole lines, short but unique. For several changes far apart, use several blocks rather than one large one. To add text, FIND a nearby line and repeat it in the new text together with the addition. To delete, leave the new text empty. The user reviews every block before it is applied. Outside the blocks, talk normally and do not repeat the blocks in prose."
+    readonly property string chatRole: "You are a co-author in Fileverse, a Markdown document editor. You and the user talk about the document they are writing. Answer in the user's language, briefly and to the point."
+    // what the app needs from the AI (where the document is, the edit format); not editable
+    readonly property string chatSystem: root.chatRoleNow + "\n\nThe document's Markdown is in the messages that start with [Document]; messages that start with [Document changes] say what changed since.\n\nWhen the user asks you to change the document, or a change clearly helps, propose it with blocks of exactly this form, one block per change:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```\n\nFIND must be copied character for character from the current Markdown, with its ** and other marks and its &nbsp; lines (empty paragraphs), never shortened with ..., and occur in it only once: a few whole lines, short but unique. For several changes far apart, use several blocks rather than one large one. To add text, FIND a nearby line and repeat it in the new text together with the addition. To delete, leave the new text empty. The user reviews every block before it is applied. Outside the blocks, talk normally and do not repeat the blocks in prose."
+    readonly property string chatRoleNow: root.aiOwn("chat") || root.chatRole
     function chatSave() {
         if (!root.chatDraftId) return
         var c = root.chatMsgs.length ? JSON.stringify({ v: 1, msgs: root.chatMsgs, docSent: root.chatDocSent }) : "null"
@@ -1712,7 +1784,7 @@ Item {
     property string chatPartial: ""       // the answer as it streams in
     property string chatJob: ""
     property var chatPending: null        // { text, doc, before, retried }
-    readonly property string chatSessionSystem: "You are a co-author in Fileverse, a Markdown document editor. You and the user talk about the document they are writing; its latest Markdown is given below and is updated as the user edits. Each message may come with context saying what the user has selected or where their cursor is: \"this\", \"here\" or \"the selection\" means that text. Answer in the user's language, briefly and to the point.\n\nWhen the user asks you to change the document, or a change clearly helps, propose edits. Each edit has: find, text copied character for character from the current Markdown (with its ** and other marks and its &nbsp; lines, never shortened with ...), a few whole lines that occur only once; replace, the new text (empty to delete; to add text, find a nearby line and repeat it with the addition); why, one short sentence. Use one edit per change; changes far apart are separate edits. The user reviews every edit before it is applied.\n\nWhen a JSON response format is required, answer with it: your words in reply, the edits in edits (an empty list when there are none). Otherwise write each edit as a block of exactly this form, and talk normally outside the blocks:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```"
+    readonly property string chatSessionSystem: root.chatRoleNow + "\n\nThe document's latest Markdown is given below and is updated as the user edits. Each message may come with context saying what the user has selected or where their cursor is: \"this\", \"here\" or \"the selection\" means that text.\n\nWhen the user asks you to change the document, or a change clearly helps, propose edits. Each edit has: find, text copied character for character from the current Markdown (with its ** and other marks and its &nbsp; lines, never shortened with ...), a few whole lines that occur only once; replace, the new text (empty to delete; to add text, find a nearby line and repeat it with the addition); why, one short sentence. Use one edit per change; changes far apart are separate edits. The user reviews every edit before it is applied.\n\nWhen a JSON response format is required, answer with it: your words in reply, the edits in edits (an empty list when there are none). Otherwise write each edit as a block of exactly this form, and talk normally outside the blocks:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```"
     // AI Gateway's structured output (responseFormat json_schema): the reply and the edits as
     // JSON, so edits come exactly as the model meant them. A model that can't, or a turn that
     // fails or does not parse with it, puts the session back on the prose format above.
@@ -2459,110 +2531,144 @@ Item {
                 onDismissed: root.error = ""
             }
 
-            // settings
-            Card {
+            // settings (scrolls on its own: it is taller than a small window)
+            ScrollView {
+                id: settingsScroll
                 visible: root.showSettings
                 Layout.fillWidth: true
-                implicitHeight: settingsCol.implicitHeight + 32
-                ColumnLayout {
-                    id: settingsCol
-                    anchors.fill: parent
-                    anchors.margins: 16
-                    spacing: Theme.spacing.small
-                    LogosText { textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold; text: "Settings" }
-                    Caption { text: "PAPER"; Layout.topMargin: 4 }
-                    Hint { text: "The colours documents are read and written in (the editors, the preview, documents and slides). The rest of the app keeps Basecamp's colours." }
-                    RowLayout {
+                Layout.preferredHeight: settingsCard.implicitHeight
+                Layout.maximumHeight: Math.max(200, root.height - 150)
+                contentWidth: availableWidth
+                clip: true
+                Card {
+                    id: settingsCard
+                    width: settingsScroll.availableWidth
+                    implicitHeight: settingsCol.implicitHeight + 32
+                    ColumnLayout {
+                        id: settingsCol
+                        anchors.fill: parent
+                        anchors.margins: 16
+                        spacing: Theme.spacing.small
+                        LogosText { textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold; text: "Settings" }
+                        Caption { text: "PAPER"; Layout.topMargin: 4 }
+                        Hint { text: "The colours documents are read and written in (the editors, the preview, documents and slides). The rest of the app keeps Basecamp's colours." }
+                        RowLayout {
+                            Repeater {
+                                model: [{ k: "basecamp", t: "Basecamp" }, { k: "light", t: "Light" }, { k: "dark", t: "Dark" }]
+                                LogosButton {
+                                    compact: true; text: modelData.t
+                                    variant: root.paper === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                    onClicked: root.setPaper(modelData.k)
+                                }
+                            }
+                        }
+                        Caption { text: "SHARED DOCUMENTS: NETWORKS"; Layout.topMargin: 4 }
+                        Hint {
+                            text: root.networksSettable
+                                  ? "Where shared documents are published (Reflection's engine, reflection_core, publishes them; the same setting as in Reflection). Logos: Logos Delivery. p2panda: the p2panda network of Reflection's other apps. Both: everyone on either can join, and edits are passed between the two."
+                                  : "Shared documents are published by Reflection's engine (reflection_core), now on " + root.networksLabel(root.reflSyncMode === "p2panda" ? "p2panda" : "logos") + ". Choosing Logos, p2panda or both here needs a newer reflection_core."
+                        }
+                        RowLayout {
+                            visible: root.networksSettable
+                            Repeater {
+                                model: [{ k: "logos", t: "Logos" }, { k: "p2panda", t: "p2panda" }, { k: "both", t: "Both" }]
+                                LogosButton {
+                                    compact: true; text: modelData.t
+                                    variant: root.reflSettings && root.reflSettings.networks === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                    onClicked: root.refl("set_settings", [JSON.stringify({ networks: modelData.k })], function (raw) {
+                                        var r = root.j(raw)
+                                        if (r && r.ok) { if (r.settings) root.reflSettings = r.settings; root.say("Shared documents: " + root.networksLabel(modelData.k)); root.refreshCollab() }
+                                        else root.fail((r && r.error) || "reflection_core did not take the setting")
+                                    })
+                                }
+                            }
+                        }
+                        Caption { text: "AI PROMPTS"; Layout.topMargin: 4 }
+                        Hint { text: "What Fileverse asks the AI in Write with AI and AI chat. Change them to your liking; they are kept on this device only and never shared. Instructions of your own for every app can also be set in AI Gateway." }
                         Repeater {
-                            model: [{ k: "basecamp", t: "Basecamp" }, { k: "light", t: "Light" }, { k: "dark", t: "Dark" }]
-                            LogosButton {
-                                compact: true; text: modelData.t
-                                variant: root.paper === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
-                                onClicked: root.setPaper(modelData.k)
+                            model: root.aiPromptList
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacing.small
+                                LogosText { Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText; font.pixelSize: 13; text: modelData[1] }
+                                LogosText { visible: root.aiPromptEdited(modelData[0], modelData[2]); textFormat: Text.PlainText; font.pixelSize: 11; color: Theme.palette.primary; text: "yours" }
+                                LogosButton { compact: true; text: "Edit"; onClicked: root.promptEdit = { key: modelData[0], title: modelData[1], def: modelData[2], text: root.aiPromptNow(modelData[0], modelData[2]) } }
                             }
                         }
-                    }
-                    Caption { text: "SHARED DOCUMENTS: NETWORKS"; Layout.topMargin: 4 }
-                    Hint {
-                        text: root.networksSettable
-                              ? "Where shared documents are published (Reflection's engine, reflection_core, publishes them; the same setting as in Reflection). Logos: Logos Delivery. p2panda: the p2panda network of Reflection's other apps. Both: everyone on either can join, and edits are passed between the two."
-                              : "Shared documents are published by Reflection's engine (reflection_core), now on " + root.networksLabel(root.reflSyncMode === "p2panda" ? "p2panda" : "logos") + ". Choosing Logos, p2panda or both here needs a newer reflection_core."
-                    }
-                    RowLayout {
-                        visible: root.networksSettable
+                        Caption { text: "MY AI ACTIONS"; Layout.topMargin: 4 }
+                        Hint { text: root.aiMine.length ? "Buttons of your own in Write with AI, after Fileverse's." : "Add buttons of your own to Write with AI: a name and what to ask, e.g. \"Make it friendlier\"." }
                         Repeater {
-                            model: [{ k: "logos", t: "Logos" }, { k: "p2panda", t: "p2panda" }, { k: "both", t: "Both" }]
+                            model: root.aiMine
+                            RowLayout {
+                                Layout.fillWidth: true
+                                spacing: Theme.spacing.small
+                                LogosText { Layout.fillWidth: true; elide: Text.ElideRight; textFormat: Text.PlainText; font.pixelSize: 13; text: modelData.name }
+                                LogosButton { compact: true; text: "Edit"; onClicked: root.promptEdit = { mine: index, name: modelData.name, text: modelData.prompt, how: modelData.how || "replace" } }
+                                LogosButton { compact: true; text: "Remove"; onClicked: { var i = index, n = modelData.name; root.confirm("Remove " + n + "?", "The button goes from Write with AI, with its prompt.", "Remove", function () { root.aiSetMine(i, "", "", "") }) } }
+                            }
+                        }
+                        LogosButton { compact: true; text: "Add an action"; onClicked: root.promptEdit = { mine: -1, name: "", text: "", how: "replace" } }
+                        Caption { text: "IPFS GATEWAYS"; Layout.topMargin: 4 }
+                        Hint { text: "Tried after your own node, one per line. Every block is checked against its hash, so a gateway can fail but cannot change content." }
+                        ScrollView {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 80
+                            TextArea {
+                                id: gwField
+                                color: Theme.palette.text
+                                font.pixelSize: 13
+                                font.family: Theme.typography.mono
+                                background: Rectangle { color: Theme.palette.backgroundInset; radius: Theme.spacing.radiusLarge; border.color: Theme.palette.borderSubtle }
+                            }
+                        }
+                        RowLayout {
                             LogosButton {
-                                compact: true; text: modelData.t
-                                variant: root.reflSettings && root.reflSettings.networks === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
-                                onClicked: root.refl("set_settings", [JSON.stringify({ networks: modelData.k })], function (raw) {
-                                    var r = root.j(raw)
-                                    if (r && r.ok) { if (r.settings) root.reflSettings = r.settings; root.say("Shared documents: " + root.networksLabel(modelData.k)); root.refreshCollab() }
-                                    else root.fail((r && r.error) || "reflection_core did not take the setting")
-                                })
+                                compact: true
+                                text: "Save gateways"
+                                onClicked: {
+                                    var list = gwField.text.split("\n").map(function (s) { return s.trim() }).filter(function (s) { return s !== "" })
+                                    root.act("set_gateways", [JSON.stringify(list)], "Gateways saved")
+                                }
+                            }
+                            LogosButton { compact: true; text: "Restore defaults"; onClicked: root.act("set_gateways", ["[]"], "Defaults restored", function (r) { gwField.text = r.gateways.join("\n") }) }
+                        }
+                        Caption { text: "IPFS NODE"; Layout.topMargin: 8 }
+                        Hint { text: "A running IPFS node takes part in the IPFS network and uses bandwidth. Documents also open without it (public gateways and Logos Storage). Off: never started; publishing then goes to Logos Storage only. When needed: started for Keep on my IPFS, Back up and Publish, and stopped 10 minutes after. Always on: started whenever Fileverse runs." }
+                        RowLayout {
+                            Repeater {
+                                model: [{ k: "off", t: "Off" }, { k: "needed", t: "When needed" }, { k: "always", t: "Always on" }]
+                                LogosButton {
+                                    compact: true; text: modelData.t
+                                    variant: root.ipfsMode === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                    onClicked: root.setIpfsMode(modelData.k)
+                                }
                             }
                         }
-                    }
-                    Caption { text: "IPFS GATEWAYS"; Layout.topMargin: 4 }
-                    Hint { text: "Tried after your own node, one per line. Every block is checked against its hash, so a gateway can fail but cannot change content." }
-                    ScrollView {
-                        Layout.fillWidth: true
-                        Layout.preferredHeight: 80
-                        TextArea {
-                            id: gwField
-                            color: Theme.palette.text
-                            font.pixelSize: 13
-                            font.family: Theme.typography.mono
-                            background: Rectangle { color: Theme.palette.backgroundInset; radius: Theme.spacing.radiusLarge; border.color: Theme.palette.borderSubtle }
+                        LogosText {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 12
+                            color: root.node.reachable ? Theme.palette.success : Theme.palette.textTertiary
+                            text: root.node.reachable
+                                  ? ((root.node.source === "ipfs_module" ? "The IPFS Node module is running" : "Your Kubo") + " · " + root.shortId(root.node.peerId)
+                                     + (root.node.peers !== undefined ? " · " + root.node.peers + " peers · " + root.node.pins + " pinned · " + Math.round((root.node.repoSize || 0) / 1048576) + " MB" : "")
+                                     + ". Read from first; Keep, Back up and Publish pin there.")
+                                  : root.ipfsMode === "off" ? "Off: Fileverse does not start the IPFS node."
+                                  : root.ipfsMode === "needed" && !/install/.test(root.node.error || "") ? "Not running now; it starts when Keep, Back up or Publish needs it."
+                                  : "No IPFS node. Install the IPFS Node module, or run Kubo and enter its API and gateway below."
                         }
-                    }
-                    RowLayout {
-                        LogosButton {
-                            compact: true
-                            text: "Save gateways"
-                            onClicked: {
-                                var list = gwField.text.split("\n").map(function (s) { return s.trim() }).filter(function (s) { return s !== "" })
-                                root.act("set_gateways", [JSON.stringify(list)], "Gateways saved")
-                            }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            Field { id: nodeApiField; Layout.fillWidth: true; placeholderText: "Kubo API, e.g. http://127.0.0.1:5001"; text: root.snap.node ? root.snap.node.api : "" }
+                            Field { id: nodeGwField; Layout.fillWidth: true; placeholderText: "Kubo gateway, e.g. http://127.0.0.1:8080"; text: root.snap.node ? root.snap.node.gateway : "" }
+                            LogosButton { compact: true; text: "Save node"; onClicked: root.act("set_ipfs_node", [nodeApiField.text, nodeGwField.text], "IPFS node saved", function () { root.refreshNode() }) }
                         }
-                        LogosButton { compact: true; text: "Restore defaults"; onClicked: root.act("set_gateways", ["[]"], "Defaults restored", function (r) { gwField.text = r.gateways.join("\n") }) }
-                    }
-                    Caption { text: "IPFS NODE"; Layout.topMargin: 8 }
-                    Hint { text: "A running IPFS node takes part in the IPFS network and uses bandwidth. Documents also open without it (public gateways and Logos Storage). Off: never started; publishing then goes to Logos Storage only. When needed: started for Keep on my IPFS, Back up and Publish, and stopped 10 minutes after. Always on: started whenever Fileverse runs." }
-                    RowLayout {
-                        Repeater {
-                            model: [{ k: "off", t: "Off" }, { k: "needed", t: "When needed" }, { k: "always", t: "Always on" }]
-                            LogosButton {
-                                compact: true; text: modelData.t
-                                variant: root.ipfsMode === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
-                                onClicked: root.setIpfsMode(modelData.k)
-                            }
+                        Caption { text: "LOGOS STORAGE · GNOSIS"; Layout.topMargin: 8 }
+                        LogosText {
+                            Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 12
+                            color: root.storage.available ? Theme.palette.success : Theme.palette.textTertiary
+                            text: root.storage.available ? ("Logos Storage: available (" + (root.snap.storedBlocks || 0) + " blocks copied there). Read from when IPFS has nothing.") : "Logos Storage is not available in this Basecamp."
                         }
+                        Hint { text: "Gnosis RPC: " + (root.snap.rpc || "eth_rpc_module") + ". Change the endpoint (or a proxy/Tor) in the Ethereum RPC app." }
                     }
-                    LogosText {
-                        Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 12
-                        color: root.node.reachable ? Theme.palette.success : Theme.palette.textTertiary
-                        text: root.node.reachable
-                              ? ((root.node.source === "ipfs_module" ? "The IPFS Node module is running" : "Your Kubo") + " · " + root.shortId(root.node.peerId)
-                                 + (root.node.peers !== undefined ? " · " + root.node.peers + " peers · " + root.node.pins + " pinned · " + Math.round((root.node.repoSize || 0) / 1048576) + " MB" : "")
-                                 + ". Read from first; Keep, Back up and Publish pin there.")
-                              : root.ipfsMode === "off" ? "Off: Fileverse does not start the IPFS node."
-                              : root.ipfsMode === "needed" && !/install/.test(root.node.error || "") ? "Not running now; it starts when Keep, Back up or Publish needs it."
-                              : "No IPFS node. Install the IPFS Node module, or run Kubo and enter its API and gateway below."
-                    }
-                    RowLayout {
-                        Layout.fillWidth: true
-                        Field { id: nodeApiField; Layout.fillWidth: true; placeholderText: "Kubo API, e.g. http://127.0.0.1:5001"; text: root.snap.node ? root.snap.node.api : "" }
-                        Field { id: nodeGwField; Layout.fillWidth: true; placeholderText: "Kubo gateway, e.g. http://127.0.0.1:8080"; text: root.snap.node ? root.snap.node.gateway : "" }
-                        LogosButton { compact: true; text: "Save node"; onClicked: root.act("set_ipfs_node", [nodeApiField.text, nodeGwField.text], "IPFS node saved", function () { root.refreshNode() }) }
-                    }
-                    Caption { text: "LOGOS STORAGE · GNOSIS"; Layout.topMargin: 8 }
-                    LogosText {
-                        Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 12
-                        color: root.storage.available ? Theme.palette.success : Theme.palette.textTertiary
-                        text: root.storage.available ? ("Logos Storage: available (" + (root.snap.storedBlocks || 0) + " blocks copied there). Read from when IPFS has nothing.") : "Logos Storage is not available in this Basecamp."
-                    }
-                    Hint { text: "Gnosis RPC: " + (root.snap.rpc || "eth_rpc_module") + ". Change the endpoint (or a proxy/Tor) in the Ethereum RPC app." }
                 }
             }
 
@@ -3103,7 +3209,7 @@ Item {
                         visible: root.aiOpen
                         spacing: Theme.spacing.small
                         Repeater {
-                            model: root.aiActions
+                            model: root.aiActionsNow
                             LogosButton { compact: true; enabled: !root.aiBusy; text: modelData[0]; onClicked: root.aiRun(modelData[0], modelData[1], modelData[2], modelData[3]) }
                         }
                         LogosButton { compact: true; enabled: !root.aiBusy; text: "Translate…"; onClicked: { root.aiField = "translate"; aiInput.text = ""; aiInput.forceActiveFocus() } }
@@ -3130,7 +3236,7 @@ Item {
                             onClicked: {
                                 var q = aiInput.text.trim()
                                 if (!q) return
-                                if (root.aiField === "translate") root.aiRun("Translate", "Translate this text into " + q + ". Keep the Markdown formatting.", "target", "replace")
+                                if (root.aiField === "translate") root.aiRun("Translate", root.aiTranslateNow.indexOf("{language}") >= 0 ? root.aiTranslateNow.split("{language}").join(q) : root.aiTranslateNow + "\n\nLanguage: " + q, "target", "replace")
                                 else root.aiRun("Ask AI", q, "targetOrAll", "below")
                                 root.aiField = ""
                             }
@@ -4245,6 +4351,92 @@ Item {
             spacing: 8
             LogosIcon { Layout.preferredWidth: 14; Layout.preferredHeight: 14; source: LogosIcons.check; color: Theme.palette.success }
             LogosText { id: toastText; Layout.maximumWidth: root.width - 160; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 13; text: root.toast }
+        }
+    }
+
+    // editing an AI prompt (Settings → AI prompts, My AI actions)
+    Rectangle {
+        anchors.fill: parent
+        visible: root.promptEdit !== null
+        z: 999
+        color: Qt.rgba(0, 0, 0, 0.55)
+        MouseArea { anchors.fill: parent }   // a click outside does nothing: the text would be lost
+        onVisibleChanged: if (visible) {
+            promptText.text = root.promptEdit.text
+            promptName.text = root.promptEdit.name || ""
+            root.promptHow = root.promptEdit.how || "replace"
+            if (root.promptEdit.mine !== undefined && root.promptEdit.mine < 0) promptName.forceActiveFocus(); else promptText.forceActiveFocus()
+        }
+        Rectangle {
+            anchors.centerIn: parent
+            width: Math.min(640, parent.width - 60)
+            height: Math.min(promptCol.implicitHeight + 40, parent.height - 60)
+            radius: Theme.spacing.radiusLarge
+            color: Theme.palette.surfaceRaised
+            border.color: Theme.palette.borderSubtle
+            MouseArea { anchors.fill: parent }
+            ColumnLayout {
+                id: promptCol
+                readonly property bool mine: root.promptEdit !== null && root.promptEdit.mine !== undefined
+                anchors { left: parent.left; right: parent.right; top: parent.top; margins: 20 }
+                spacing: 10
+                LogosText { Layout.fillWidth: true; wrapMode: Text.WordWrap; textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold
+                            text: !root.promptEdit ? "" : promptCol.mine ? (root.promptEdit.mine < 0 ? "New AI action" : "Edit AI action") : root.promptEdit.title }
+                Field { id: promptName; visible: promptCol.mine; Layout.fillWidth: true; maximumLength: 40; placeholderText: "Button name, e.g. Friendlier" }
+                Hint {
+                    text: !root.promptEdit ? "" : promptCol.mine ? "What to ask the AI. It gets this with the selection, or the paragraph the cursor is in."
+                          : root.promptEdit.key === "system" ? "Sent with every Write with AI action: how answers should look. Fileverse puts the answer in your document as it comes, so ask for the text only."
+                          : root.promptEdit.key === "translate" ? "{language} is replaced with the language you type."
+                          : root.promptEdit.key === "chat" ? "The start of the AI chat's instructions. Fileverse adds after it where the document is and how to propose edits; that part stays, because the edit cards depend on it. Applies from the next AI chat you open."
+                          : "What to ask the AI. It gets this with the selection, or the paragraph the cursor is in."
+                }
+                ScrollView {
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 200
+                    TextArea {
+                        id: promptText
+                        wrapMode: TextEdit.Wrap
+                        font.family: Theme.typography.publicSans
+                        selectByMouse: true
+                        color: Theme.palette.text
+                        font.pixelSize: 13
+                        background: Rectangle { color: Theme.palette.backgroundInset; radius: Theme.spacing.radiusLarge; border.color: promptText.activeFocus ? Theme.palette.primary : Theme.palette.borderSubtle }
+                    }
+                }
+                RowLayout {
+                    visible: promptCol.mine
+                    spacing: Theme.spacing.small
+                    LogosText { textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textSecondary; text: "The answer:" }
+                    Repeater {
+                        model: [{ k: "replace", t: "Replaces the text" }, { k: "below", t: "Goes below" }, { k: "cursor", t: "Continues at the cursor" }]
+                        LogosButton { compact: true; text: modelData.t
+                                      variant: root.promptHow === modelData.k ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary
+                                      onClicked: root.promptHow = modelData.k }
+                    }
+                }
+                Hint { visible: promptCol.mine && root.promptHow === "cursor"; text: "Works on the text before the cursor, like Continue writing." }
+                Hint { visible: promptCol.mine && root.promptHow === "below"; text: "Reads the whole document when nothing is selected, like Summarize." }
+                RowLayout {
+                    Layout.fillWidth: true
+                    spacing: Theme.spacing.small
+                    LogosButton {
+                        compact: true; visible: !promptCol.mine; text: "Reset to default"
+                        enabled: !!root.promptEdit && promptText.text !== (root.promptEdit.def || "")
+                        onClicked: promptText.text = root.promptEdit.def
+                    }
+                    Item { Layout.fillWidth: true }
+                    LogosButton { compact: true; text: "Cancel"; onClicked: root.promptEdit = null }
+                    LogosButton {
+                        compact: true; variant: LogosButton.Variant.Primary; text: "Save"
+                        enabled: promptText.text.trim() !== "" && (!promptCol.mine || promptName.text.trim() !== "")
+                        onClicked: {
+                            var e = root.promptEdit
+                            if (promptCol.mine) { if (root.aiSetMine(e.mine, promptName.text, promptText.text, root.promptHow)) root.promptEdit = null }
+                            else { root.aiSetPrompt(e.key, e.def, promptText.text); root.promptEdit = null }
+                        }
+                    }
+                }
+            }
         }
     }
 

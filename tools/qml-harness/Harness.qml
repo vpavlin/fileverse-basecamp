@@ -21,6 +21,7 @@ Window {
     property var chatRequests: []
     property var turns: []
     property bool lastStructured: false
+    property var prefs: ({})
     readonly property string chatReply: "Two small changes would make it clearer:\n\n```edit\n<<<<<<< FIND\n- Logos Storage\n=======\n- Logos Storage (backups)\n>>>>>>> REPLACE\n```\n\n```edit\n<<<<<<< FIND\nWe go **self-sovereign**\n=======\nWe go fully **self-sovereign**\n>>>>>>> REPLACE\n```"
 
     QtObject {
@@ -96,7 +97,8 @@ Window {
             return { ok: false, error: "?" }
         }
         if (method === "chat_save") return { ok: true }
-        if (method === "snapshot") return { ok: true, prefs: { paper: win.paperArg }, version: "0.3.0", rpc: "eth_rpc_module (chain 100)", gateways: ["https://gateway.pinata.cloud"], storedBlocks: 6,
+        if (method === "set_pref") { var np = JSON.parse(JSON.stringify(win.prefs)); np[args[0]] = JSON.parse(args[1]); win.prefs = np; console.log("SET_PREF", args[0], args[1]); return { ok: true, prefs: Object.assign({ paper: win.paperArg }, win.prefs) } }
+        if (method === "snapshot") return { ok: true, prefs: Object.assign({ paper: win.paperArg }, win.prefs), version: "0.3.0", rpc: "eth_rpc_module (chain 100)", gateways: ["https://gateway.pinata.cloud"], storedBlocks: 6,
             node: { api: "", gateway: "" },
             recent: [ { url: "x", portal: "0x81fb962e2088De6925AffA4E068dd3FAF3EFE163", fileId: 57, title: "Fileverse Agents SDK - Docs 💛", kind: "ddoc", kept: ["a"], inStorage: ["a"] },
                       { url: "fvbc://ipfs/b#key=k", layout: "logos", title: "Logos plan", kind: "ddoc" },
@@ -169,7 +171,8 @@ Window {
         onLoaded: Qt.callLater(function () {
             var it = item
             it.showDetails = (win.mode === "doc")
-            it.showSettings = (win.mode === "settings")
+            it.showSettings = (win.mode === "settings" || win.mode === "aiprompts" || win.mode === "aipromptedit")
+            if (win.mode === "aiprompts" || win.mode === "aipromptedit") promptTimer.start()
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
@@ -257,6 +260,33 @@ Window {
         }
     }
     Timer { id: aiPrint; interval: 400; onTriggered: console.log("AFTER REPLACE:", JSON.stringify(view.item.editorMarkdown().substring(0, 120))) }
+    // AI prompts: change some, add an action, check what would be sent, reset one
+    Timer {
+        id: promptTimer; interval: 1200
+        onTriggered: {
+            var it = view.item
+            var shorter = it.aiActions[2]
+            it.aiSetPrompt("a:Shorter", shorter[1], "Make it tiny.")
+            it.aiSetPrompt("system", it.aiSystem, "Answer like a pirate. Text only.")
+            it.aiSetPrompt("translate", it.aiTranslateDefault, "Into {language}, please, word for word.")
+            it.aiSetMine(-1, "Friendlier", "Make this friendlier.", "replace")
+            it.aiSetMine(-1, "Shorter", "dup", "replace")
+            it.aiSetPrompt("chat", it.chatRole, "You are a terse editor.")
+            Qt.callLater(function () {
+                console.log("ACTIONS", JSON.stringify(it.aiActionsNow))
+                console.log("SYSTEM", it.aiSystemNow)
+                console.log("TRANSLATE", it.aiTranslateNow)
+                console.log("CHATSYS", it.chatSessionSystem.substring(0, 120))
+                console.log("LEGACY", it.chatSystem.substring(0, 120))
+                console.log("EDITED shorter=" + it.aiPromptEdited("a:Shorter", shorter[1]) + " clearer=" + it.aiPromptEdited("a:Clearer", it.aiActions[1][1]))
+                it.aiSetPrompt("a:Shorter", shorter[1], shorter[1])
+                Qt.callLater(function () {
+                    console.log("AFTER RESET", JSON.stringify(win.prefs.aiPrompts))
+                    if (win.mode === "aipromptedit") it.promptEdit = { key: "chat", title: "AI chat: who the AI is and how it talks", def: it.chatRole, text: it.aiPromptNow("chat", it.chatRole) }
+                })
+            })
+        }
+    }
     // AI: open the row, "Clearer" on the paragraph the cursor is in (the title), then maybe Replace
     Timer {
         id: aiTimer; interval: 1500

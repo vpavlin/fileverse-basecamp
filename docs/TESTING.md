@@ -1,5 +1,34 @@
 # What was tested, and how to repeat it
 
+## 0.20.0 (view): your own AI prompts (2026-11-25)
+
+Václav, through whisperbox: people should have full control over the prompts. Settings →
+AI prompts lists every prompt Fileverse sends; each has Edit, with Reset to default:
+- Write with AI: the instructions for how to answer (the system prompt);
+- each action: Continue writing, Clearer, Shorter, More formal, Fix grammar, Summarize;
+- Translate, with `{language}` for the language you type;
+- AI chat: who the AI is and how it talks. Fileverse adds after it where the document is and
+  how to propose edits; that part is fixed, because the edit cards depend on it. A changed
+  chat prompt applies from the next AI chat you open.
+
+**My AI actions:** buttons of your own in Write with AI: a name, a prompt, and where the answer
+goes (replaces the text, goes below, continues at the cursor). At most 20; names can't repeat
+Fileverse's actions. Remove asks first.
+
+They are kept in the core's preferences (`aiPrompts`, set_pref), on this device only, and are
+never shared or published. A prompt saved as Fileverse's text, or empty, goes back to the
+default. AI Gateway 0.1.9 adds the user's own instructions for every app on top of these.
+
+The Settings card now scrolls on its own: with this section it is taller than the window,
+and it pushed "Close settings" out of view.
+
+- Harness: aiprompts (several saves in a row keep each other, the actions and system
+  prompt in use change, a duplicate name is refused, Reset removes the override),
+  aipromptedit (the dialog).
+- Basecamp t: added "Pirate" and changed Shorter; both survived a restart ("yours" shown).
+  Pirate appeared in the Write with AI row; AI Gateway's approval page showed the custom
+  prompt with the cursor's paragraph.
+
 ## 0.19.0 (view): AI chat uses AI Gateway's new session features (2026-11-25)
 
 Needs AI Gateway core 0.1.6 for all of it; with an older gateway the chat works as before.
