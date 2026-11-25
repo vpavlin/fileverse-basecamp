@@ -1582,7 +1582,8 @@ Item {
         else if (root.draft && root.draft.id !== root.chatDraftId) root.chatLoad()
     }
     function chatClear() {
-        root.chatCloseSession()
+        // the approved session stays; its next turn tells AI Gateway to forget the conversation
+        if (root.chatSession) { var sess = Object.assign({}, root.chatSession); sess.reset = true; root.chatSession = sess }
         root.chatMsgs = []; root.chatDocSent = ""; root.chatNote = ""
         root.chatSave()
     }
@@ -1635,6 +1636,24 @@ Item {
     }
     // Without AI Gateway sessions (an older AI Gateway): every message is an ai.chat request
     // that Basecamp confirms, carrying the conversation and the document's changes.
+    function chatProse() {
+        if (!root.chatSession) return
+        var sess = Object.assign({}, root.chatSession); sess.prose = true; root.chatSession = sess
+    }
+    // A structured reply: { reply, edits: [{ find, replace, why }] }, possibly in a code fence.
+    // null when it is not that.
+    function chatParseJson(t) {
+        var s = String(t || "").trim().replace(/^```(?:json)?\s*\n([\s\S]*)\n```$/, "$1")
+        var o
+        try { o = JSON.parse(s) } catch (e) { return null }
+        if (!o || typeof o !== "object" || typeof o.reply !== "string" || !Array.isArray(o.edits)) return null
+        var edits = o.edits.filter(function (e) { return e && typeof e.find === "string" && typeof e.replace === "string" })
+                           .map(function (e) { return { find: e.find, replace: e.replace, why: typeof e.why === "string" ? e.why : "", state: "new" } })
+        // what the model sees of its own turn later (AI Gateway keeps the JSON; this is for the
+        // local history and the prose fallback): its words and the edits as blocks
+        var raw = o.reply + edits.map(function (e) { return "\n\n```edit\n<<<<<<< FIND\n" + e.find + "\n=======\n" + e.replace + "\n>>>>>>> REPLACE\n```" }).join("")
+        return { text: o.reply.trim(), edits: edits, raw: raw }
+    }
     function chatSendStateless(text) {
         text = String(text || "").trim()
         if (!text || root.chatBusy || !root.draft) return false
@@ -1693,7 +1712,29 @@ Item {
     property string chatPartial: ""       // the answer as it streams in
     property string chatJob: ""
     property var chatPending: null        // { text, doc, before, retried }
-    readonly property string chatSessionSystem: root.chatSystem.replace("Its Markdown is in the messages that start with [Document]; messages that start with [Document changes] say what changed since.", "Its latest Markdown is given below and is updated as the user edits.")
+    readonly property string chatSessionSystem: "You are a co-author in Fileverse, a Markdown document editor. You and the user talk about the document they are writing; its latest Markdown is given below and is updated as the user edits. Each message may come with context saying what the user has selected or where their cursor is: \"this\", \"here\" or \"the selection\" means that text. Answer in the user's language, briefly and to the point.\n\nWhen the user asks you to change the document, or a change clearly helps, propose edits. Each edit has: find, text copied character for character from the current Markdown (with its ** and other marks and its &nbsp; lines, never shortened with ...), a few whole lines that occur only once; replace, the new text (empty to delete; to add text, find a nearby line and repeat it with the addition); why, one short sentence. Use one edit per change; changes far apart are separate edits. The user reviews every edit before it is applied.\n\nWhen a JSON response format is required, answer with it: your words in reply, the edits in edits (an empty list when there are none). Otherwise write each edit as a block of exactly this form, and talk normally outside the blocks:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```"
+    // AI Gateway's structured output (responseFormat json_schema): the reply and the edits as
+    // JSON, so edits come exactly as the model meant them. A model that can't, or a turn that
+    // fails or does not parse with it, puts the session back on the prose format above.
+    readonly property var chatSchema: ({
+        type: "json_schema",
+        json_schema: { name: "fileverse_chat_reply", strict: true, schema: {
+            type: "object", additionalProperties: false, required: ["reply", "edits"],
+            properties: {
+                reply: { type: "string" },
+                edits: { type: "array", items: { type: "object", additionalProperties: false, required: ["find", "replace", "why"],
+                         properties: { find: { type: "string" }, replace: { type: "string" }, why: { type: "string" } } } }
+            } } }
+    })
+    // Where the user is, for the turn's `context` (AI Gateway sends it with that turn only).
+    function chatContext() {
+        var ed = root.visualEdit ? richArea : mdArea
+        if (!root.draft) return ""
+        var t = root.aiTarget(), md = String(root.aiMarkdown(t.a, t.b) || "").trim()
+        if (!md) return ""
+        if (md.length > 4000) md = md.substring(0, 4000) + "…"
+        return (ed.selectionStart !== ed.selectionEnd ? "The user has selected this text:\n" : "The user's cursor is in this paragraph:\n") + md
+    }
     function chatSend(text) {
         text = String(text || "").trim()
         if (!text || root.chatBusy || !root.draft) return false
@@ -1735,7 +1776,7 @@ Item {
         var title = titleField.text.trim() || "Untitled"
         // an intent's strings are at most 64 KB: a longer document goes with the first turn
         var docNow = root.utf8Len(p.doc) <= root.aiMaxBytes ? p.doc : ""
-        logos.request("ai.session", { title: title, purpose: "Talk about this document in Fileverse and propose edits to it",
+        logos.request("ai.session", { title: title, purpose: "Talk with an AI about this Fileverse document; it proposes edits, and nothing changes until you apply them. Sends: this document's text, your messages and what you select or where your cursor is.",
                                       system: root.chatSessionSystem, document: docNow }, function (res) {
             if (root.chatPending !== p) return
             if (typeof res === "string") res = root.j(res)
@@ -1752,7 +1793,7 @@ Item {
                 return
             }
             var d = res.data || {}
-            root.chatSession = { id: String(d.sessionId || ""), model: d.model || "", privacy: d.privacy || "", doc: docNow }
+            root.chatSession = { id: String(d.sessionId || ""), model: d.model || "", privacy: d.privacy || "", connector: d.connector || "", doc: docNow, prose: false, reset: false }
             root.chatTurn(true)
         })
     }
@@ -1773,9 +1814,19 @@ Item {
             turn.messages = past.concat([{ role: "user", content: p.text }])
         } else turn.message = p.text
         if (sess.doc !== p.doc) turn.document = p.doc
+        if (sess.reset) turn.resetHistory = true
+        if (p.context === undefined) p.context = root.chatContext()
+        if (p.context) turn.context = p.context
+        p.fresh = fresh
+        p.structured = !sess.prose
+        if (p.structured) turn.responseFormat = root.chatSchema
         root.core("ai_call", ["sessionChat", JSON.stringify([sess.id, JSON.stringify(turn)])], function (raw) {
             if (root.chatPending !== p) return
             var r = root.j(raw)
+            if (r && r.ok === false && p.structured && /unsupported/.test(String(r.code || r.error || ""))) {
+                // the model is known not to do structured output: this session uses prose
+                root.chatProse(); root.chatTurn(fresh); return
+            }
             if (r && r.absent) {
                 // no ai_gateway_core to talk to: one ai.chat request per message
                 root.chatSession = null
@@ -1814,11 +1865,20 @@ Item {
                 var text = String(r.text !== undefined ? r.text : (r.result && r.result.text) || "")
                 if (st === "running" || st === "queued" || st === "") { root.chatPartial = text; return }
                 chatPoll.stop()
+                if (st === "error" && p.structured && !p.proseRetry) {
+                    // a provider that refused the json_schema format: the same turn once more, in prose
+                    // (a failed turn leaves nothing in AI Gateway's history)
+                    p.proseRetry = true; root.chatJob = ""; root.chatProse(); root.chatTurn(p.fresh); return
+                }
                 if (st !== "done") { root.chatUndoSend(root.chatFailNote(st === "cancelled" ? "cancelled" : String(r.code || r.error || "failed"), r)); return }
-                var sess = Object.assign({}, root.chatSession); sess.doc = p.doc; root.chatSession = sess
+                var sess = Object.assign({}, root.chatSession); sess.doc = p.doc; sess.reset = false; root.chatSession = sess
                 root.chatDocSent = p.doc
-                var parsed = root.chatParse(text), m2 = root.chatMsgs.slice()
-                m2.push({ role: "assistant", raw: text, text: parsed.text, edits: parsed.edits, model: r.model || sess.model || "", privacy: r.privacy || sess.privacy || "" })
+                var parsed = p.structured ? root.chatParseJson(text) : null
+                if (p.structured && !parsed) root.chatProse()   // answered, but not as the JSON asked for: prose from now on
+                if (!parsed) parsed = root.chatParse(text)
+                var m2 = root.chatMsgs.slice()
+                m2.push({ role: "assistant", raw: parsed.raw || text, text: parsed.text, edits: parsed.edits, model: r.model || sess.model || "",
+                          connector: r.connector || sess.connector || "", privacy: r.privacy || sess.privacy || "" })
                 root.chatMsgs = m2
                 root.chatBusy = false; root.chatPartial = ""; root.chatJob = ""; root.chatPending = null
                 root.chatSave()
@@ -3239,6 +3299,8 @@ Item {
                             SplitView.minimumWidth: 200
                             TextArea {
                                 id: mdArea
+                                // the selection stays while you write to the AI chat (it says what "this" is)
+                                persistentSelection: true
                                 color: root.paperText
                                 font.pixelSize: 14
                                 font.family: Theme.typography.mono
@@ -3373,7 +3435,7 @@ Item {
                                 LogosText {
                                     visible: msgItem.modelData.role === "assistant" && !!(msgItem.modelData.model || msgItem.modelData.privacy)
                                     textFormat: Text.PlainText; font.pixelSize: 10; color: Theme.palette.textTertiary
-                                    text: (msgItem.modelData.model || "") + (msgItem.modelData.privacy ? " · " + msgItem.modelData.privacy : "")
+                                    text: (msgItem.modelData.model || "") + (msgItem.modelData.connector ? " · " + msgItem.modelData.connector : "") + (msgItem.modelData.privacy ? " · " + msgItem.modelData.privacy : "")
                                 }
                                 // the AI's proposed edits
                                 Repeater {
@@ -3402,6 +3464,12 @@ Item {
                                                 textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.text
                                                 wrapMode: Text.Wrap; maximumLineCount: 12; elide: Text.ElideRight
                                                 text: editCard.modelData.replace !== "" ? editCard.modelData.replace : "(delete)"
+                                            }
+                                            LogosText {
+                                                width: parent.width; visible: !!editCard.modelData.why
+                                                textFormat: Text.PlainText; font.pixelSize: 11; font.italic: true; color: Theme.palette.textSecondary
+                                                wrapMode: Text.Wrap
+                                                text: editCard.modelData.why || ""
                                             }
                                             LogosButton {
                                                 visible: editCard.modelData.state === "missing" || editCard.modelData.state === "ambiguous"

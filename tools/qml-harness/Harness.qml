@@ -20,6 +20,7 @@ Window {
     property var lastJob: ""
     property var chatRequests: []
     property var turns: []
+    property bool lastStructured: false
     readonly property string chatReply: "Two small changes would make it clearer:\n\n```edit\n<<<<<<< FIND\n- Logos Storage\n=======\n- Logos Storage (backups)\n>>>>>>> REPLACE\n```\n\n```edit\n<<<<<<< FIND\nWe go **self-sovereign**\n=======\nWe go fully **self-sovereign**\n>>>>>>> REPLACE\n```"
 
     QtObject {
@@ -76,8 +77,21 @@ Window {
         if (method === "chat_load") return { ok: true, chat: null }
         if (method === "ai_call") {
             var aa = JSON.parse(args[1])
-            if (args[0] === "sessionChat") { var t = JSON.parse(aa[1]); win.turns.push(t); console.log("TURN", aa[0], JSON.stringify(Object.keys(t)), t.messages ? t.messages.length + " messages" : "", t.document ? "document " + t.document.length : "no document"); return { ok: true, jobId: "job" + win.turns.length } }
-            if (args[0] === "job") return { state: "done", text: win.chatReply, model: "llama-3.3-70b" }
+            if (args[0] === "sessionChat") {
+                var t = JSON.parse(aa[1]); win.turns.push(t)
+                console.log("TURN", aa[0], JSON.stringify(Object.keys(t)), t.messages ? t.messages.length + " messages" : "", t.document ? "document " + t.document.length : "no document", "| context:", JSON.stringify(String(t.context || "").substring(0, 60)), "| schema:", !!t.responseFormat, "| reset:", !!t.resetHistory)
+                // mode chatprose: the provider refuses the schema (the job errors)
+                win.lastStructured = !!t.responseFormat
+                return { ok: true, jobId: "job" + win.turns.length }
+            }
+            if (args[0] === "job") {
+                if (win.lastStructured && win.mode === "chatprose") return { state: "error", error: "provider: response_format not supported" }
+                if (win.lastStructured && win.mode === "chatbadjson") return { state: "done", text: "Sure! Here you go: " + win.chatReply, model: "m" }
+                if (win.lastStructured) return { state: "done", text: JSON.stringify({ reply: "Two small changes would make it clearer:", edits: [
+                    { find: "- Logos Storage", replace: "- Logos Storage (backups)", why: "Says what Storage is for." },
+                    { find: "We go **self-sovereign**", replace: "We go fully **self-sovereign**", why: "Stronger opening." } ] }), model: "llama-3.3-70b", connector: "venice", privacy: "no-retention" }
+                return { state: "done", text: win.chatReply, model: "llama-3.3-70b", connector: "venice" }
+            }
             if (args[0] === "closeSession") { console.log("CLOSE", aa[0]); return { ok: true } }
             return { ok: false, error: "?" }
         }
@@ -160,11 +174,11 @@ Window {
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
             else if (win.mode === "confirmdel") { it.section = "drafts"; it.openDraft("abc123"); Qt.callLater(function () { it.confirm("Delete “Logos plan”?", "It is deleted from this device, with its AI chat. This cannot be undone. The published copy stays where it was published.", "Delete", function () { console.log("DELETED") }) }) }
-            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail" || win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless") {
+            else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail" || win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset") {
                 it.section = "drafts"; it.openDraft("abc123")
                 if (win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editmdai" || win.mode === "chatmd") Qt.callLater(function () { it.setVisualEdit(false) })
                 if (win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail") aiTimer.start()
-                if (win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless") chatTimer.start()
+                if (win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset") chatTimer.start()
             }
             else it.open("https://docs.fileverse.io/0x81fb962e2088De6925AffA4E068dd3FAF3EFE163/57#key=abc")
         })
@@ -221,6 +235,7 @@ Window {
         id: chatTimer2; interval: 1800
         onTriggered: {
             var it = view.item
+            if (win.mode === "chatreset") { it.chatClear(); it.chatSend("Start over, please."); chatTimer3.start(); return }
             if (win.mode !== "chat") {
                 it.chatApplyAll(it.chatMsgs.length - 1)
                 console.log("AFTER APPLY:", JSON.stringify(it.editorMarkdown().substring(0, 160)))
@@ -238,6 +253,7 @@ Window {
             })
             console.log("MSGS:", JSON.stringify(view.item.chatMsgs.map(function (m) { return m.role })))
             if (win.mode === "chatmd") { view.item.chatToggle() }
+            console.log("SESSION STATE:", JSON.stringify(view.item.chatSession))
         }
     }
     Timer { id: aiPrint; interval: 400; onTriggered: console.log("AFTER REPLACE:", JSON.stringify(view.item.editorMarkdown().substring(0, 120))) }

@@ -1,5 +1,34 @@
 # What was tested, and how to repeat it
 
+## 0.19.0 (view): AI chat uses AI Gateway's new session features (2026-11-25)
+
+Needs AI Gateway core 0.1.6 for all of it; with an older gateway the chat works as before.
+
+- **Exact edits:** each turn asks the model for a JSON answer (`responseFormat`, a strict
+  schema: `reply` plus `edits` of find / replace / why). Edit cards no longer depend on the
+  model writing the edit blocks correctly, and each card shows the model's reason. When the
+  connector cannot do this ("unsupported"), the job fails, or the answer is not valid JSON,
+  the chat falls back to edit blocks for the rest of the session (a failed job is retried once
+  without the schema; it left nothing in the session history).
+- **Where you are:** the selection, or the paragraph the cursor is in, goes with each message
+  as `context` (at most 4000 characters, not kept in the history). The editor keeps its
+  selection while you type in the chat (the Markdown view too now).
+- **New chat** keeps the allowed session and sends `resetHistory` with the next message: no
+  second approval.
+- **Approval text** says what is sent: the document, your messages, the selection or cursor
+  paragraph.
+- Each reply shows model · connector · privacy.
+
+- Harness: chat (structured), chatprose (job error → retry without the schema), chatbadjson
+  (prose answer → parsed as blocks, later turns in prose), chatreset (same session,
+  resetHistory sent, no new consent).
+- Basecamp t with AI Gateway core 0.1.6 / view 0.1.9 and a fake OpenAI-compatible model:
+  the approval page showed the new purpose; the model received `response_format: json_schema`,
+  the context as an extra system message, and the message. The edit card showed the reason
+  and "custom/fake-model · custom · local"; Apply changed the line in the Markdown. The word
+  selected in the editor stayed selected. New chat, then a message: the model got only the
+  system prompt, the document, the context and the new message; no approval dialog.
+
 ## 0.18.5 (view): removing something asks first (2026-11-24)
 
 vpavlin: deleting a file needs a confirmation. The × on a row removed it at once. Now all
