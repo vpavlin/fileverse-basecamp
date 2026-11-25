@@ -1,5 +1,19 @@
 # What was tested, and how to repeat it
 
+## 0.20.1 (view): Settings can always be closed (2026-11-25)
+
+vpavlin, on 0.20.0: no way to close the settings. Settings opened over a document or draft
+showed above it, and with the AI prompts section the two together were taller than the
+window: the sidebar's "Close settings" went out of view.
+
+Now Settings hides the page under it while open, has its own Close button at the top, and
+closes when you open a document, a draft, a portal or another page.
+
+- Harness: aiprompts, settings, edit, doc (no QML warnings).
+- Basecamp t: a draft open, then Settings: the card fits, Close at the top and "Close
+  settings" in the sidebar both visible; Close went back to the draft; with Settings open,
+  clicking another draft opened it and closed Settings.
+
 ## 0.20.0 (view): your own AI prompts (2026-11-25)
 
 Václav, through whisperbox: people should have full control over the prompts. Settings →

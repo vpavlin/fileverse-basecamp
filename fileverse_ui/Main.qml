@@ -169,7 +169,7 @@ Item {
         var u = String(url || "").trim()
         if (u === "") return
         root.startJob("open", [u], "open", function (doc) {
-            root.docv = doc; root.docUrl = u; root.mode = "doc"
+            root.docv = doc; root.docUrl = u; root.mode = "doc"; root.showSettings = false
             root.stopPresenting(); root.slideIndex = 0; root.tabIndex = 0; root.sheetIndex = 0
             root.refreshNode(); root.refreshStorage()
         })
@@ -199,7 +199,7 @@ Item {
     }
     function showPortal(p) {
         var changed = root.portal !== p
-        root.portal = p; root.portalError = ""; root.mode = "portal"
+        root.portal = p; root.portalError = ""; root.mode = "portal"; root.showSettings = false
         if (changed) { root.portalFiles = []; root.portalBackup = ({}); root.portalListedAt = null }
         if (p === "") return
         // The last listing is kept on this device: show it at once, refresh only when old.
@@ -233,7 +233,7 @@ Item {
         root.act("draft_create", [title, markdown, source || ""], "Draft created", function (r) { root.editDraft(r.draft) })
     }
     function editDraft(d) {
-        root.draft = d; root.draftDirty = false; root.mode = "edit"; root.tabIndex = 0
+        root.draft = d; root.draftDirty = false; root.mode = "edit"; root.tabIndex = 0; root.showSettings = false
         root.collab = ({ shared: false }); root.collabVersion = ""; root.collabSentText = d.markdown || ""
         titleField.text = d.title; root.loadEditor(d.markdown)
         root.collabActivate()
@@ -288,7 +288,8 @@ Item {
     property int editGen: 0                     // bumps on every edit: a reply for older text is not applied
     readonly property bool isShared: !!(root.draft && root.collab && root.collab.shared)
     readonly property var collabOnline: (root.collab.peers || []).filter(function (p) { return p.online })
-    onModeChanged: root.collabActivate()
+    // Settings hides the other pages, so going to one closes it
+    onModeChanged: { root.showSettings = false; root.collabActivate() }
     // ── Reflection notes: a draft linked to one is edited through reflection_core (Loro,
     // Logos Delivery or p2panda), the same note Reflection's own apps edit ──
     readonly property string noteId: root.draft && root.draft.reflection && root.draft.reflection.id ? String(root.draft.reflection.id) : ""
@@ -2549,7 +2550,11 @@ Item {
                         anchors.fill: parent
                         anchors.margins: 16
                         spacing: Theme.spacing.small
-                        LogosText { textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold; text: "Settings" }
+                        RowLayout {
+                            Layout.fillWidth: true
+                            LogosText { Layout.fillWidth: true; textFormat: Text.PlainText; font.pixelSize: 16; font.weight: Theme.typography.weightBold; text: "Settings" }
+                            LogosButton { compact: true; text: "Close"; onClicked: root.showSettings = false }
+                        }
                         Caption { text: "PAPER"; Layout.topMargin: 4 }
                         Hint { text: "The colours documents are read and written in (the editors, the preview, documents and slides). The rest of the app keeps Basecamp's colours." }
                         RowLayout {
@@ -2711,7 +2716,7 @@ Item {
 
             // import a backup key
             ColumnLayout {
-                visible: root.mode === "import"
+                visible: !root.showSettings && (root.mode === "import")
                 Layout.fillWidth: true
                 spacing: Theme.spacing.small
                 LogosText { text: "Your own files"; font.pixelSize: Theme.typography.panelTitleText; font.weight: Theme.typography.weightBold; textFormat: Text.PlainText }
@@ -2743,7 +2748,7 @@ Item {
 
             // a portal's files
             ColumnLayout {
-                visible: root.mode === "portal"
+                visible: !root.showSettings && (root.mode === "portal")
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: Theme.spacing.medium
@@ -2854,7 +2859,7 @@ Item {
 
             // document header
             RowLayout {
-                visible: root.mode === "doc" && root.docv !== null
+                visible: !root.showSettings && (root.mode === "doc" && root.docv !== null)
                 Layout.fillWidth: true
                 spacing: Theme.spacing.medium
                 KindTile { Layout.alignment: Qt.AlignTop; size: 40; kind: root.docv ? root.docv.kind : "ddoc"; layout: root.docv ? root.docv.layout : "" }
@@ -2877,7 +2882,7 @@ Item {
                 }
             }
             Flow {
-                visible: root.mode === "doc" && root.docv !== null
+                visible: !root.showSettings && (root.mode === "doc" && root.docv !== null)
                 Layout.fillWidth: true
                 spacing: Theme.spacing.small
                 LogosButton { visible: root.coreSlides.length > 0; compact: true; variant: LogosButton.Variant.Primary; text: "Present"; onClicked: root.present() }
@@ -2906,7 +2911,7 @@ Item {
 
             // provenance
             Card {
-                visible: root.mode === "doc" && root.showDetails && root.docv !== null
+                visible: !root.showSettings && (root.mode === "doc" && root.showDetails && root.docv !== null)
                 Layout.fillWidth: true
                 implicitHeight: provCol.implicitHeight + 24
                 ColumnLayout {
@@ -2936,7 +2941,7 @@ Item {
 
             // editor, with the AI chat beside it
             RowLayout {
-                visible: root.mode === "edit" && root.draft !== null
+                visible: !root.showSettings && (root.mode === "edit" && root.draft !== null)
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 spacing: Theme.spacing.medium
@@ -3662,7 +3667,7 @@ Item {
             Flow {
                 Layout.fillWidth: true
                 spacing: 6
-                visible: root.mode === "doc" && (root.tabs.length > 1 || root.sheets.length > 1)
+                visible: !root.showSettings && (root.mode === "doc" && (root.tabs.length > 1 || root.sheets.length > 1))
                 Repeater {
                     model: root.tabs.length > 1 ? root.tabs : root.sheets
                     Rectangle {
@@ -3680,7 +3685,7 @@ Item {
 
             // document body: a page of readable width
             Card {
-                visible: root.mode === "doc" && root.tabs.length > 0
+                visible: !root.showSettings && (root.mode === "doc" && root.tabs.length > 0)
                 color: root.paperBg
                 border.color: root.paperBorder
                 Layout.fillWidth: true
@@ -3710,7 +3715,7 @@ Item {
             }
             // sheet body
             ColumnLayout {
-                visible: root.mode === "doc" && root.sheet !== null
+                visible: !root.showSettings && (root.mode === "doc" && root.sheet !== null)
                 Layout.fillWidth: true
                 Layout.fillHeight: true
                 LogosText {
@@ -3776,7 +3781,7 @@ Item {
                     }
                 }
             }
-            Item { visible: root.mode === "home" || root.mode === "import"; Layout.fillHeight: true; Layout.fillWidth: true }
+            Item { visible: root.showSettings || root.mode === "home" || root.mode === "import"; Layout.fillHeight: true; Layout.fillWidth: true }
         }
     }
 
