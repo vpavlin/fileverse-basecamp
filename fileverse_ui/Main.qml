@@ -1783,6 +1783,7 @@ Item {
     property var chatSession: null        // { id, model, privacy, doc }: doc = what AI Gateway has
     property bool chatStateless: false
     property string chatPartial: ""       // the answer as it streams in
+    property var chatDeltaOk: null        // jobDelta: null not tried yet, false refused (older core or AI Gateway)
     property string chatJob: ""
     property var chatPending: null        // { text, doc, before, retried }
     readonly property string chatSessionSystem: root.chatRoleNow + "\n\nThe document's latest Markdown is given below and is updated as the user edits. Each message may come with context saying what the user has selected or where their cursor is: \"this\", \"here\" or \"the selection\" means that text.\n\nWhen the user asks you to change the document, or a change clearly helps, propose edits. Each edit has: find, text copied character for character from the current Markdown (with its ** and other marks and its &nbsp; lines, never shortened with ...), a few whole lines that occur only once; replace, the new text (empty to delete; to add text, find a nearby line and repeat it with the addition); why, one short sentence. Use one edit per change; changes far apart are separate edits. The user reviews every edit before it is applied.\n\nWhen a JSON response format is required, answer with it: your words in reply, the edits in edits (an empty list when there are none). Otherwise write each edit as a block of exactly this form, and talk normally outside the blocks:\n\n```edit\n<<<<<<< FIND\ntext copied exactly from the current document\n=======\nthe new text\n>>>>>>> REPLACE\n```"
@@ -1875,6 +1876,7 @@ Item {
     function chatTurn(fresh) {
         var p = root.chatPending, sess = root.chatSession
         if (!p || !sess) return
+        p.text = ""; p.since = 0; p.deltaDone = false; p.polling = false   // a new job streams from its start
         var turn = {}
         if (fresh) {
             var past = []
@@ -1931,7 +1933,32 @@ Item {
         onTriggered: {
             var p = root.chatPending, job = root.chatJob
             if (!p || !job) { stop(); return }
+            if (p.polling) return   // the last call has not answered yet
+            p.polling = true
+            // While the answer runs: only the new text (AI Gateway 0.1.10's jobDelta, which the
+            // core allows from 0.17.2). An older core or gateway refuses it: job() from then on.
+            if (root.chatDeltaOk !== false && !p.deltaDone) {
+                root.core("ai_call", ["jobDelta", JSON.stringify([job, String(p.since || 0)])], function (raw) {
+                    p.polling = false
+                    if (root.chatPending !== p || root.chatJob !== job) return
+                    var d = root.j(raw) || {}
+                    if (d.state === undefined || d.state === null || d.state === "") { root.chatDeltaOk = false; return }
+                    root.chatDeltaOk = true
+                    if (typeof d.delta === "string") {
+                        // `length` counts UTF-8 bytes: only ever handed back, never compared with JS lengths
+                        if (String(d.offset || 0) === String(p.since || 0)) { p.text = (p.text || "") + d.delta; p.since = d.length }
+                        else { p.text = ""; p.since = 0; return }   // out of step: from the start
+                    }
+                    if (!d.done && (d.state === "running" || d.state === "queued")) {
+                        root.chatPartial = p.structured ? root.chatReplySoFar(p.text || "") : (p.text || "")
+                        return
+                    }
+                    p.deltaDone = true   // finished: the whole job once more, below, as before
+                })
+                return
+            }
             root.core("ai_call", ["job", JSON.stringify([job])], function (raw) {
+                p.polling = false
                 if (root.chatPending !== p || root.chatJob !== job) return
                 var r = root.j(raw) || {}
                 var st = String(r.state || (r.job && r.job.state) || "")

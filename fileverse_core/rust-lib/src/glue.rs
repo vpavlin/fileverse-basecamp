@@ -127,7 +127,7 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// `args_json` a JSON array of strings. Returns reflection_core's answer, or an error.
     fn reflection_call(&self, method: String, args_json: String) -> String;
     /// Call AI Gateway's core (ai_gateway_core, when installed) for the AI chat: `method` one
-    /// of sessionChat, job, cancel, closeSession, sessions; `args_json` a JSON array of
+    /// of sessionChat, job, jobDelta (AI Gateway 0.1.10), cancel, closeSession, sessions; `args_json` a JSON array of
     /// strings. A session is opened by the view through the ai.session intent, which the user
     /// confirms; its turns come here, without a dialog each. AI Gateway's answer, or an error
     /// with `absent: true` when it is not installed.
@@ -1720,7 +1720,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
     }
 
     fn ai_call(&self, method: String, args_json: String) -> String {
-        const ALLOWED: &[&str] = &["sessionChat", "job", "cancel", "closeSession", "sessions"];
+        const ALLOWED: &[&str] = &["sessionChat", "job", "jobDelta", "cancel", "closeSession", "sessions"];
         if !ALLOWED.contains(&method.as_str()) {
             return err(format!("not an AI Gateway call Fileverse makes: {method}"));
         }
