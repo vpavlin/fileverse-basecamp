@@ -84,6 +84,12 @@ Window {
             console.log("AICALL", args[0], "provider=" + (Array.isArray(pl) ? "(bare array)" : pl.provider))
             if (args[0] === "sessionChat") {
                 var t = JSON.parse(aa[1]); win.turns.push(t)
+                // as AI Gateway: a turn needs a message (or messages ending in a non-empty user message)
+                var lastU = t.messages ? t.messages[t.messages.length - 1] : null
+                if (!(t.message && String(t.message).trim()) && !(lastU && lastU.role === "user" && String(lastU.content).trim())) {
+                    console.log("BAD TURN: no message", JSON.stringify(t).substring(0, 200))
+                    return { ok: false, code: "bad_request", error: "the turn needs a message" }
+                }
                 console.log("TURN", aa[0], JSON.stringify(Object.keys(t)), t.messages ? t.messages.length + " messages" : "", t.document ? "document " + t.document.length : "no document", "| context:", JSON.stringify(String(t.context || "").substring(0, 60)), "| schema:", !!t.responseFormat, "| reset:", !!t.resetHistory)
                 // mode chatprose: the provider refuses the schema (the job errors)
                 win.lastStructured = !!t.responseFormat

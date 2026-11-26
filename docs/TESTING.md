@@ -1,5 +1,20 @@
 # What was tested, and how to repeat it
 
+## 0.22.1 (view): AI chat sends your message again (2026-11-26)
+
+vpavlin, demoing 0.22.0: the first message worked, every reply failed with "needs a message".
+My bug from the jobDelta change (573d50e, released in 0.22.0): the streamed answer was kept in
+`p.text`, which is the user's message, and cleared at the start of each turn. Every turn went
+out empty: the first as `messages` ending in an empty user message (the model answered the
+conversation before it), each reply as an empty `message`, which AI Gateway refuses.
+The streamed text has its own field now (`p.streamed`).
+
+- Harness: the mock AI Gateway now refuses a turn without a message, as the real one does
+  (with the 0.22.0 view it reports "BAD TURN" on the first turn); chat, chatdelta,
+  chatprovider, chatreset, chatprose pass.
+- Basecamp t, AI Gateway 0.1.6, fake model: three messages in a row; the model got "First
+  message", "Second message, a reply" and "Third one", each answered with an edit card.
+
 ## core 0.18.0 + view 0.22.0: no dependency on AI Gateway (2026-11-25)
 
 vpavlin: Fileverse should only use the intents; anything can offer them, not just AI Gateway.

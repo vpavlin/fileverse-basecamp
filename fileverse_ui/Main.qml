@@ -1888,7 +1888,7 @@ Item {
     function chatTurn(fresh) {
         var p = root.chatPending, sess = root.chatSession
         if (!p || !sess) return
-        p.text = ""; p.since = 0; p.deltaDone = false; p.polling = false   // a new job streams from its start
+        p.streamed = ""; p.since = 0; p.deltaDone = false; p.polling = false   // a new job streams from its start (p.text is the user's message: never touch it)
         var turn = {}
         if (fresh) {
             var past = []
@@ -1958,11 +1958,11 @@ Item {
                     root.chatDeltaOk = true
                     if (typeof d.delta === "string") {
                         // `length` counts UTF-8 bytes: only ever handed back, never compared with JS lengths
-                        if (String(d.offset || 0) === String(p.since || 0)) { p.text = (p.text || "") + d.delta; p.since = d.length }
-                        else { p.text = ""; p.since = 0; return }   // out of step: from the start
+                        if (String(d.offset || 0) === String(p.since || 0)) { p.streamed = (p.streamed || "") + d.delta; p.since = d.length }
+                        else { p.streamed = ""; p.since = 0; return }   // out of step: from the start
                     }
                     if (!d.done && (d.state === "running" || d.state === "queued")) {
-                        root.chatPartial = p.structured ? root.chatReplySoFar(p.text || "") : (p.text || "")
+                        root.chatPartial = p.structured ? root.chatReplySoFar(p.streamed || "") : (p.streamed || "")
                         return
                     }
                     p.deltaDone = true   // finished: the whole job once more, below, as before
