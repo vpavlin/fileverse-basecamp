@@ -13,11 +13,11 @@ share link  ->  files(id) on the portal contract (Gnosis, via eth_rpc_module)
 
 | Package | Type | What it does |
 |---|---|---|
-| `fileverse_core` | core, Rust (`cdylib`) | The engine: chain reads, trustless IPFS fetch, decryption, Yjs rendering, backup keys, Markdown drafts and publishing, copies on IPFS and Logos Storage, AI chat history and AI Gateway sessions. Depends on the official `eth_rpc_module` and `reflection_core`; uses `ipfs_module` and `storage_module` when present, and whichever app opened an AI chat session. |
+| `fileverse_core` | core, Rust (`cdylib`) | The engine: chain reads, trustless IPFS fetch, decryption, Yjs rendering, backup keys, Markdown drafts and publishing, copies on IPFS and Logos Storage, AI chat history and AI Gateway sessions. Depends on the official `eth_rpc_module` and `reflection_core`; `storage_module` ~3.0.3; uses `ipfs_module` when present, `delivery_module` for the public cache, and whichever app opened an AI chat session. |
 | `fileverse_ui` | ui_qml, pure QML | Recent / My files / Drafts, document and sheet views, slide decks, the editor with live preview, settings. |
 | `ipfs_module` | core, Rust (`cdylib`) | An IPFS node for every Logos app: a bundled static Kubo run on loopback ports, started on first use, stopped with its host. Fileverse starts it only when it needs it (Settings → IPFS node). |
 
-What it does (core 0.18, view 0.22):
+What it does (core 0.19, view 0.23):
 
 - **Read share links** from the legacy portal (`docs.fileverse.io`) and the v3 App contract
   (`ddocs.new`, `dsheets.new`), in every form Fileverse hands out: `…/<portal>/<fileId>#key=…`,
@@ -43,6 +43,10 @@ What it does (core 0.18, view 0.22):
   "Join a shared draft…" in Fileverse, or open it in the Reflection apps. Live text,
   presence and cursors, published on Logos Delivery, p2panda or both (Settings). See
   [docs/COLLAB.md](docs/COLLAB.md).
+- **Public cache**: "Keep on the public cache" copies a published (encrypted) document to a
+  Logos Storage hub on the Logos VPS, so its link opens while you are offline and from any
+  network, for 30 days at a time. Requests are signed by a key of this installation and sent
+  over Logos Delivery; the hub's owner allows keys. See [docs/PIN-HUB.md](docs/PIN-HUB.md).
 - **Keep on my IPFS** pins a document's blocks on your node (`ipfs_module`, or a Kubo you set).
 - **IPFS node: Off / When needed / Always on** (Settings). A running node takes part in the
   IPFS network and uses bandwidth. *When needed* (the default) starts it only for Keep on my

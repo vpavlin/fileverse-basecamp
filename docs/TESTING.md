@@ -1,5 +1,38 @@
 # What was tested, and how to repeat it
 
+## core 0.19.0 + view 0.23.0: the public cache (logos-pin) (2026-11-26)
+
+vpavlin: published documents should stay available when the publisher is offline. A hub on
+the VPS (jimmy-crib/vpavlin's generic logos-pin service, spec in docs/PIN-HUB.md) keeps copies;
+Fileverse is its first client.
+
+- **Keep on the public cache** (beside Copy link on a published document, or after every
+  publish with Settings → Public cache → "Keep on the cache"):
+  - connects this Basecamp's Storage node (and IPFS node, if running) to the hub;
+  - sends ed25519-signed requests over Logos Delivery: Storage CIDs and IPFS blocks
+    separately, at most 64 each;
+  - waits up to 35 minutes for the hub's signed status, checked against its key;
+  - records `pinned` on the draft, shown as a chip ("on the public cache until …").
+- **Your key:** one ed25519 key per installation (`pin-key`, mode 600), shown in Settings with
+  Copy key, for the hub's allow-list. An unknown key gets a refusal that says so.
+- **Readers** connect to the hub's Storage node before each Storage download (at most every
+  10 minutes; the hub announces only ~500 CIDs in the DHT). A download that fails to start
+  is retried twice.
+- **storage_module ~3.0.3** is now a required dependency: jimmy-crib/vpavlin's build (logos-
+  storage PR #1540), whose connect() makes the hub a source for downloads. With Basecamp
+  0.3.2's bundled 3.0.2, connect() succeeded but downloads never asked the hub.
+
+- Unit tests (`pin::`): JCS signing bytes, the same as the hub's Python
+  (`json.dumps(sort_keys, separators, ensure_ascii=False)`); a request verifies after re-parsing
+  and fails when changed; 64-CID chunks; a status signed by another key is refused.
+- Harness: pin (kept chip), pinrefused (unknown key message).
+- Basecamp t publishes, u reads, both 0.3.2 with storage_module 3.0.3, in the rig container:
+  - Workshop repro 3: kept (4 Storage datasets, hub log); t closed; u opened the link from
+    the hub (one "Failed to start download" on the first try, hence the retry).
+  - Workshop repro 2: published, kept ("until 26 Dec"), t closed, u opened it at the first try.
+- Not tested: RLN. The test Basecamp has no known RLN membership, yet its requests reached the
+  hub. Fileverse shows Delivery's error if a send is refused.
+
 ## 0.22.1 (view): AI chat sends your message again (2026-11-26)
 
 vpavlin, demoing 0.22.0: the first message worked, every reply failed with "needs a message".

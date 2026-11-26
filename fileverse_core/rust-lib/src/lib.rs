@@ -19,6 +19,7 @@ pub mod md;
 pub mod publish;
 pub mod rich;
 pub mod node;
+pub mod pin;
 pub mod sheet;
 pub mod viewer;
 

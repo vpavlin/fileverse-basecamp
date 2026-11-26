@@ -34,7 +34,7 @@ use crate::backup::{self, PortalKeys};
 use crate::chain::{self, Rpc, GNOSIS_CHAIN_ID};
 use crate::ipfs::{BlockSource, Cid, Gateways, DEFAULT_GATEWAYS};
 use crate::node::{self, Node};
-use crate::{b64, doc, md, publish, rich, viewer};
+use crate::{b64, doc, md, pin, publish, rich, viewer};
 use sha2::{Digest, Sha256};
 
 pub trait FileverseCoreModule: Send + Sync + 'static {
@@ -133,6 +133,13 @@ pub trait FileverseCoreModule: Send + Sync + 'static {
     /// confirms; its turns come here, without a dialog each. The provider's answer, or an error
     /// with `absent: true` when it is not installed or not answering.
     fn ai_call(&self, method: String, args_json: String) -> String;
+    /// The public cache (logos-pin, docs/PIN-HUB.md): this installation's public key (made on
+    /// first use) and the hub it pins to: `{ ok, key, hub: { key, storagePeer, storageAddr } }`.
+    fn pin_identity(&self) -> String;
+    /// Keep a published draft on the public cache: connect to the hub, send signed pin requests
+    /// over Logos Delivery and wait for the hub's signed answer. Returns a job:
+    /// `{ state: "kept"|"refused"|"failed", why, kept, until }`; the draft records it as `pinned`.
+    fn pin_keep(&self, draft_id: String) -> String;
     /// The visual editor's HTML as Markdown (as `draft_save_rich` would store it), for a
     /// draft whose text another module keeps: `{ markdown }`.
     fn rich_md(&self, draft_id: String, html: String) -> String;
@@ -354,11 +361,25 @@ impl BlockSource for StorageSource {
         let _ = std::fs::create_dir_all(&self.tmp);
         let path = self.tmp.join(format!("dl-{}", cid.to_v1()));
         let _ = std::fs::remove_file(&path);
+        connect_pin_hub();
         let client = storage_module::StorageModuleClient::new();
-        if let Err(e) = unwrap_result(
-            client.download_to_url_with_timeout(&ls_cid, &path.to_string_lossy(), false, 65536, false, true, STORAGE_CALL),
-            "download",
-        ) {
+        // "Failed to start download" can be passing (the manifest not found yet, a source just
+        // connected): try twice more before giving up on Storage
+        let mut started = Err(String::new());
+        for attempt in 0..3 {
+            if attempt > 0 {
+                std::thread::sleep(Duration::from_secs(3));
+            }
+            started = unwrap_result(
+                client.download_to_url_with_timeout(&ls_cid, &path.to_string_lossy(), false, 65536, false, true, STORAGE_CALL),
+                "download",
+            );
+            match &started {
+                Err(e) if e.contains("Failed to start") => continue,
+                _ => break,
+            }
+        }
+        if let Err(e) = started {
             *self.why.lock().unwrap() = Some(format!("{ls_cid}: {e}"));
             return None;
         }
@@ -377,6 +398,70 @@ impl BlockSource for StorageSource {
         *self.why.lock().unwrap() = Some(format!("{ls_cid}: the download did not finish in {} s", STORAGE_WAIT.as_secs()));
         None
     }
+}
+
+/// The public cache's Storage node announces only ~500 CIDs in the DHT, and manifests are found
+/// through the DHT: connect to it directly before fetching (at most once every 10 minutes).
+fn connect_pin_hub() {
+    static LAST: std::sync::Mutex<Option<Instant>> = std::sync::Mutex::new(None);
+    {
+        let mut last = LAST.lock().unwrap();
+        if last.is_some_and(|t| t.elapsed() < Duration::from_secs(600)) {
+            return;
+        }
+        *last = Some(Instant::now());
+    }
+    let r = storage_module::StorageModuleClient::new()
+        .connect_with_timeout(pin::HUB_STORAGE_PEER, &json!([pin::HUB_STORAGE_ADDR]), Duration::from_secs(15));
+    eprintln!("fileverse_core: connect to the public cache's Storage node: {r:?}");
+}
+
+/// A delivery_module reply: `{ success, value, error }`, a JSON string of it, or a bare value.
+fn delivery_ok(r: Result<Value, logos_rust_sdk::LogosError>) -> Result<Value, String> {
+    let v = r.map_err(|e| format!("{e:?}"))?;
+    let v = match v {
+        Value::String(t) => serde_json::from_str(&t).unwrap_or(Value::String(t)),
+        v => v,
+    };
+    if let Some(ok) = v.get("success").and_then(Value::as_bool) {
+        return if ok { Ok(v.get("value").cloned().unwrap_or(Value::Null)) } else { Err(v["error"].as_str().map(str::to_string).unwrap_or_else(|| v.to_string())) };
+    }
+    if v.is_null() { Err("no answer".into()) } else { Ok(v) }
+}
+
+/// A Delivery `messageReceived` event: (topic, payload bytes). The event data is
+/// `[hash, topic, payload, source, ts]`, sometimes wrapped in one more array.
+fn delivery_message(data: &Value) -> Option<(String, Vec<u8>)> {
+    let a = data.as_array()?;
+    if a.len() == 1 && a[0].is_array() {
+        return delivery_message(&a[0]);
+    }
+    if a.len() < 3 {
+        return None;
+    }
+    let topic = a[1].as_str()?.to_string();
+    let bytes = logos_rust_sdk::bytes::decode_lenient(&a[2])?;
+    Some((topic, bytes))
+}
+
+/// Brings up this Basecamp's Delivery node the way Chat does: create it, or join the one
+/// another app made; a second start is harmless. Then listens on `topic`.
+fn delivery_up(proxy: &logos_rust_sdk::PluginProxy, topic: &str) -> Result<(), String> {
+    let cfg = json!({ "mode": "Core", "preset": "logos.test", "messagingOverrides": { "logLevel": "ERROR" } }).to_string();
+    if let Err(e) = delivery_ok(proxy.call_json_with_timeout("createNode", &json!([cfg]), Duration::from_secs(30))) {
+        delivery_ok(proxy.call_json_with_timeout("getNodeInfo", &json!(["Version"]), Duration::from_secs(15)))
+            .map_err(|e2| format!("Logos Delivery isn't available ({e}; {e2})"))?;
+    }
+    let _ = delivery_ok(proxy.call_json_with_timeout("start", &json!([]), Duration::from_secs(30)));
+    let mut last = String::new();
+    for _ in 0..6 {
+        match delivery_ok(proxy.call_json_with_timeout("subscribe", &json!([topic]), Duration::from_secs(30))) {
+            Ok(_) => return Ok(()),
+            Err(e) => last = e,   // the node is still starting
+        }
+        std::thread::sleep(Duration::from_secs(5));
+    }
+    Err(format!("Logos Delivery: could not listen for the cache's answer ({last})"))
 }
 
 /// The JSON object of a storage_module event (it arrives as a JSON string, an object, or
@@ -1759,6 +1844,160 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
             Ok(Err(e)) => json!({ "ok": false, "absent": true, "error": format!("the AI app ({provider}) is not installed or not answering ({e:?})") }).to_string(),
             Err(_) => err(format!("the AI app ({provider}) did not answer in time")),
         }
+    }
+
+    fn pin_identity(&self) -> String {
+        let Some(path) = self.state.lock().unwrap().path("pin-key") else { return err("no data directory") };
+        match pin::load_or_create_key(&path) {
+            Ok(k) => json!({ "ok": true, "key": pin::public_hex(&k),
+                             "hub": { "key": pin::HUB_KEY, "storagePeer": pin::HUB_STORAGE_PEER, "storageAddr": pin::HUB_STORAGE_ADDR } }).to_string(),
+            Err(e) => err(e),
+        }
+    }
+
+    fn pin_keep(&self, draft_id: String) -> String {
+        let (path, d) = match self.load_draft(&draft_id) {
+            Ok(x) => x,
+            Err(e) => return err(e),
+        };
+        let Some(link) = d["published"]["link"].as_str().map(str::to_string) else { return err("publish the document first") };
+        // what Publish put where: the link's blocks, and each one's Logos Storage CID
+        let (blocks, storage, key_path) = {
+            let s = self.state.lock().unwrap();
+            let blocks: Vec<String> = s.recent.iter().find(|r| r["url"].as_str() == Some(&link))
+                .and_then(|r| r["blocks"].as_array())
+                .map(|a| a.iter().filter_map(|b| b.as_str().map(str::to_string)).collect())
+                .unwrap_or_default();
+            let storage: Vec<String> = blocks.iter().filter_map(|b| s.storage.get(b).map(|(c, _)| c.clone())).collect();
+            (blocks, storage, s.path("pin-key"))
+        };
+        if blocks.is_empty() {
+            return err("this device does not know the published document's blocks any more: publish it again");
+        }
+        if storage.is_empty() {
+            return err("the document is not in Logos Storage on this device: publish it again with Logos Storage running");
+        }
+        let Some(key_path) = key_path else { return err("no data directory") };
+        let key = match pin::load_or_create_key(&key_path) {
+            Ok(k) => k,
+            Err(e) => return err(e),
+        };
+        let link2 = link.clone();
+        self.run_job(
+            move |me, job| {
+                // 1. this device's Storage node holds the blocks: connect it to the hub, so the
+                //    hub can fetch them over this connection even from behind NAT
+                me.set_progress(job, "Connecting to the public cache…".into());
+                let st = storage_module::StorageModuleClient::new();
+                let _ = st.connect_with_timeout(pin::HUB_STORAGE_PEER, &json!([pin::HUB_STORAGE_ADDR]), Duration::from_secs(20));
+                let info = st.debug_with_timeout(Duration::from_secs(10)).ok().map(|v| match v {
+                    Value::String(t) => serde_json::from_str(&t).unwrap_or(Value::Null),
+                    v => v,
+                }).unwrap_or(Value::Null);
+                let peer = info["id"].as_str().map(str::to_string)
+                    .or_else(|| unwrap_result(st.peer_id_with_timeout(Duration::from_secs(5)), "").ok().and_then(|v| v.as_str().map(str::to_string)))
+                    .unwrap_or_default();
+                let addrs: Vec<String> = ["announceAddresses", "addrs"].iter()
+                    .filter_map(|k| info[*k].as_array())
+                    .flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
+                // the IPFS copy: if this device's node runs, connect it to the hub's Kubo too
+                let ipfs_linked = me.node(Duration::from_secs(2)).is_some_and(|n| {
+                    pin::HUB_IPFS_ADDRS.iter().any(|a| Node::new(&n.api, Duration::from_secs(15)).swarm_connect(&format!("{a}/p2p/{}", pin::HUB_IPFS_PEER)).is_ok())
+                });
+                // 2. Delivery: listen for the answer first, then ask
+                me.set_progress(job, "Sending the request over Logos Delivery…".into());
+                let mut proxy = logos_rust_sdk::LogosModuleSDK::new().plugin("delivery_module");
+                let events = proxy.on("messageReceived").map_err(|e| format!("Logos Delivery: {e:?}"))?;
+                delivery_up(&proxy, pin::STATUS_TOPIC)?;
+                // Storage and IPFS in separate requests: the hub answers a request when every CID
+                // in it is done, and an IPFS node behind NAT may never be reachable for it
+                let mut ids: Vec<String> = vec![];
+                let mut ipfs_ids: Vec<String> = vec![];
+                let ipfs_wanted: &[String] = if ipfs_linked { &blocks } else { &[] };
+                let parts = pin::chunks(&storage, &[]).into_iter().map(|c| (false, c))
+                    .chain(pin::chunks(&[], ipfs_wanted).into_iter().map(|c| (true, c)));
+                for (is_ipfs, (sc, ic)) in parts {
+                    let id = pin::new_id();
+                    let req = pin::request(&key, "pin", &id, "fileverse", &sc, &ic, &peer, &addrs, now_ms());
+                    let payload = json!({ "_bytes": b64::encode(req.to_string().as_bytes()) });
+                    if let Err(e) = delivery_ok(proxy.call_json_with_timeout("send", &json!([pin::REQUEST_TOPIC, payload]), Duration::from_secs(30))) {
+                        if e.to_lowercase().contains("rln") || e.to_lowercase().contains("membership") {
+                            return Err(format!("sending on Logos Delivery needs an RLN membership on this Basecamp ({e})"));
+                        }
+                        return Err(format!("Logos Delivery could not send the request ({e})"));
+                    }
+                    if is_ipfs { ipfs_ids.push(id) } else { ids.push(id) }
+                }
+                // 3. the hub's signed answers (relays repeat them: one per request and state)
+                me.set_progress(job, "Waiting for the public cache to copy it (while this Basecamp stays online)…".into());
+                let mut finals: HashMap<String, Value> = HashMap::new();
+                let t0 = Instant::now();
+                // done when every Storage request is answered (then a short grace for the IPFS ones)
+                let mut storage_done: Option<Instant> = None;
+                while t0.elapsed() < Duration::from_secs(35 * 60) {
+                    if storage_done.is_none() && ids.iter().all(|i| finals.contains_key(i)) {
+                        storage_done = Some(Instant::now());
+                    }
+                    if storage_done.is_some_and(|t| ipfs_ids.iter().all(|i| finals.contains_key(i)) || t.elapsed() > Duration::from_secs(60)) {
+                        break;
+                    }
+                    let Ok(ev) = events.receiver().recv_timeout(Duration::from_secs(1)) else { continue };
+                    let Some((topic, bytes)) = delivery_message(&ev.data) else { continue };
+                    if topic != pin::STATUS_TOPIC {
+                        continue;
+                    }
+                    let Ok(msg) = serde_json::from_slice::<Value>(&bytes) else { continue };
+                    let Some(id) = msg["id"].as_str() else { continue };
+                    if !ids.iter().chain(ipfs_ids.iter()).any(|i| i == id) || finals.contains_key(id) || !pin::status_from_hub(&msg) {
+                        continue;
+                    }
+                    match msg["state"].as_str().unwrap_or("") {
+                        "kept" | "refused" | "failed" => {
+                            finals.insert(id.to_string(), msg);
+                        }
+                        "queued" => me.set_progress(job, "Queued at the public cache…".into()),
+                        _ => {}
+                    }
+                }
+                if !ids.iter().all(|i| finals.contains_key(i)) {
+                    return Err("the public cache did not answer within 35 minutes".into());
+                }
+                let all: Vec<&Value> = ids.iter().filter_map(|i| finals.get(i)).collect();
+                let ipfs_state = if ipfs_ids.is_empty() {
+                    "not sent (this device's IPFS node is not running or can't reach the cache)"
+                } else if ipfs_ids.iter().all(|i| finals.get(i).is_some_and(|m| m["state"] == "kept")) {
+                    "kept"
+                } else if ipfs_ids.iter().any(|i| finals.contains_key(i)) {
+                    "not kept (the cache could not fetch from this device's IPFS node)"
+                } else {
+                    "still being fetched by the cache"
+                };
+                let first = |st: &str| all.iter().find(|m| m["state"] == st).map(|m| m["why"].as_str().unwrap_or("").to_string());
+                let mut kept: Vec<Value> = vec![];
+                for m in &all {
+                    kept.extend(m["kept"].as_array().cloned().unwrap_or_default());
+                }
+                let until = all.iter().filter_map(|m| m["until"].as_u64()).min();
+                let (state, why) = if let Some(w) = first("refused") {
+                    ("refused", w)
+                } else if let Some(w) = first("failed") {
+                    ("failed", w)
+                } else {
+                    ("kept", String::new())
+                };
+                Ok(json!({ "state": state, "why": why, "kept": kept, "until": until, "requests": ids.len() + ipfs_ids.len(), "ipfs": ipfs_state, "key": pin::public_hex(&key) }))
+            },
+            move |s, v| {
+                let pinned = json!({ "state": v["state"], "why": v["why"], "until": v["until"], "ipfs": v["ipfs"], "at": now_ms(), "link": link2 });
+                if let Some(r) = s.recent.iter_mut().find(|r| r["url"].as_str() == Some(&link)) {
+                    r["onHub"] = pinned.clone();
+                }
+                s.save();
+                let mut d = d.clone();
+                d["pinned"] = pinned;
+                write_private(&path, &d.to_string());
+            },
+        )
     }
 
     fn rich_md(&self, draft_id: String, html: String) -> String {

@@ -119,4 +119,6 @@ blocks expire unless renewed (see Retention).
   device's Storage node connected to the hub until a hub-signed `kept` or `failed`, and show it on
   the document. Renew before `until`.
 - Readers `connect()` to the hub, then fetch as from any source: every block is hash-checked, so
-  the hub can refuse or watch, never alter.
+  the hub can refuse or watch, never alter. This needs storage_module 3.0.3 (logos-storage PR
+  #1540), whose connect() makes the peer a download source; Basecamp 0.3.2's bundled 3.0.2
+  connects but never asks it. fileverse_core requires ~3.0.3.

@@ -77,6 +77,11 @@ impl Node {
         Ok(())
     }
 
+    /// Connect to a peer (`multiaddr` ending in /p2p/<id>), e.g. a cache that will fetch from us.
+    pub fn swarm_connect(&self, multiaddr: &str) -> Result<(), String> {
+        self.rpc(&format!("swarm/connect?arg={multiaddr}")).map(|_| ())
+    }
+
     pub fn pin(&self, root: &str) -> Result<(), String> {
         self.rpc(&format!("pin/add?arg={root}&recursive=true")).map(|_| ())
     }

@@ -1239,7 +1239,36 @@ Item {
                 if (r.storage) where.push("Logos Storage")
                 root.say("Published to " + where.join(" and ") + (r.notes && r.notes.length ? " - " + r.notes.join("; ") : ""))
                 root.openDraft(root.draft.id)
+                if (root.pinAfterPublish && r.storage) Qt.callLater(root.pinDraft)
             })
+        })
+    }
+
+    // ── the public cache (logos-pin hub on the VPS, docs/PIN-HUB.md) ──
+    readonly property bool pinAfterPublish: !!(root.snap && root.snap.prefs && root.snap.prefs.pinAfterPublish)
+    property string pinKey: ""                 // this installation's public key, for the hub's allow-list
+    function loadPinKey() {
+        if (root.pinKey) return
+        root.core("pin_identity", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.pinKey = r.key })
+    }
+    // the draft's record for its current link (an older publish's record does not count)
+    function pinOf(d) { return d && d.pinned && d.published && d.pinned.link === d.published.link ? d.pinned : null }
+    function pinDraft() {
+        if (!root.draft || !root.draft.published) return
+        var id = root.draft.id
+        root.startJob("pin_keep", [id], "pin", function (r) {
+            if (r.state === "kept") root.say("Kept on the public cache (Logos Storage) until " + new Date(r.until).toLocaleDateString() + (r.ipfs && r.ipfs !== "kept" ? ". IPFS copy: " + r.ipfs : ", IPFS copy too"))
+            else if (r.state === "refused" && /unknown key/.test(r.why || ""))
+                root.fail("The public cache does not know this Basecamp yet. Send your key (Settings → Public cache) to the cache's owner, then try again.")
+            else root.fail("The public cache " + (r.state === "refused" ? "refused it" : "could not copy it") + (r.why ? ": " + r.why : "") + ".")
+            if (root.draft && root.draft.id === id) root.openDraft(id)
+        }, function (e) { root.fail("Public cache: " + e) })
+    }
+    function setPinAfterPublish(on) {
+        root.core("set_pref", ["pinAfterPublish", JSON.stringify(on)], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok) { root.fail((r && r.error) || "Could not save the setting"); return }
+            var sn = JSON.parse(JSON.stringify(root.snap)); sn.prefs = r.prefs; root.snap = sn
         })
     }
 
@@ -2682,7 +2711,21 @@ Item {
                             }
                         }
                         LogosButton { compact: true; text: "Add an action"; onClicked: root.promptEdit = { mine: -1, name: "", text: "", how: "replace" } }
-                        Caption { text: "IPFS GATEWAYS"; Layout.topMargin: 4 }
+                        Caption { text: "PUBLIC CACHE"; Layout.topMargin: 4 }
+                    Hint { text: "A node on the Logos VPS that keeps copies of published documents (still encrypted), so their links open when your Basecamp is off and from any network. It keeps a document 30 days; publishing or keeping it again renews it. Requests go over Logos Delivery, which needs an RLN membership on testnet. The cache only takes requests from keys its owner allowed: send yours to be added." }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        LogosText { Layout.fillWidth: true; elide: Text.ElideMiddle; textFormat: Text.PlainText; font.pixelSize: 12; font.family: Theme.typography.mono
+                                    text: root.pinKey ? "Your key: " + root.pinKey : "Your key: …"
+                                    Component.onCompleted: root.loadPinKey() }
+                        LogosButton { compact: true; enabled: root.pinKey !== ""; text: "Copy key"; onClicked: root.copy(root.pinKey, "Key") }
+                    }
+                    RowLayout {
+                        LogosText { textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textSecondary; text: "After publishing:" }
+                        LogosButton { compact: true; text: "Keep on the cache"; variant: root.pinAfterPublish ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; onClicked: root.setPinAfterPublish(true) }
+                        LogosButton { compact: true; text: "Only when I ask"; variant: !root.pinAfterPublish ? LogosButton.Variant.Primary : LogosButton.Variant.Secondary; onClicked: root.setPinAfterPublish(false) }
+                    }
+                    Caption { text: "IPFS GATEWAYS"; Layout.topMargin: 4 }
                         Hint { text: "Tried after your own node, one per line. Every block is checked against its hash, so a gateway can fail but cannot change content." }
                         ScrollView {
                             Layout.fillWidth: true
@@ -3165,6 +3208,20 @@ Item {
                         Chip { visible: root.viaReflection && !root.isShared; text: "shared · reflection_core not answering"; tint: Theme.palette.warning }
                         LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Copy link"; onClicked: root.copy(root.draft.published.link, "Link") }
                         LogosButton { visible: !!(root.draft && root.draft.published); compact: true; text: "Open published"; onClicked: root.open(root.draft.published.link) }
+                        LogosButton {
+                            visible: !!(root.draft && root.draft.published) && !(root.pinOf(root.draft) && root.pinOf(root.draft).state === "kept")
+                            compact: true; enabled: !root.busyWith("pin")
+                            text: root.busyWith("pin") ? (root.progressOf("pin") || "Copying to the public cache…") : "Keep on the public cache"
+                            onClicked: root.pinDraft()
+                            ToolTip.visible: hovered; ToolTip.delay: 500
+                            ToolTip.text: "Copies the published (encrypted) document to the public cache on the Logos VPS, so its link opens when this Basecamp is off. Keep Basecamp open until it says kept. Costs one Logos Delivery message."
+                        }
+                        Chip {
+                            readonly property var pin: root.pinOf(root.draft)
+                            visible: !!pin && !root.busyWith("pin")
+                            text: !pin ? "" : pin.state === "kept" ? "on the public cache until " + new Date(pin.until).toLocaleDateString() : "public cache: " + pin.state
+                            tint: pin && pin.state === "kept" ? Theme.palette.success : Theme.palette.warning
+                        }
                         LogosButton { visible: !!(root.draft && root.draft.sourceUrl); compact: true; text: "Open original"; onClicked: root.open(root.draft.sourceUrl) }
                         Hint {
                             text: root.draft && root.draft.published
