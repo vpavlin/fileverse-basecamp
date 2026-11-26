@@ -122,3 +122,37 @@ blocks expire unless renewed (see Retention).
   the hub can refuse or watch, never alter. This needs storage_module 3.0.3 (logos-storage PR
   #1540), whose connect() makes the peer a download source; Basecamp 0.3.2's bundled 3.0.2
   connects but never asks it. fileverse_core requires ~3.0.3.
+
+## Proposed (not frozen): an LNS tier
+
+Status: proposal, 2026-11-26. Lets anyone with an LNS name (jefdiesel/logos-names) use the hub
+within small limits, without being on the allow-list.
+
+- **Linking a key to a name.** The name's holder sets the text entry `logos-pin.key` to the
+  installation's ed25519 public key (64 lowercase hex). Only the holder can set entries, so
+  the entry is the proof (as WhisperBox's ADR 0019 does with `whisperbox.address`). One name
+  can hold one key; several installations need several names or a list value (open).
+- **Request:** an optional `"name"` field (normalised as LNS spec section 2), signed with the
+  rest. A request without it is judged by the allow-list only, as in v1.
+- **Hub:** for a key not on the allow-list but with a `name`, resolve the name against the
+  chosen registry, check the record is active (deposit mode: names don't expire) and that
+  `logos-pin.key` equals `key`; cache the answer ~10 minutes. Then apply the LNS tier:
+  - each Storage dataset at most **1 MB** (`datasetSize` from the manifest, read before
+    fetching; larger ones are refused with `why: "too large"`);
+  - per name, e.g. 50 MB and 100 datasets per 30 days (charged on real size, as v1);
+  - one name's quota is shared by every key that claims it.
+- **Cost on the hub:** each new name costs an Argon2id derivation (64 MiB, ~0.1 s) and an RPC
+  read. The spec warns gateways not to derive for anonymous callers, so: only after the
+  request's signature checks, at most one new name per key per minute and a global cap,
+  negative answers cached too.
+- **Trust:** the hub believes the sequencer it asks (LEZ reads carry no proof); it should ask
+  its own node or a sequencer it trusts.
+- **Limits of the barrier:** on testnet a name costs a refundable deposit in free faucet coins
+  and ~20 minutes (commit, 15-minute wait, reveal), so one person can hold many names and
+  many quotas. Names make spam slower and per-name, not impossible. Each request also needs
+  an RLN membership (Delivery), itself gated by Bubble's proof of work; together they bound a
+  spammer by names x quota and by messages per epoch.
+- **Open:** which registry and network the hub resolves against (the LNS 0.4 registry runs on
+  the Bridge test network until Logos's public 0.4 testnet is live; the 0.3 registry is
+  `38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq`), and how the hub resolves (the `names`
+  Basecamp module in its logosctl session, or the LNS resolver library).
