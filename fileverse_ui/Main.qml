@@ -1249,7 +1249,7 @@ Item {
     property string pinKey: ""                 // this installation's public key, for the hub's allow-list
     function loadPinKey() {
         if (root.pinKey) return
-        root.core("pin_identity", [], function (raw) { var r = root.j(raw); if (r && r.ok) root.pinKey = r.key })
+        root.core("pin_identity", [], function (raw) { var r = root.j(raw); if (r && r.ok) { root.pinKey = r.key; if (r.nameEntry) root.pinEntry = r.nameEntry } })
     }
     // the draft's record for its current link (an older publish's record does not count)
     function pinOf(d) { return d && d.pinned && d.published && d.pinned.link === d.published.link ? d.pinned : null }
@@ -1258,11 +1258,47 @@ Item {
         var id = root.draft.id
         root.startJob("pin_keep", [id], "pin", function (r) {
             if (r.state === "kept") root.say("Kept on the public cache (Logos Storage) until " + new Date(r.until).toLocaleDateString() + (r.ipfs && r.ipfs !== "kept" ? ". IPFS copy: " + r.ipfs : ", IPFS copy too"))
-            else if (r.state === "refused" && /unknown key/.test(r.why || ""))
-                root.fail("The public cache does not know this Basecamp yet. Send your key (Settings → Public cache) to the cache's owner, then try again.")
-            else root.fail("The public cache " + (r.state === "refused" ? "refused it" : "could not copy it") + (r.why ? ": " + r.why : "") + ".")
+            else if (r.state === "refused") root.fail("The public cache refused it: " + root.pinWhy(r.why || "", r.name))
+            else root.fail("The public cache could not copy it" + (r.why ? ": " + r.why : "") + ".")
             if (root.draft && root.draft.id === id) root.openDraft(id)
         }, function (e) { root.fail("Public cache: " + e) })
+    }
+    // the hub's refusal reasons (logos-pin v1.1), in plain words
+    function pinWhy(why, name) {
+        var n = name ? "“" + name + "”" : "your LNS name"
+        if (/^unknown key/.test(why)) return "it does not know this Basecamp. Set your LNS name in Settings → Public cache, or send your key to the cache's owner."
+        if (/^unknown name/.test(why)) return n + " is not registered on the network the cache uses."
+        if (/no logos-pin.key/.test(why)) return n + " has no " + (root.pinEntry || "logos-pin.key") + " entry yet. Add it as shown in Settings → Public cache."
+        if (/^key not on name/.test(why)) return n + "'s " + (root.pinEntry || "logos-pin.key") + " entry does not list this Basecamp's key. Add it as shown in Settings → Public cache."
+        if (/^too large/.test(why)) return "a part of this document is over 1 MB, the limit for LNS names."
+        if (/^quota/.test(why)) return n + " has used its share of the cache for now (it frees up over 30 days)."
+        if (/lookup failed/.test(why)) return "it could not look up " + n + " just now. Try again later."
+        return why + "."
+    }
+    // the name as saved, cleaned up the registry's way (older saves may hold "@Name.lez")
+    readonly property string pinName: root.lnsName((root.snap && root.snap.prefs && root.snap.prefs.pinName) || "")
+    property string pinEntry: "logos-pin.key"
+    // as the registry and the core clean a name up (LNS spec section 2); "" when it isn't one
+    function lnsName(input) {
+        var n = String(input || "").trim().toLowerCase()
+        if (n.indexOf("lns:") === 0) n = n.substring(4)
+        if (n.indexOf("@") === 0) n = n.substring(1)
+        if (/\.lez$/.test(n)) n = n.substring(0, n.length - 4)
+        return /^[a-z0-9](?:[a-z0-9-]{0,30}[a-z0-9])?$/.test(n) ? n : ""
+    }
+    function setPinName(input) {
+        var n = String(input || "").trim()
+        if (n !== "") {
+            n = root.lnsName(input)
+            if (!n) { root.fail("“" + String(input).trim() + "” is not an LNS name: 1 to 32 of a-z, 0-9 and -, not starting or ending with -."); return }
+        }
+        pinNameField.text = n
+        root.core("set_pref", ["pinName", JSON.stringify(n)], function (raw) {
+            var r = root.j(raw)
+            if (!r || !r.ok) { root.fail((r && r.error) || "Could not save the name"); return }
+            var sn = JSON.parse(JSON.stringify(root.snap)); sn.prefs = r.prefs; root.snap = sn
+            root.say(n ? "LNS name saved: " + n : "LNS name removed")
+        })
     }
     function setPinAfterPublish(on) {
         root.core("set_pref", ["pinAfterPublish", JSON.stringify(on)], function (raw) {
@@ -2712,13 +2748,27 @@ Item {
                         }
                         LogosButton { compact: true; text: "Add an action"; onClicked: root.promptEdit = { mine: -1, name: "", text: "", how: "replace" } }
                         Caption { text: "PUBLIC CACHE"; Layout.topMargin: 4 }
-                    Hint { text: "A node on the Logos VPS that keeps copies of published documents (still encrypted), so their links open when your Basecamp is off and from any network. It keeps a document 30 days; publishing or keeping it again renews it. Requests go over Logos Delivery, which needs an RLN membership on testnet. The cache only takes requests from keys its owner allowed: send yours to be added." }
+                    Hint { text: "A node on the Logos VPS that keeps copies of published documents (still encrypted), so their links open when your Basecamp is off and from any network. It keeps a document 30 days; publishing or keeping it again renews it. Requests go over Logos Delivery, which needs an RLN membership on testnet. It takes documents from anyone with an LNS name (each part up to 1 MB, a share per name), and larger ones from keys its owner allowed." }
                     RowLayout {
                         Layout.fillWidth: true
                         LogosText { Layout.fillWidth: true; elide: Text.ElideMiddle; textFormat: Text.PlainText; font.pixelSize: 12; font.family: Theme.typography.mono
                                     text: root.pinKey ? "Your key: " + root.pinKey : "Your key: …"
                                     Component.onCompleted: root.loadPinKey() }
                         LogosButton { compact: true; enabled: root.pinKey !== ""; text: "Copy key"; onClicked: root.copy(root.pinKey, "Key") }
+                    }
+                    RowLayout {
+                        Layout.fillWidth: true
+                        Field { id: pinNameField; Layout.fillWidth: true; placeholderText: "Your LNS name, e.g. alice"; text: root.pinName }
+                        LogosButton { compact: true; text: "Save name"; enabled: pinNameField.text.trim() !== root.pinName; onClicked: root.setPinName(pinNameField.text) }
+                    }
+                    Hint {
+                        visible: root.pinName !== "" && root.pinKey !== ""
+                        text: "Add this Basecamp's key to the name's " + root.pinEntry + " entry, in the Names app or with: names set-text " + root.pinName + " " + root.pinEntry + " " + root.pinKey + "  (several Basecamps: put their keys in the one entry, separated by spaces). Only the name's holder can set it, so that is the proof."
+                    }
+                    LogosButton {
+                        visible: root.pinName !== "" && root.pinKey !== ""
+                        compact: true; text: "Copy the command"
+                        onClicked: root.copy("names set-text " + root.pinName + " " + root.pinEntry + " " + root.pinKey, "Command")
                     }
                     RowLayout {
                         LogosText { textFormat: Text.PlainText; font.pixelSize: 12; color: Theme.palette.textSecondary; text: "After publishing:" }

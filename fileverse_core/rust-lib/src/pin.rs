@@ -78,16 +78,43 @@ pub fn public_hex(key: &SigningKey) -> String {
 
 /// A signed v1 request. `kind` "pin" or "unpin".
 #[allow(clippy::too_many_arguments)]
-pub fn request(key: &SigningKey, kind: &str, id: &str, app: &str, storage: &[String], ipfs: &[String], peer: &str, addrs: &[String], at: u64) -> Value {
+pub fn request(key: &SigningKey, kind: &str, id: &str, app: &str, storage: &[String], ipfs: &[String], peer: &str, addrs: &[String], at: u64, name: Option<&str>) -> Value {
     let mut m = json!({
         "v": 1, "type": kind, "id": id, "app": app,
         "storage": storage, "ipfs": ipfs,
         "from": { "storagePeer": peer, "addrs": addrs },
         "at": at, "key": public_hex(key),
     });
+    // v1.1: the LNS name that vouches for this key (its `logos-pin.key` entry lists it)
+    if let Some(n) = name {
+        m["name"] = json!(n);
+    }
     let sig = key.sign(&signing_bytes(REQUEST_TAG, &m));
     m["sig"] = json!(hex::encode(sig.to_bytes()));
     m
+}
+
+/// The LNS text entry that lists the pin keys a name vouches for (v1.1).
+pub const NAME_ENTRY: &str = "logos-pin.key";
+
+/// An LNS name as the registry and every client clean it up (LNS spec section 2): trim,
+/// lower case, drop one `lns:`, then one `@`, then one trailing `.lez`; then 1-32 of
+/// `a-z0-9-`, not starting or ending with `-`.
+pub fn normalize_name(input: &str) -> Result<String, String> {
+    let mut n = input.trim().to_ascii_lowercase();
+    if let Some(r) = n.strip_prefix("lns:") {
+        n = r.to_string();
+    }
+    if let Some(r) = n.strip_prefix('@') {
+        n = r.to_string();
+    }
+    if let Some(r) = n.strip_suffix(".lez") {
+        n = r.to_string();
+    }
+    let ok = !n.is_empty() && n.len() <= 32
+        && n.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+        && !n.starts_with('-') && !n.ends_with('-');
+    if ok { Ok(n) } else { Err(format!("“{}” is not an LNS name: 1 to 32 of a-z, 0-9 and -, not starting or ending with -", input.trim())) }
 }
 
 /// A request id: 16 random bytes, hex.
@@ -138,7 +165,7 @@ mod tests {
     #[test]
     fn request_signs_and_verifies() {
         let key = SigningKey::from_bytes(&[7u8; 32]);
-        let r = request(&key, "pin", "00ff", "fileverse", &["zDvZ".into()], &["bafk".into()], "16Uiu", &["/ip4/1.2.3.4/tcp/1".into()], 1796000000000);
+        let r = request(&key, "pin", "00ff", "fileverse", &["zDvZ".into()], &["bafk".into()], "16Uiu", &["/ip4/1.2.3.4/tcp/1".into()], 1796000000000, None);
         assert!(request_ok(&r));
         // the parsed text checks too (the verifier recomputes the bytes)
         let back: Value = serde_json::from_str(&serde_json::to_string_pretty(&r).unwrap()).unwrap();
@@ -146,6 +173,27 @@ mod tests {
         let mut bad = r.clone();
         bad["at"] = json!(1796000000001u64);
         assert!(!request_ok(&bad));
+    }
+
+    #[test]
+    fn name_is_signed_with_the_rest() {
+        let key = SigningKey::from_bytes(&[7u8; 32]);
+        let r = request(&key, "pin", "01", "fileverse", &["zDvZ".into()], &[], "p", &[], 1, Some("alice"));
+        assert_eq!(r["name"], "alice");
+        assert!(request_ok(&r));
+        let mut other = r.clone();
+        other["name"] = json!("mallory");
+        assert!(!request_ok(&other));
+    }
+
+    #[test]
+    fn names_normalise_as_lns_does() {
+        for (i, want) in [("Jef", "jef"), ("@jef", "jef"), ("lns:jef", "jef"), ("Jef.LEZ", "jef"), ("  a-b9 ", "a-b9")] {
+            assert_eq!(normalize_name(i).unwrap(), want, "{i}");
+        }
+        for bad in ["", "-a", "a-", "jef.eth", "a_b", &"x".repeat(33)] {
+            assert!(normalize_name(bad).is_err(), "{bad}");
+        }
     }
 
     #[test]

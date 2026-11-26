@@ -1849,7 +1849,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
     fn pin_identity(&self) -> String {
         let Some(path) = self.state.lock().unwrap().path("pin-key") else { return err("no data directory") };
         match pin::load_or_create_key(&path) {
-            Ok(k) => json!({ "ok": true, "key": pin::public_hex(&k),
+            Ok(k) => json!({ "ok": true, "key": pin::public_hex(&k), "nameEntry": pin::NAME_ENTRY,
                              "hub": { "key": pin::HUB_KEY, "storagePeer": pin::HUB_STORAGE_PEER, "storageAddr": pin::HUB_STORAGE_ADDR } }).to_string(),
             Err(e) => err(e),
         }
@@ -1870,6 +1870,14 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 .unwrap_or_default();
             let storage: Vec<String> = blocks.iter().filter_map(|b| s.storage.get(b).map(|(c, _)| c.clone())).collect();
             (blocks, storage, s.path("pin-key"))
+        };
+        // v1.1: the LNS name this installation's key is listed on (Settings), if any
+        let name: Option<String> = match self.state.lock().unwrap().prefs.get("pinName").and_then(Value::as_str).map(str::trim).filter(|n| !n.is_empty()) {
+            Some(n) => match pin::normalize_name(n) {
+                Ok(n) => Some(n),
+                Err(e) => return err(e),
+            },
+            None => None,
         };
         if blocks.is_empty() {
             return err("this device does not know the published document's blocks any more: publish it again");
@@ -1918,7 +1926,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                     .chain(pin::chunks(&[], ipfs_wanted).into_iter().map(|c| (true, c)));
                 for (is_ipfs, (sc, ic)) in parts {
                     let id = pin::new_id();
-                    let req = pin::request(&key, "pin", &id, "fileverse", &sc, &ic, &peer, &addrs, now_ms());
+                    let req = pin::request(&key, "pin", &id, "fileverse", &sc, &ic, &peer, &addrs, now_ms(), name.as_deref());
                     let payload = json!({ "_bytes": b64::encode(req.to_string().as_bytes()) });
                     if let Err(e) = delivery_ok(proxy.call_json_with_timeout("send", &json!([pin::REQUEST_TOPIC, payload]), Duration::from_secs(30))) {
                         if e.to_lowercase().contains("rln") || e.to_lowercase().contains("membership") {
@@ -1985,7 +1993,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 } else {
                     ("kept", String::new())
                 };
-                Ok(json!({ "state": state, "why": why, "kept": kept, "until": until, "requests": ids.len() + ipfs_ids.len(), "ipfs": ipfs_state, "key": pin::public_hex(&key) }))
+                Ok(json!({ "state": state, "why": why, "kept": kept, "until": until, "requests": ids.len() + ipfs_ids.len(), "ipfs": ipfs_state, "key": pin::public_hex(&key), "name": name }))
             },
             move |s, v| {
                 let pinned = json!({ "state": v["state"], "why": v["why"], "until": v["until"], "ipfs": v["ipfs"], "at": now_ms(), "link": link2 });

@@ -1,5 +1,28 @@
 # What was tested, and how to repeat it
 
+## core 0.20.0 + view 0.24.0: the public cache for LNS names (logos-pin v1.1) (2026-11-26)
+
+vpavlin: let anyone with an LNS name use the cache, with small limits (about 1 MB a file),
+not only an explicit list of keys; and be able to switch later between Logos's public LEZ
+testnet and the LNS Bridge test network. Spec: docs/PIN-HUB.md, v1.1. The network is a hub
+setting, so Fileverse never resolves a name and needs no change when the hub switches.
+
+- Settings → Public cache: "Your LNS name". Saved cleaned up as the registry does
+  (`@Fileverse-Test.lez` becomes `fileverse-test`; an invalid name is refused at once), then
+  the exact `names set-text <name> logos-pin.key <key>` with Copy the command.
+- Pin requests carry the name (signed with the rest). The hub's refusals are shown in plain
+  words (unknown name, no logos-pin.key entry, key not on the name, over 1 MB, quota, lookup
+  failed).
+
+- Unit tests (`pin::`): the name is signed (changing it breaks the signature); names
+  normalise as LNS spec section 2 (`Jef`, `@jef`, `lns:jef`, `Jef.LEZ` -> `jef`; `-a`, `a-`,
+  `jef.eth`, `a_b`, 33 characters refused).
+- Harness: pinname, pinnamerefused ("“alice”'s logos-pin.key entry does not list this
+  Basecamp's key…").
+- Basecamp t: name saved as `fileverse-test`, command shown; Workshop long published and
+  kept with the name in the request, by the v1 hub (allow-listed key): v1 hubs accept v1.1
+  requests. The LNS tier itself waits for the hub (jimmy-crib/vpavlin).
+
 ## core 0.19.0 + view 0.23.0: the public cache (logos-pin) (2026-11-26)
 
 vpavlin: published documents should stay available when the publisher is offline. A hub on

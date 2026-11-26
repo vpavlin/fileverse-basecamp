@@ -21,7 +21,7 @@ Window {
     property var chatRequests: []
     property var turns: []
     property bool lastStructured: false
-    property var prefs: ({})
+    property var prefs: (String(Qt.application.arguments.slice(Qt.application.arguments.indexOf("--") + 1)[0]).indexOf("pinname") === 0 ? { pinName: "alice" } : ({}))
     property int polls: 0
     property var pinned: null
     property int pinPolls: 0
@@ -58,7 +58,7 @@ Window {
 
     function draft() {
         var md = "# Logos plan\n\nWe go **self-sovereign**: [Logos](https://logos.co).\n\n## Steps\n\n- IPFS node module\n- Logos Storage\n  - copy blocks\n\n1. edit\n2. publish\n\n> no servers\n\n```\nfvbc://ipfs/bafk…\n```\n\n| what | where |\n|---|---|\n| blocks | IPFS + Storage |\n"
-        return { id: "abc123", title: "Logos plan", markdown: md, sourceUrl: "", preview: win.previewOf(), published: (mode === "edit" || mode.indexOf("pin") === 0) ? { link: "fvbc://ipfs/bafkreiexample#key=k", at: 1792700000000 } : null, pinned: win.pinned,
+        return { id: "abc123", title: "Logos plan", markdown: md, sourceUrl: "", preview: win.previewOf(), published: (mode === "edit" || (mode.indexOf("pin") === 0 && mode !== "pinname")) ? { link: "fvbc://ipfs/bafkreiexample#key=k", at: 1792700000000 } : null, pinned: win.pinned,
                  reflection: (mode === "shared" || mode === "sharedmd" || mode === "sharedcatchup") ? { id: "ab".repeat(32) } : undefined }
     }
     function previewOf() {
@@ -168,12 +168,13 @@ Window {
             return { ok: true }
         }
         if (method === "diagram") return { ok: true, jobId: args[0].indexOf("BROKEN") >= 0 ? "jdiagbad" : "jdiag" }
-        if (method === "pin_identity") return { ok: true, key: "5f1c0a7e".repeat(8), hub: { key: "cabe0c21", storagePeer: "16Uiu2HAmKRR", storageAddr: "/ip4/128.140.55.128/tcp/8499" } }
+        if (method === "pin_identity") return { ok: true, key: "5f1c0a7e".repeat(8), nameEntry: "logos-pin.key", hub: { key: "cabe0c21", storagePeer: "16Uiu2HAmKRR", storageAddr: "/ip4/128.140.55.128/tcp/8499" } }
         if (method === "pin_keep") { console.log("PIN_KEEP", args[0]); return { ok: true, jobId: "jpin" } }
         if (method === "job" && args[0] === "jpin") {
             win.pinPolls++
             if (win.pinPolls < 3) return { ok: true, state: "pending", progress: "Waiting for the public cache to copy it (while this Basecamp stays online)…" }
             var res = win.mode === "pinrefused" ? { state: "refused", why: "unknown key", kept: [], until: null }
+                    : win.mode === "pinnamerefused" ? { state: "refused", why: "key not on name", kept: [], until: null, name: "alice" }
                                                 : { state: "kept", why: "", kept: ["zDvZ1", "zDvZ2"], until: 1798600000000 }
             win.pinned = { state: res.state, why: res.why, until: res.until, at: Date.now(), link: "fvbc://ipfs/bafkreiexample#key=k" }
             return { ok: true, state: "done", result: res }
@@ -216,13 +217,13 @@ Window {
         onLoaded: Qt.callLater(function () {
             var it = item
             it.showDetails = (win.mode === "doc")
-            it.showSettings = (win.mode === "settings" || win.mode === "aiprompts" || win.mode === "aipromptedit" || win.mode === "pinsettings")
+            it.showSettings = (win.mode === "settings" || win.mode === "pinname" || win.mode === "aiprompts" || win.mode === "aipromptedit" || win.mode === "pinsettings")
             if (win.mode === "aiprompts" || win.mode === "aipromptedit") promptTimer.start()
             if (win.mode === "portal") { it.section = "files"; it.showPortal("0x2222222222222222222222222222222222222222") }
             else if (win.mode === "localfiles") { it.section = "files"; it.showPortal("") }
             else if (win.mode === "import") { it.section = "files"; it.mode = "import" }
             else if (win.mode === "confirmdel") { it.section = "drafts"; it.openDraft("abc123"); Qt.callLater(function () { it.confirm("Delete “Logos plan”?", "It is deleted from this device, with its AI chat. This cannot be undone. The published copy stays where it was published.", "Delete", function () { console.log("DELETED") }) }) }
-            else if (win.mode === "pin" || win.mode === "pinrefused" || win.mode === "pinbusy") { it.section = "drafts"; it.openDraft("abc123"); Qt.callLater(function () { Qt.callLater(function () { it.pinDraft() }) }) }
+            else if (win.mode === "pin" || win.mode === "pinrefused" || win.mode === "pinbusy" || win.mode === "pinnamerefused") { it.section = "drafts"; it.openDraft("abc123"); Qt.callLater(function () { Qt.callLater(function () { it.pinDraft() }) }) }
             else if (win.mode === "edit" || win.mode === "editslides" || win.mode === "wysiwyg" || win.mode === "shared" || win.mode === "sharedcatchup" || win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editai" || win.mode === "editaiapply" || win.mode === "editmdai" || win.mode === "aiunavail" || win.mode === "chat" || win.mode === "chatmd" || win.mode === "chatapply" || win.mode === "chatstateless" || win.mode === "chatprose" || win.mode === "chatbadjson" || win.mode === "chatreset" || win.mode === "chatstream" || win.mode === "chatdelta" || win.mode === "chatprovider" || win.mode === "chatapi") {
                 it.section = "drafts"; it.openDraft("abc123")
                 if (win.mode === "sharedmd" || win.mode === "editmd" || win.mode === "editmdai" || win.mode === "chatmd") Qt.callLater(function () { it.setVisualEdit(false) })
