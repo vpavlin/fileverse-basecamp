@@ -12,12 +12,10 @@ const STATUS_TAG: &[u8] = b"logos-pin/v1/status\n";
 /// At most this many CIDs (storage + ipfs) in one request.
 pub const MAX_CIDS: usize = 64;
 
-/// The hub on the VPS (its README): status key, Storage and IPFS peers.
+/// The hub on the VPS (its README): status key and Storage peer. It keeps no IPFS copies.
 pub const HUB_KEY: &str = "cabe0c212fee03b007dc0057a7e98c45340dfddbf37d4abd22b93d1125c8ba2d";
 pub const HUB_STORAGE_PEER: &str = "16Uiu2HAmKRRjSxvkNWM7iHbXuSANCrrLmopXWtQshSDuFQ4YqHuG";
 pub const HUB_STORAGE_ADDR: &str = "/ip4/128.140.55.128/tcp/8499";
-pub const HUB_IPFS_PEER: &str = "12D3KooWC6fTPiToL8mf6k5z8R1i6Rm1U9aGRvCfLuy9mdNiXfn4";
-pub const HUB_IPFS_ADDRS: &[&str] = &["/ip4/128.140.55.128/tcp/4001", "/ip4/128.140.55.128/udp/4001/quic-v1"];
 
 /// JCS (RFC 8785) for what v1 messages hold (strings, integers, arrays, objects): keys sorted,
 /// no whitespace. serde_json's map is ordered by key and its escaping is the minimal one JCS

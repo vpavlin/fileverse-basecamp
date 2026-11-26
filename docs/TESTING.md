@@ -22,6 +22,14 @@ setting, so Fileverse never resolves a name and needs no change when the hub swi
 - Basecamp t: name saved as `fileverse-test`, command shown; Workshop long published and
   kept with the name in the request, by the v1 hub (allow-listed key): v1 hubs accept v1.1
   requests. The LNS tier itself waits for the hub (jimmy-crib/vpavlin).
+- The hub's v1.1 went live the same day (jimmy-crib/vpavlin, github.com/vpavlin/logos-pin) on
+  Logos's public LEZ testnet v0.3, and without IPFS (Václav). Fileverse now sends Storage CIDs
+  only (no IPFS requests, no connection to a hub Kubo) and passes a partial result's reasons
+  through ("too large; ipfs not kept" is explained part by part). Basecamp t: the "AI test"
+  draft published and kept, `why` empty.
+- Not yet tested: a real LNS name on the v0.3 testnet with `logos-pin.key` set (the hub was
+  tested against a fake RPC holding one, and on the real testnet for unknown / entry-less
+  names).
 
 ## core 0.19.0 + view 0.23.0: the public cache (logos-pin) (2026-11-26)
 

@@ -97,7 +97,9 @@ blocks expire unless renewed (see Retention).
 - **Fetching:** `fetch()` while the publisher is online, newest requests first, retrying for 30
   minutes. A CID is **kept** only when a local `downloadToUrl` writes the whole file and its size
   matches the manifest's `datasetSize`; `exists()` is true as soon as the manifest arrives.
-- **IPFS:** the hub's Kubo pins the `ipfs` roots, so `fvbc://ipfs/` links resolve from it.
+- **IPFS: not kept** (Václav, 2026-11-26). The hub runs no Kubo: `ipfs` roots in a request are
+  skipped and the status `why` says `ipfs not kept`; a request with only `ipfs` roots is refused
+  with that reason. Clients send Logos Storage CIDs only.
 - **Retention:** the Storage node keeps blocks 30 days (default block TTL). A pin request for a
   CID already kept renews it; `until` says when it lapses. Clients renew what they still want.
 - **Findability:** a Storage node announces only about 500 CIDs in the DHT, and a manifest fetch
@@ -115,7 +117,7 @@ blocks expire unless renewed (see Retention).
   document local; nothing else changes.
 - One ed25519 key per installation, in the module's data directory (mode 600); its public key in
   Settings, to send to the hub's owner for the allow-list.
-- After Publish (and "Keep on the public cache" for older ones): send the request, keep this
+- After Publish (and "Keep on the public cache" for older ones): send the Storage CIDs, keep this
   device's Storage node connected to the hub until a hub-signed `kept` or `failed`, and show it on
   the document. Renew before `until`.
 - Readers `connect()` to the hub, then fetch as from any source: every block is hash-checked, so
@@ -142,10 +144,14 @@ being on the allow-list. v1 clients and hubs keep working: the field is optional
     fetching);
   - per name: 50 MB and 100 datasets per 30 days (charged on real size, renewals too),
     shared by every key the name lists. The numbers are the hub's to change.
-  - IPFS roots: only from allow-listed keys (Kubo gives no size before fetching).
 - **Refusals** (`state: "refused"`, `why`): `unknown key` (no name, not listed), `unknown name`,
   `name has no logos-pin.key`, `key not on name`, `too large`, `quota`, `name lookup failed`
-  (the network could not be asked; try again later).
+  (the network could not be asked; try again later); v1's `stale` and `too many CIDs`. Partial
+  results: `state: "kept"`, `kept` lists what was kept, and `why` joins the reasons for the rest
+  with `"; "` (e.g. `"too large; ipfs not kept"`).
+- **Live (2026-11-26):** Logos public LEZ testnet v0.3, RPC `https://testnet.lez.logos.co/`,
+  registry `38jEfVV1RCyMzu1FGbYcCn5FqxCxKyY58VgzjruAh2gq` (hub.json `lns.rpc` / `registry` /
+  `network`). Hub source and README: github.com/vpavlin/logos-pin.
 - **Network: a hub setting, never in the message.** The hub's config names the LEZ RPC URL and
   the LNS registry program ID, so it can move between Logos's public LEZ testnet and the LNS
   Bridge test network (or mainnet) without a client change. The hub's README says which one it

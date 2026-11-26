@@ -1908,23 +1908,14 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 let addrs: Vec<String> = ["announceAddresses", "addrs"].iter()
                     .filter_map(|k| info[*k].as_array())
                     .flatten().filter_map(|a| a.as_str().map(str::to_string)).collect();
-                // the IPFS copy: if this device's node runs, connect it to the hub's Kubo too
-                let ipfs_linked = me.node(Duration::from_secs(2)).is_some_and(|n| {
-                    pin::HUB_IPFS_ADDRS.iter().any(|a| Node::new(&n.api, Duration::from_secs(15)).swarm_connect(&format!("{a}/p2p/{}", pin::HUB_IPFS_PEER)).is_ok())
-                });
                 // 2. Delivery: listen for the answer first, then ask
                 me.set_progress(job, "Sending the request over Logos Delivery…".into());
                 let mut proxy = logos_rust_sdk::LogosModuleSDK::new().plugin("delivery_module");
                 let events = proxy.on("messageReceived").map_err(|e| format!("Logos Delivery: {e:?}"))?;
                 delivery_up(&proxy, pin::STATUS_TOPIC)?;
-                // Storage and IPFS in separate requests: the hub answers a request when every CID
-                // in it is done, and an IPFS node behind NAT may never be reachable for it
+                // Logos Storage only: the cache keeps no IPFS copies (Václav, 2026-11-26)
                 let mut ids: Vec<String> = vec![];
-                let mut ipfs_ids: Vec<String> = vec![];
-                let ipfs_wanted: &[String] = if ipfs_linked { &blocks } else { &[] };
-                let parts = pin::chunks(&storage, &[]).into_iter().map(|c| (false, c))
-                    .chain(pin::chunks(&[], ipfs_wanted).into_iter().map(|c| (true, c)));
-                for (is_ipfs, (sc, ic)) in parts {
+                for (sc, ic) in pin::chunks(&storage, &[]) {
                     let id = pin::new_id();
                     let req = pin::request(&key, "pin", &id, "fileverse", &sc, &ic, &peer, &addrs, now_ms(), name.as_deref());
                     let payload = json!({ "_bytes": b64::encode(req.to_string().as_bytes()) });
@@ -1934,21 +1925,13 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                         }
                         return Err(format!("Logos Delivery could not send the request ({e})"));
                     }
-                    if is_ipfs { ipfs_ids.push(id) } else { ids.push(id) }
+                    ids.push(id);
                 }
                 // 3. the hub's signed answers (relays repeat them: one per request and state)
                 me.set_progress(job, "Waiting for the public cache to copy it (while this Basecamp stays online)…".into());
                 let mut finals: HashMap<String, Value> = HashMap::new();
                 let t0 = Instant::now();
-                // done when every Storage request is answered (then a short grace for the IPFS ones)
-                let mut storage_done: Option<Instant> = None;
-                while t0.elapsed() < Duration::from_secs(35 * 60) {
-                    if storage_done.is_none() && ids.iter().all(|i| finals.contains_key(i)) {
-                        storage_done = Some(Instant::now());
-                    }
-                    if storage_done.is_some_and(|t| ipfs_ids.iter().all(|i| finals.contains_key(i)) || t.elapsed() > Duration::from_secs(60)) {
-                        break;
-                    }
+                while t0.elapsed() < Duration::from_secs(35 * 60) && !ids.iter().all(|i| finals.contains_key(i)) {
                     let Ok(ev) = events.receiver().recv_timeout(Duration::from_secs(1)) else { continue };
                     let Some((topic, bytes)) = delivery_message(&ev.data) else { continue };
                     if topic != pin::STATUS_TOPIC {
@@ -1956,7 +1939,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                     }
                     let Ok(msg) = serde_json::from_slice::<Value>(&bytes) else { continue };
                     let Some(id) = msg["id"].as_str() else { continue };
-                    if !ids.iter().chain(ipfs_ids.iter()).any(|i| i == id) || finals.contains_key(id) || !pin::status_from_hub(&msg) {
+                    if !ids.iter().any(|i| i == id) || finals.contains_key(id) || !pin::status_from_hub(&msg) {
                         continue;
                     }
                     match msg["state"].as_str().unwrap_or("") {
@@ -1971,15 +1954,7 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                     return Err("the public cache did not answer within 35 minutes".into());
                 }
                 let all: Vec<&Value> = ids.iter().filter_map(|i| finals.get(i)).collect();
-                let ipfs_state = if ipfs_ids.is_empty() {
-                    "not sent (this device's IPFS node is not running or can't reach the cache)"
-                } else if ipfs_ids.iter().all(|i| finals.get(i).is_some_and(|m| m["state"] == "kept")) {
-                    "kept"
-                } else if ipfs_ids.iter().any(|i| finals.contains_key(i)) {
-                    "not kept (the cache could not fetch from this device's IPFS node)"
-                } else {
-                    "still being fetched by the cache"
-                };
+
                 let first = |st: &str| all.iter().find(|m| m["state"] == st).map(|m| m["why"].as_str().unwrap_or("").to_string());
                 let mut kept: Vec<Value> = vec![];
                 for m in &all {
@@ -1991,12 +1966,15 @@ impl FileverseCoreModule for FileverseCoreModuleImpl {
                 } else if let Some(w) = first("failed") {
                     ("failed", w)
                 } else {
-                    ("kept", String::new())
+                    // kept, perhaps not all of it: the hub says why in the same status
+                    let mut whys: Vec<String> = all.iter().filter_map(|m| m["why"].as_str()).filter(|w| !w.is_empty()).map(str::to_string).collect();
+                    whys.dedup();
+                    ("kept", whys.join("; "))
                 };
-                Ok(json!({ "state": state, "why": why, "kept": kept, "until": until, "requests": ids.len() + ipfs_ids.len(), "ipfs": ipfs_state, "key": pin::public_hex(&key), "name": name }))
+                Ok(json!({ "state": state, "why": why, "kept": kept, "until": until, "requests": ids.len(), "key": pin::public_hex(&key), "name": name }))
             },
             move |s, v| {
-                let pinned = json!({ "state": v["state"], "why": v["why"], "until": v["until"], "ipfs": v["ipfs"], "at": now_ms(), "link": link2 });
+                let pinned = json!({ "state": v["state"], "why": v["why"], "until": v["until"], "at": now_ms(), "link": link2 });
                 if let Some(r) = s.recent.iter_mut().find(|r| r["url"].as_str() == Some(&link)) {
                     r["onHub"] = pinned.clone();
                 }

@@ -1257,7 +1257,8 @@ Item {
         if (!root.draft || !root.draft.published) return
         var id = root.draft.id
         root.startJob("pin_keep", [id], "pin", function (r) {
-            if (r.state === "kept") root.say("Kept on the public cache (Logos Storage) until " + new Date(r.until).toLocaleDateString() + (r.ipfs && r.ipfs !== "kept" ? ". IPFS copy: " + r.ipfs : ", IPFS copy too"))
+            if (r.state === "kept") root.say("Kept on the public cache until " + new Date(r.until).toLocaleDateString()
+                                             + (r.why ? ". Not all of it: " + root.pinWhy(r.why, r.name) : ""))
             else if (r.state === "refused") root.fail("The public cache refused it: " + root.pinWhy(r.why || "", r.name))
             else root.fail("The public cache could not copy it" + (r.why ? ": " + r.why : "") + ".")
             if (root.draft && root.draft.id === id) root.openDraft(id)
@@ -1265,7 +1266,14 @@ Item {
     }
     // the hub's refusal reasons (logos-pin v1.1), in plain words
     function pinWhy(why, name) {
+        // the hub joins several reasons with "; " (e.g. "too large; ipfs not kept")
+        var parts = String(why || "").split("; ").filter(function (w) { return w !== "" && w !== "ipfs not kept" })
+        if (parts.length > 1) return parts.map(function (w) { return root.pinWhy(w, name) }).join(" ")
+        why = parts.length ? parts[0] : ""
         var n = name ? "“" + name + "”" : "your LNS name"
+        if (why === "") return "no reason given."
+        if (/^stale/.test(why)) return "the request arrived too late. Check this computer's clock, then try again."
+        if (/^too many/.test(why)) return "the request named too many parts."
         if (/^unknown key/.test(why)) return "it does not know this Basecamp. Set your LNS name in Settings → Public cache, or send your key to the cache's owner."
         if (/^unknown name/.test(why)) return n + " is not registered on the network the cache uses."
         if (/no logos-pin.key/.test(why)) return n + " has no " + (root.pinEntry || "logos-pin.key") + " entry yet. Add it as shown in Settings → Public cache."
